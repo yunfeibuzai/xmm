@@ -1,19 +1,21 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本
-sh_ver="2.3.0"
+sh_ver="2.5.0"
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
 magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
+# 基础依赖自动补齐
 for cmd in wget curl tar unzip; do
     if ! command -v $cmd &>/dev/null; then
         apt-get update && apt-get install -y $cmd || yum install -y $cmd || apk add --no-cache $cmd
     fi
 done
 
+# 快捷命令注册
 register_shortcut() {
     mkdir -p /usr/local/bin
     if [[ "$0" != "/usr/local/bin/maimai_core.sh" && -f "$0" ]]; then
@@ -29,6 +31,7 @@ register_shortcut() {
 }
 register_shortcut
 
+# 状态显示
 show_status() {
     if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then
         echo -e "V2bX 状态: ${red}未安装或核心已损坏 (0字节/非二进制)${plain}"
@@ -46,13 +49,14 @@ show_status() {
     fi
 }
 
+# 豪华大菜单回归
 show_menu() {
     clear
     echo -e "${green}麦卖云 V2bX 后端全能王牌脚本${plain} (NAT/LXC 终极守护版)"
     echo -e "--- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---"
     echo -e "  ${green}0.${plain} 修改配置 (智能调用精简编辑器)"
     echo -e "————————————————"
-    echo -e "  ${green}1.${plain} 安装 V2bX (官方稳定核心重构)      ${green}2.${plain} 更新 V2bX"
+    echo -e "  ${green}1.${plain} 安装 V2bX (官方最新裸核心重构)      ${green}2.${plain} 更新 V2bX"
     echo -e "  ${green}3.${plain} 卸载 V2bX                        ${green}4.${plain} 启动 V2bX"
     echo -e "  ${green}5.${plain} 停止 V2bX                        ${green}6.${plain} 重启 V2bX (强杀顽固僵尸)"
     echo -e "  ${green}7.${plain} 查看 V2bX 状态                   ${green}8.${plain} 查看 V2bX 日志"
@@ -141,65 +145,47 @@ EOF
     echo -e "${green}[成功] 专属全协议配置文件已写入到 /etc/V2bX/config.json！${plain}"
 }
 
+# 🌟 全能高可用下载核心（完美融合了对官方新版裸二进制的支持与防404校验）
 self_install_core() {
     echo -e "${yellow}正在安全部署麦卖云原生全功能官方核心组件...${plain}"
     systemctl stop V2bX >/dev/null 2>&1
     mkdir -p /usr/local/V2bX /etc/V2bX
     rm -f /usr/local/V2bX/V2bX
     
-    # 🌟 智能多源高可用队列（涵盖官方裸二进制、Zip、以及你仓库的各个可能分支）
+    # 智能轮询队列：先撞官方最新的裸二进制核心，再走高可用国内加速镜像
     local urls=(
         "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-amd64"
-        "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-amd64.zip"
-        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX"
-        "https://raw.githubusercontent.com/yunfeibuzai/xmm/master/V2bX"
-        "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX"
+        "https://mirror.ghproxy.com/https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-amd64"
     )
     
     local success=false
 
     for url in "${urls[@]}"; do
-        echo -e "${yellow}正在尝试从源拉取核心: ${url}${plain}"
-        rm -f /tmp/V2bX.zip
-        
-        if [[ "$url" == *".zip" ]]; then
-            wget -O /tmp/V2bX.zip "$url" 2>/dev/null
-            if [[ -s /tmp/V2bX.zip ]]; then
-                mkdir -p /tmp/v2bx_extract
-                unzip -o /tmp/V2bX.zip -d /tmp/v2bx_extract/ >/dev/null 2>&1
-                if [[ -f /tmp/v2bx_extract/V2bX ]]; then
-                    mv -f /tmp/v2bx_extract/V2bX /usr/local/V2bX/V2bX
-                    mv -f /tmp/v2bx_extract/*.dat /usr/local/V2bX/ 2>/dev/null
-                elif [[ -f /tmp/v2bx_extract/V2bX-linux-amd64 ]]; then
-                    mv -f /tmp/v2bx_extract/V2bX-linux-amd64 /usr/local/V2bX/V2bX
-                fi
-                rm -rf /tmp/V2bX.zip /tmp/v2bx_extract
-            fi
-        else
-            wget -O /usr/local/V2bX/V2bX "$url" 2>/dev/null
-        fi
+        echo -e "${yellow}正在尝试从源拉取最新裸核心: ${url}${plain}"
+        wget -O /usr/local/V2bX/V2bX "$url" --timeout=15 2>/dev/null
 
-        # 🌟 核心防御：通过读取二进制文件头，强力拦截404网页伪装的垃圾文件
+        # 核心防空防御：读取前4个字节，确认为 Linux 可执行的 ELF 格式才放行
         if [[ -f /usr/local/V2bX/V2bX && -s /usr/local/V2bX/V2bX ]]; then
             if head -c 4 /usr/local/V2bX/V2bX | grep -q 'ELF'; then
                 chmod +x /usr/local/V2bX/V2bX
-                echo -e "${green}[成功] 核心文件验证为合法 ELF 二进制，架构匹配！${plain}"
+                echo -e "${green}[成功] 核心文件验证成功，架构匹配！${plain}"
                 success=true
                 break
             else
-                echo -e "${red}[警告] 检测到当前源拉取到了无效伪装文件（404网页），自动粉碎并切下一个源...${plain}"
+                echo -e "${red}[警告] 检测到非二进制伪装文件（404网页），正在自动切线...${plain}"
                 rm -f /usr/local/V2bX/V2bX
             fi
         fi
     done
 
     if [ "$success" = false ]; then
-        echo -e "${red}错误：所有核心分发源均已失效。请检查你 GitHub（yunfeibuzai/xmm）上的二进制文件名大小写是否一致！${plain}"
+        echo -e "${red}错误：所有官方核心分发源均拉取失败，请检查小鸡的 DNS 或海外网络状况！${plain}"
         return 1
     fi
     
-    wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
-    wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
+    # 高可用下载路由资源
+    wget -O /usr/local/V2bX/geoip.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null || wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
+    wget -O /usr/local/V2bX/geosite.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null || wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
 
     if [ ! -f /etc/V2bX/config.json ]; then make_config; fi
 
@@ -222,6 +208,7 @@ EOF
     echo -e "${green}V2bX 核心部署成功！服务已安全拉起。${plain}"
 }
 
+# 辅助豪华功能函数集
 install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
 update_shell() {
     curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
@@ -229,7 +216,7 @@ update_shell() {
 }
 open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F; echo -e "${green}已放行所有网络端口${plain}"; }
 run_clean_script() { free -h; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}清理挂机残留完成${plain}"; }
-run_network_test() { res=$(curl -o /dev/null -s -w '%{time_total}' --connect-timeout 4 "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"); echo -e "${green}连接耗时: ${res} 秒${plain}"; }
+run_network_test() { res=$(curl -o /dev/null -s -w '%{time_total}' --connect-timeout 4 "https://www.google.com"); echo -e "${green}连接谷歌耗时: ${res} 秒${plain}"; }
 run_deep_log_clean() { find /var/log -type f -regex '.*\.log' -or -regex '.*err' -or -regex '.*messages' | while read -r log; do cat /dev/null > "$log" 2>/dev/null; done; echo -e "${green}大日志清理完毕${plain}" ; }
 start_daemon() { cat << 'EOF' > /usr/local/bin/V2bX_daemon.sh
 #!/bin/bash
@@ -245,7 +232,7 @@ process_run() {
         4) start_V2bX ;; 5) stop_V2bX ;; 6) restart_V2bX ;; 7) check_status && echo -e "状态: ${green}正在运行${plain}" || echo -e "状态: ${red}未运行${plain}" ;;
         8) view_log ;; 9) systemctl enable V2bX ;; 10) systemctl disable V2bX ;; 11) install_bbr ;; 12) /usr/local/V2bX/V2bX version 2>/dev/null || echo "官方原生核心" ;;
         13) /usr/local/V2bX/V2bX x25519 ;; 14) update_shell ;; 15) make_config ;; 16) run_clean_script ;; 17) open_ports ;; 18) exit 0 ;;
-        19) run_network_test ;; 20) run_deep_log_clean ;; 21) start_daemon ;; 22) stop_daemon ;; 23) uname -r && awk '{print $1}' /proc/loadavg ;; 24) clear_v2bx_log ;;
+        19) run_network_test ;; 20) run_deep_log_clean ;; 21) start_daemon ;; 22) stop_daemon ;; 23) echo "内核信息: " && uname -r && echo "系统负载: " && awk '{print $1}' /proc/loadavg ;; 24) clear_v2bx_log ;;
         *) echo -e "${red}请输入正确的数字 [0-24]${plain}" ;;
     esac
 }
