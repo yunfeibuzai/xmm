@@ -145,10 +145,15 @@ EOF
     echo -e "${green}[成功] 专属全协议配置文件已写入到 /etc/V2bX/config.json！${plain}"
 }
 
-# 🌟 全能高可用下载核心（完美融合官方全新压缩包解压流程，并修复新版 server 启动参数命令）
+# 🌟 全能高可用下载核心（全面适配官方最新版 server 运行逻辑并进行强效锁闭防护）
 self_install_core() {
     echo -e "${yellow}正在安全部署麦卖云原生全功能官方核心组件...${plain}"
+    
+    # 安装时强制停掉守护，避免旧逻辑死锁干扰
+    crontab -l 2>/dev/null | grep -v "V2bX_daemon" | crontab -
     systemctl stop V2bX >/dev/null 2>&1
+    killall -9 V2bX >/dev/null 2>&1
+    
     mkdir -p /usr/local/V2bX /etc/V2bX
     rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
     
@@ -207,7 +212,7 @@ self_install_core() {
 
     if [ ! -f /etc/V2bX/config.json ]; then make_config; fi
 
-    # 🌟【已修复】这里将原先的 ExecStart=/usr/local/V2bX/V2bX 修改为符合新版核心规则的配合 server 命令启动
+    # 🌟【彻底重构】使用符合新版核心规则的配合 server 命令启动
     cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service
