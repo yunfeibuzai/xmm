@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端终极全能王牌脚本 (官方原生核心高可用版)
-sh_ver="1.7.0"
+# 麦卖云 V2bX 后端终极全能王牌脚本 (官方 Releases 原生核心稳定版)
+sh_ver="1.8.0"
 filepath=$(readlink -f "$0")
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
@@ -9,25 +9,40 @@ magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
+# 检查依赖项
+for cmd in wget curl tar unzip; do
+    if ! command -v $cmd &>/dev/null; then
+        if cat /etc/issue 2>/dev/null | grep -Eqi "alpine" || cat /proc/version 2>/dev/null | grep -Eqi "alpine"; then
+            apk add --no-cache $cmd
+        else
+            apt-get update && apt-get install -y $cmd || yum install -y $cmd
+        fi
+    fi
+done
+
 if cat /etc/issue 2>/dev/null | grep -Eqi "alpine" || cat /proc/version 2>/dev/null | grep -Eqi "alpine"; then
     release="alpine"
 else
     release="standard"
 fi
 
-# 智能注册全局快捷命令
+# 智能注册全局快捷命令 (支持 maimai、v2bx、V2bX)
 register_shortcut() {
     if [[ -f "$filepath" ]]; then
-        # 绑定 maimai 快捷键
+        # 绑定 maimai
         rm -f /usr/bin/maimai
         ln -sf "$filepath" /usr/bin/maimai
         chmod +x /usr/bin/maimai
         
-        # 绑定 v2bx 快捷键
-        rm -f /usr/bin/v2bx /usr/bin/V2bX
+        # 绑定 v2bx
+        rm -f /usr/bin/v2bx
         ln -sf "$filepath" /usr/bin/v2bx
-        ln -sf "$filepath" /usr/bin/V2bX
         chmod +x /usr/bin/v2bx
+
+        # 绑定 V2bX
+        rm -f /usr/bin/V2bX
+        ln -sf "$filepath" /usr/bin/V2bX
+        chmod +x /usr/bin/V2bX
     fi
 }
 register_shortcut
@@ -79,17 +94,17 @@ show_menu() {
     echo -e "  ${green}18.${plain} 彻 底 退 出 脚 本"
     echo -e "————————————————"
     echo -e "  ${magenta}[专 属 高 可 用 核 心 快 捷 功 能 群]${plain}"
-    echo -e "  ${green}19.${plain} 小 鸡 网 络 延 延迟 与 流 媒 体 丢 包 极 速 测 试"
+    echo -e "  ${green}19.${plain} 小 鸡 网 络 延 迟 与 流 媒 体 丢 包 极 速 测 试"
     echo -e "  ${green}20.${plain} 强 制 清 空 系 统 死 锁 大 日 志 与 残 留 垃 圾 缓 存"
-    echo -e "  ${green}21.${plain} 🟢 开 启  自 动化 守 护  (死 机 自 动 秒 拉 起)"
-    echo -e "  ${green}22.${plain} 🔴 关 闭  自 动化 守 护"
+    echo -e "  ${green}21.${plain} 🟢 开  启  自 动化 守 护  (死 机 自 动 秒 拉 起)"
+    echo -e "  ${green}22.${plain} 🔴 关  闭  自 动化 守 护"
     echo -e "  ${green}23.${plain} 🔍 查 看 当 前 小 鸡 所 有 硬 件 信 息 看 看 板"
     echo -e "————————————————"
     show_status
 }
 
 check_status() {
-    if [[ ! -f /usr/local/V2bX/V2bX ]]; then return 2; fi
+    if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then return 2; fi
     if [[ x"${release}" == x"alpine" ]]; then
         service V2bX status 2>&1 | grep -Eqi "started|running" || [ -f /run/V2bX.pid ] && return 0 || return 1
     else
@@ -203,30 +218,37 @@ self_install_core() {
     echo -e "${yellow}正在安全部署麦卖云原生全功能官方核心组件...${plain}"
     mkdir -p /usr/local/V2bX /etc/V2bX
     
-    # 🌟 强力修复：彻底借用 wyx2685 官方全协议多内核原生核心
     local arch=$(uname -m)
-    echo -e "${yellow}检测到当前小鸡架构为: ${arch}，正在从官方发布源拉取匹配核心...${plain}"
+    echo -e "${yellow}检测到当前小鸡架构为: ${arch}，正在从官方发布源下载完整安装包...${plain}"
     
+    rm -f /usr/local/V2bX/V2bX
+    
+    # 🌟 核心修复：直接对接 wyx2685 发布的 Releases 包，彻底规避 404
     if [[ "${arch}" == "x86_64" ]]; then
-        wget -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX-linux-amd64"
+        wget -O /tmp/V2bX.zip "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-amd64.zip"
     elif [[ "${arch}" == "aarch64" ]]; then
-        wget -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX-linux-arm64"
+        wget -O /tmp/V2bX.zip "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-arm64-v8a.zip"
     else
+        echo -e "${red}不支持的架构，尝试拉取通用包...${plain}"
+        wget -O /tmp/V2bX.zip "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-amd64.zip"
+    fi
+    
+    if [[ -f /tmp/V2bX.zip && -s /tmp/V2bX.zip ]]; then
+        echo -e "${green}官方发布包下载成功，正在解压并替换核心...${plain}"
+        unzip -o /tmp/V2bX.zip -d /usr/local/V2bX/
+        rm -f /tmp/V2bX.zip
+        chmod +x /usr/local/V2bX/V2bX
+    else
+        echo -e "${red}下载失败！可能是GitHub在当前小鸡的网络较差。正在尝试使用官方主脚本源兜底...${plain}"
         wget -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX"
+        chmod +x /usr/local/V2bX/V2bX
     fi
     
-    if [[ ! -s /usr/local/V2bX/V2bX ]]; then
-        echo -e "${red}错误：核心下载失败，请检查网络！尝试使用备用源下载...${plain}"
-        wget -O /usr/local/V2bX/V2bX "https://github.com/wyx2685/V2bX-script/raw/master/V2bX-linux-amd64"
-    fi
-    chmod +x /usr/local/V2bX/V2bX
-    
-    # 同步获取官方完整的路由规则包，彻底干掉0字节
-    echo -e "${yellow}正在从 wyx2685 官方实时同步获取最新 geoip 和 geosite 路由包...${plain}"
+    # 强制重新获取官方规则包，确保存储饱满
+    echo -e "${yellow}正在同步最新的规则数据库...${plain}"
     wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat"
     wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat"
     
-    # 配置文件判断逻辑
     if [ ! -f /etc/V2bX/config.json ]; then
         make_config
     else
@@ -236,7 +258,7 @@ self_install_core() {
         fi
     fi
 
-    # 自动注册并渲染开机守护程序
+    # 注册并自动启动
     if [[ x"${release}" != x"alpine" ]]; then
         cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
