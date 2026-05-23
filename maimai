@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端终极全能王牌脚本 (官方原生核心高可用版)
-sh_ver="1.6.0"
+sh_ver="1.7.0"
 filepath=$(readlink -f "$0")
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
@@ -70,7 +70,7 @@ show_menu() {
     echo -e "  ${green}7.${plain} 查 看  V2bX 状 态                 ${green}8.${plain} 查 看  V2bX 日 志"
     echo -e "————————————————"
     echo -e "  ${green}9.${plain} 设 置  V2bX 开 机 自 启             ${green}10.${plain} 取 消  V2bX 开机自启"
-    echo -e "  ${green}11.${plain} 🚀 豪 华 版  BBR 控 制 台            ${green}12.${plain} 查 看  V2bX 版 本"
+    echo -e "  ${green}11.${plain} 🚀 豪  华 版  BBR 控 制 台            ${green}12.${plain} 查 看  V2bX 版 本"
     echo -e "  ${green}13.${plain} 生 成  x25519 密 钥               ${green}14.${plain} 升 级  V2bX 维 护 脚 本"
     echo -e "  ${green}15.${plain} 交互式一键生成/重写配置文件"
     echo -e "————————————————"
@@ -79,7 +79,7 @@ show_menu() {
     echo -e "  ${green}18.${plain} 彻 底 退 出 脚 本"
     echo -e "————————————————"
     echo -e "  ${magenta}[专 属 高 可 用 核 心 快 捷 功 能 群]${plain}"
-    echo -e "  ${green}19.${plain} 小 鸡 网 络 延 迟 与 流 媒 体 丢 包 极 速 测 试"
+    echo -e "  ${green}19.${plain} 小 鸡 网 络 延 延迟 与 流 媒 体 丢 包 极 速 测 试"
     echo -e "  ${green}20.${plain} 强 制 清 空 系 统 死 锁 大 日 志 与 残 留 垃 圾 缓 存"
     echo -e "  ${green}21.${plain} 🟢 开 启  自 动化 守 护  (死 机 自 动 秒 拉 起)"
     echo -e "  ${green}22.${plain} 🔴 关 闭  自 动化 守 护"
@@ -200,26 +200,31 @@ EOF
 }
 
 self_install_core() {
-    echo -e "${yellow}正在安全部署麦卖云原生全功能核心组件...${plain}"
+    echo -e "${yellow}正在安全部署麦卖云原生全功能官方核心组件...${plain}"
     mkdir -p /usr/local/V2bX /etc/V2bX
     
-    # 🌟 修复0字节Bug：直接拉取 wyx2685 编译完成的完整多内核全协议主二进制程序
-    echo -e "${yellow}正在拉取全协议高可用主可执行核心...${plain}"
+    # 🌟 强力修复：彻底借用 wyx2685 官方全协议多内核原生核心
     local arch=$(uname -m)
+    echo -e "${yellow}检测到当前小鸡架构为: ${arch}，正在从官方发布源拉取匹配核心...${plain}"
+    
     if [[ "${arch}" == "x86_64" ]]; then
-        wget -N -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX-linux-amd64"
+        wget -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX-linux-amd64"
     elif [[ "${arch}" == "aarch64" ]]; then
-        wget -N -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX-linux-arm64"
+        wget -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX-linux-arm64"
     else
-        # 兼容备用源
-        wget -N -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX"
+        wget -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX"
+    fi
+    
+    if [[ ! -s /usr/local/V2bX/V2bX ]]; then
+        echo -e "${red}错误：核心下载失败，请检查网络！尝试使用备用源下载...${plain}"
+        wget -O /usr/local/V2bX/V2bX "https://github.com/wyx2685/V2bX-script/raw/master/V2bX-linux-amd64"
     fi
     chmod +x /usr/local/V2bX/V2bX
     
     # 同步获取官方完整的路由规则包，彻底干掉0字节
     echo -e "${yellow}正在从 wyx2685 官方实时同步获取最新 geoip 和 geosite 路由包...${plain}"
-    wget -N -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat"
-    wget -N -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat"
+    wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat"
+    wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat"
     
     # 配置文件判断逻辑
     if [ ! -f /etc/V2bX/config.json ]; then
@@ -352,7 +357,7 @@ process_run() {
         9) enable_V2bX ;;
         10) disable_V2bX ;;
         11) install_bbr ;;
-        12) /usr/local/V2bX/V2bX version 2>/dev/null || echo -e "${green}原生高可用内核${plain}" ;;
+        12) /usr/local/V2bX/V2bX version 2>/dev/null || echo -e "${green}官方原生核心${plain}" ;;
         13) /usr/local/V2bX/V2bX x25519 ;;
         14) update_shell ;;
         15) make_config ;;
