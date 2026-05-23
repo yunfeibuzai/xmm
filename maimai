@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端终极全能王牌脚本 (xmm 独立闭环 + 智能一键配置交互版)
-sh_ver="1.5.5"
+# 麦卖云 V2bX 后端终极全能王牌脚本 (官方原生核心高可用版)
+sh_ver="1.6.0"
 filepath=$(readlink -f "$0")
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
@@ -15,9 +15,26 @@ else
     release="standard"
 fi
 
+# 智能注册全局快捷命令
+register_shortcut() {
+    if [[ -f "$filepath" ]]; then
+        # 绑定 maimai 快捷键
+        rm -f /usr/bin/maimai
+        ln -sf "$filepath" /usr/bin/maimai
+        chmod +x /usr/bin/maimai
+        
+        # 绑定 v2bx 快捷键
+        rm -f /usr/bin/v2bx /usr/bin/V2bX
+        ln -sf "$filepath" /usr/bin/v2bx
+        ln -sf "$filepath" /usr/bin/V2bX
+        chmod +x /usr/bin/v2bx
+    fi
+}
+register_shortcut
+
 show_status() {
-    if [[ ! -f /usr/local/V2bX/V2bX ]]; then
-        echo -e "V2bX 状态: ${red}未安装${plain}"
+    if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then
+        echo -e "V2bX 状态: ${red}未安装或核心已损坏(0字节)${plain}"
         return
     fi
     if [[ x"${release}" == x"alpine" ]]; then
@@ -44,10 +61,10 @@ show_status() {
 show_menu() {
     clear
     echo -e "  ${green}麦 卖 云  V2bX 后 端 全 能 王 牌 脚 本${plain}  (NAT/LXC 终 极 守 护 版)"
-    echo -e "--- ${green}https://github.com/yunfeibuzai/-.${plain} ---"
+    echo -e "--- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---"
     echo -e "  ${green}0.${plain} 修 改 配 置  (智 能 调 用 精 简 编 辑 器)"
     echo -e "————————————————"
-    echo -e "  ${green}1.${plain} 安 装  V2bX (智能交互写配置)     ${green}2.${plain} 更 新  V2bX"
+    echo -e "  ${green}1.${plain} 安 装  V2bX (自动重构完整核心)    ${green}2.${plain} 更 新  V2bX"
     echo -e "  ${green}3.${plain} 卸 载  V2bX                      ${green}4.${plain} 启 动  V2bX"
     echo -e "  ${green}5.${plain} 停 止  V2bX                      ${green}6.${plain} 重 启  V2bX (强 杀 顽 固 僵 尸)"
     echo -e "  ${green}7.${plain} 查 看  V2bX 状 态                 ${green}8.${plain} 查 看  V2bX 日 志"
@@ -57,7 +74,7 @@ show_menu() {
     echo -e "  ${green}13.${plain} 生 成  x25519 密 钥               ${green}14.${plain} 升 级  V2bX 维 护 脚 本"
     echo -e "  ${green}15.${plain} 交互式一键生成/重写配置文件"
     echo -e "————————————————"
-    echo -e "  ${green}16.${plain} 麦 卖 云 小 鸡 体 检 与 残 留 挂 机 容 器 强 杀"
+    echo -e "  ${green}16.${plain} 麦 卖 云 小 鸡 体 检 与 残 留 挂机 容 器 强 杀"
     echo -e "  ${green}17.${plain} 放 行  VPS 的 所 有 网 络 端 口  (iptables 净化)"
     echo -e "  ${green}18.${plain} 彻 底 退 出 脚 本"
     echo -e "————————————————"
@@ -183,19 +200,28 @@ EOF
 }
 
 self_install_core() {
-    echo -e "${yellow}正在安全部署麦卖云自建专属核心组件...${plain}"
+    echo -e "${yellow}正在安全部署麦卖云原生全功能核心组件...${plain}"
     mkdir -p /usr/local/V2bX /etc/V2bX
     
-    # 1. 下载你自己在专属仓库里备份的二进制闭环核心
-    wget -N -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/yunfeibuzai/-./main/V2bX"
+    # 🌟 修复0字节Bug：直接拉取 wyx2685 编译完成的完整多内核全协议主二进制程序
+    echo -e "${yellow}正在拉取全协议高可用主可执行核心...${plain}"
+    local arch=$(uname -m)
+    if [[ "${arch}" == "x86_64" ]]; then
+        wget -N -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX-linux-amd64"
+    elif [[ "${arch}" == "aarch64" ]]; then
+        wget -N -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX-linux-arm64"
+    else
+        # 兼容备用源
+        wget -N -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX"
+    fi
     chmod +x /usr/local/V2bX/V2bX
     
-    # 🌟 2. 完美承接：直接从 wyx2685 官方最新发布里，强行把原生规则包给薅过来！
+    # 同步获取官方完整的路由规则包，彻底干掉0字节
     echo -e "${yellow}正在从 wyx2685 官方实时同步获取最新 geoip 和 geosite 路由包...${plain}"
     wget -N -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat"
     wget -N -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat"
     
-    # 3. 配置文件判断逻辑
+    # 配置文件判断逻辑
     if [ ! -f /etc/V2bX/config.json ]; then
         make_config
     else
@@ -205,7 +231,7 @@ self_install_core() {
         fi
     fi
 
-    # 4. 自动注册并渲染开机守护程序
+    # 自动注册并渲染开机守护程序
     if [[ x"${release}" != x"alpine" ]]; then
         cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
@@ -223,29 +249,20 @@ EOF
         systemctl daemon-reload
         systemctl enable V2bX
         systemctl restart V2bX
-    else
-        echo -e "${yellow}检测到 Alpine 系统，正在配置 OpenRC 服务...${plain}"
     fi
     echo -e "${green}V2bX 核心部署与配置文件处理圆满完成！已自动为您启动服务。${plain}"
 }
 
 install_bbr() {
-    echo -e "${yellow}正在强制物理清理可能盘踞在本地的旧版 BBR 垃圾残余...${plain}"
     rm -f tcp.sh tcp.sh.* bbr.sh bbr.sh.*
-    echo -e "${green}正在拉取全新豪华版 ylx.me BBR 黑科技网络加速控制台...${plain}"
     wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh"
-    if [ -f tcp.sh ]; then
-        chmod +x tcp.sh
-        clear
-        ./tcp.sh
-    else
-        echo -e "${red}错误：豪华版 BBR 脚本下载失败，请检查网络！${plain}"
-    fi
+    if [ -f tcp.sh ]; then chmod +x tcp.sh && clear && ./tcp.sh; fi
 }
 
 update_shell() {
     echo -e "${yellow}正在从您的专属仓库同步最新管理脚本...${plain}"
-    curl -o "$filepath" -Ls "https://raw.githubusercontent.com/yunfeibuzai/-./main/V2bX.sh" && chmod +x "$filepath"
+    curl -o "$filepath" -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && chmod +x "$filepath"
+    register_shortcut
     echo -e "${green}管理脚本升级成功，请重新运行脚本！${plain}"
     exit 0
 }
@@ -254,94 +271,39 @@ open_ports() {
     if command -v iptables &>/dev/null; then
         iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F
         echo -e "${green}已成功放行 VPS 的所有网络端口 (iptables)${plain}"
-    else
-        echo -e "${yellow}未检测到 iptables，跳过配置${plain}"
     fi
 }
 
 run_clean_script() {
-    echo -e "\n\033[1;33m========== [1] 物理内存总体概况 ] ==========\033[0m"
+    echo -e "\n\033[1;33m========== 物理内存总体概况 ==========\033[0m"
     free -h
-    
-    echo -e "\n\033[1;33m========== [2] 真实内存去向分类 ] ==========\033[0m"
-    f=$(awk '/MemFree/ {print $2}' /proc/meminfo)
-    c=$(awk '/^Cached/ {print $2}' /proc/meminfo)
-    b=$(awk '/Buffers/ {print $2}' /proc/meminfo)
-    s=$(awk '/Shmem:/ {print $2}/Shmem/ {print $2}' /proc/meminfo | head -n1)
-    l=$(awk '/Slab/ {print $2}' /proc/meminfo)
-    r=$(ps -o rss= 2>/dev/null | awk '{s+=$1} END {print s}' || ps -o rss 2>/dev/null | awk 'NR>1 {s+=$1} END {print s}')
-    
-    [ -z "$f" ] && f=0; [ -z "$c" ] && c=0; [ -z "$b" ] && b=0; [ -z "$s" ] && s=0; [ -z "$l" ] && l=0; [ -z "$r" ] && r=0
-    echo "1. 纯应用进程占用 (RSS):     $((r / 1024)) MiB"
-    echo "2. 共享内存/内存盘(tmpfs):   $((s / 1024)) MiB"
-    echo "3. 系统缓存 (Cache/Buffer):  $(((c + b) / 1024)) MiB"
-    echo "4. 内核自身占用 (Slab等):    $((l / 1024)) MiB"
-    echo "5. 空闲未分配 (Free):        $((f / 1024)) MiB"
-    
-    echo -e "\n\033[1;33m========== [3] 进程内存占用排行 ] ==========\033[0m"
-    (ps -o pid,rss,args 2>/dev/null || ps -o pid,rss,comm) | awk 'NR>1 {printf "%6d %9.1f MiB  ", $1, $2/1024; for(i=3;i<=NF;i++) printf "%s ", $i; printf "\n"}' | sort -k2 -rn | head -n 10
-    
-    echo -e "\n\033[1;31m========== [4] 恶意挖矿木马安全审计 ] ==========\033[0m"
-    echo -e "\033[1;32m[安全]\033[0m 未检测到明显的挖矿程序行为。系统环境安全。"
-    
-    echo -e "\n\033[1;35m========== [5] 挂机/带宽共享容器检测与强杀 ] ==========\033[0m"
-    if command -v docker >/dev/null 2>&1 && { systemctl is-active --quiet docker 2>/dev/null || rc-service docker status >/dev/null 2>&1 || docker info >/dev/null 2>&1; }; then
-        echo "Docker 正在运行，开始扫描挂机容器..."
+    echo -e "\n\033[1;35m========== 挂机/带宽共享容器检测与强杀 ==========\033[0m"
+    if command -v docker >/dev/null 2>&1; then
         bad_containers=$(docker ps -a --format "{{.ID}}\t{{.Names}}" 2>/dev/null | grep -E "pawns|honeygain|repocket|tm|traffmonetizer")
         if [ -n "$bad_containers" ]; then
-            echo -e "\n\033[1;31m[危险]\033[0m 检测到以下挂机容器，正在强制斩草除根..."
             echo "$bad_containers" | while read -r line; do
                 cid=$(echo "$line" | awk '{print $1}')
-                cname=$(echo "$line" | awk '{print $2}')
-                echo -n "正在强杀并删除容器 [$cname] ($cid)... "
-                docker rm -f "$cid" >/dev/null 2>&1 && echo -e "\033[1;32m[成功]\033[0m" || echo -e "\033[1;31m[失败]\033[0m"
+                docker rm -f "$cid" >/dev/null 2>&1
             done
-            echo "正在清理残留 of 无用数据卷..."
             docker volume prune -f >/dev/null 2>&1
-        else
-            echo -e "\n\033[1;32m[干净]\033[0m 未发现挂机容器。"
-        fi
-        docker_active=1
-    else
-        echo "[跳过] 当前服务器未安装或未启用 Docker 服务。"
-        docker_active=0
-    fi
-    
-    echo -e "\n\033[1;36m========== [6] 智能缓存与日志清理 ] ==========\033[0m"
-    if [ "$docker_active" -eq 1 ]; then
-        log_files=$(find /var/lib/docker/containers/ -name "*-json.log" 2>/dev/null)
-        if [ -n "$log_files" ]; then
-            for log in $log_files; do
-                size=$(du -h "$log" | awk '{print $1}')
-                cat /dev/null > "$log" 2>/dev/null && echo "已清空日志: $log ($size 已释放)"
-            done
         fi
     fi
-    printf "\n\033[1;32m>>> 最终清理优化后的内存概况：\033[0m\n"
+    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
     free -h
 }
 
 run_network_test() {
     clear
     echo -e "${yellow}========== 麦卖云小鸡网络丢包与延迟测试 ==========${plain}"
-    echo -n "1. 联通到你的 GitHub 仓库速度: "
-    res1=$(curl -o /dev/null -s -w '%{time_total}' --connect-timeout 4 "https://raw.githubusercontent.com/yunfeibuzai/-./main/V2bX.sh")
-    if [ $? -eq 0 ]; then echo -e "${green}${res1} 秒${plain}"; else echo -e "${red}超时断连${plain}"; fi
-    echo -n "2. 联通到基础网络 API 节点: "
-    res2=$(curl -o /dev/null -s -w '%{time_total}' --connect-timeout 4 "https://api.github.com")
-    if [ $? -eq 0 ]; then echo -e "${green}${res2} 秒${plain}"; else echo -e "${red}连接受限/超时${plain}"; fi
-    echo -e "${yellow}==================================================${plain}"
+    echo -n "1. 连接到你的 GitHub 仓库速度: "
+    res1=$(curl -o /dev/null -s -w '%{time_total}' --connect-timeout 4 "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai")
+    echo -e "${green}${res1} 秒${plain}"
 }
 
 run_deep_log_clean() {
-    clear
-    echo -e "${red}========== 强制爆破系统死锁大日志与垃圾缓存 ==========${plain}"
     find /var/log -type f -regex '.*\.log' -or -regex '.*err' -or -regex '.*messages' 2>/dev/null | while read -r logfile; do
-        cat /dev/null > "$logfile" 2>/dev/null && echo "已爆破释放系统日志: $logfile"
+        cat /dev/null > "$logfile" 2>/dev/null
     done
-    if [ "$release" != "alpine" ] && command -v journalctl &>/dev/null; then
-        journalctl --vacuum-size=10M >/dev/null 2>&1
-    fi
     sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
     echo -e "${green}[成功] 空间大爆破完成！${plain}"
 }
@@ -372,14 +334,7 @@ view_vps_info() {
     clear
     echo -e "${cyan}========== 麦卖云小鸡硬件环境全能看板 ==========${plain}"
     echo -n "系统内核: " && uname -r
-    echo -n "虚拟化架构: "
-    if command -v systemd-detect-virt &>/dev/null; then
-        systemd-detect-virt
-    else
-        if [ -d /proc/vz ]; then echo "OpenVZ"; elif grep -q lxc /proc/1/environ 2>/dev/null; then echo "LXC"; else echo "KVM/Other"; fi
-    fi
     echo -n "系统总负载: " && awk '{print $1,$2,$3}' /proc/loadavg
-    echo -e "${cyan}================================================${plain}"
 }
 
 process_run() {
@@ -397,7 +352,7 @@ process_run() {
         9) enable_V2bX ;;
         10) disable_V2bX ;;
         11) install_bbr ;;
-        12) /usr/local/V2bX/V2bX version 2>/dev/null || echo -e "${green}v114514.14版本${plain}" ;;
+        12) /usr/local/V2bX/V2bX version 2>/dev/null || echo -e "${green}原生高可用内核${plain}" ;;
         13) /usr/local/V2bX/V2bX x25519 ;;
         14) update_shell ;;
         15) make_config ;;
