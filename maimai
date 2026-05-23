@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本
-sh_ver="2.5.0"
+sh_ver="2.7.0"
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
 magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
@@ -43,16 +43,16 @@ show_status() {
         echo -e "V2bX 状态: ${red}未运行${plain}"
     fi
     if crontab -l 2>/dev/null | grep -q "V2bX_daemon"; then
-        echo -e "自动化守护: ${green}已开启 (秒级智能自愈)${plain}"
+        echo -e "自动化守护: ${green}开 (秒级智能自愈)${plain}"
     else
-        echo -e "自动化守护: ${red}已关闭${plain}"
+        echo -e "自动化守护: ${red}关${plain}"
     fi
 }
 
-# 豪华大菜单回归
+# 豪华大菜单
 show_menu() {
     clear
-    echo -e "${green}麦卖云 V2bX 后端全能王牌脚本${plain} (NAT/LXC 终极守护版)"
+    echo -e "${green}麦卖云 V2bX 后端全能王牌脚本${plain} (NAT/LXC 终极全功能版)"
     echo -e "--- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---"
     echo -e "  ${green}0.${plain} 修改配置 (智能调用精简编辑器)"
     echo -e "————————————————"
@@ -64,7 +64,7 @@ show_menu() {
     echo -e "  ${green}9.${plain} 设置 V2bX 开机自启               ${green}10.${plain} 取消 V2bX 开机自启"
     echo -e "  ${green}11.${plain} 🚀 豪华版 BBR 控制台              ${green}12.${plain} 查看 V2bX 版本"
     echo -e "  ${green}13.${plain} 生成 x25519 密钥                 ${green}14.${plain} 升级 V2bX 维护脚本"
-    echo -e "  ${green}15.${plain} 交互式一键生成/重写配置文件 (全协议大满贯)"
+    echo -e "  ${green}15.${plain} 交互式一键生成配置文件 (🌟真·大满贯证书向导)"
     echo -e "————————————————"
     echo -e "  ${green}16.${plain} 麦卖云小鸡体检与残留挂机容器强杀"
     echo -e "  ${green}17.${plain} 放行 VPS 的所有网络端口 (iptables净化)"
@@ -116,40 +116,118 @@ clear_v2bx_log() {
     if [ -f /var/log/messages ]; then
         sed -i '/V2bX/d' /var/log/messages
     fi
-    echo -e "${green}[成功] V2bX 独立运行日志已全部强刹清空！${plain}"
+    echo -e "${green}[成功] V2bX 运行日志已全部清空！${plain}"
 }
 
+# 🌟【豪华升级】真·大满贯全协议高级 TLS 证书交互式生成器
 make_config() {
     echo -e "\n${yellow}========== 智能节点配置向导 (大满贯全协议版) ==========${plain}"
     mkdir -p /etc/V2bX
-    read -rp "1. 请输入机场前端对接地址 (ApiHost): " api_host
-    read -rp "2. 请输入机场前端通讯密钥 (ApiKey): " api_key
-    read -rp "3. 请输入该节点在机场的真实ID (NodeID): " node_id
+    
+    # 防漏填校验
+    local api_host="" api_key="" node_id="" type_num="" node_type=""
+    while [[ -z "$api_host" ]]; do read -rp "1. 请输入机场前端对接地址 (ApiHost, 如 https://demo.com): " api_host; done
+    while [[ -z "$api_key" ]]; do read -rp "2. 请输入机场前端通讯密钥 (ApiKey): " api_key; done
+    while [[ -z "$node_id" || ! "$node_id" =~ ^[0-9]+$ ]]; do read -rp "3. 请输入该节点在机场的真实数字ID (NodeID): " node_id; done
     
     echo -e "4. 请选择对应的节点协议类型 (NodeType):"
     echo -e " [1] Shadowsocks\n [2] VMess\n [3] Trojan\n [4] Hysteria2\n [5] VLess\n [6] TUIC\n [7] SOCKS\n [8] Naive"
-    read -rp "请输入数字 [1-8]: " type_num
+    while [[ ! "$type_num" =~ ^[1-8]$ ]]; do read -rp "请输入数字 [1-8]: " type_num; done
+
     case "$type_num" in
         1) node_type="Shadowsocks" ;; 2) node_type="VMess" ;; 3) node_type="Trojan" ;; 4) node_type="Hysteria2" ;;
         5) node_type="VLess" ;; 6) node_type="TUIC" ;; 7) node_type="SOCKS" ;; 8) node_type="Naive" ;;
-        *) node_type="VLess" ;;
     esac
 
+    local config_addon=""
+    
+    # --- 逻辑分流一：针对 VLess 的 Reality 判定 ---
+    if [[ "$node_type" == "VLess" ]]; then
+        read -rp "检测到选用了 VLess 协议，是否启用 Reality 目标伪装黑科技？[y/n] (默认n): " is_reality
+        if [[ "$is_reality" == "y" || "$is_reality" == "Y" ]]; then
+            read -rp " -> 请输入 Reality 目标伪装域名 (Dest, 默认 www.microsoft.com:443): " r_dest
+            [[ -z "$r_dest" ]] && r_dest="www.microsoft.com:443"
+            read -rp " -> 请输入 Reality 客户端握手 SNI (ServerNames, 默认 www.microsoft.com): " r_sni
+            [[ -z "$r_sni" ]] && r_sni="www.microsoft.com"
+            
+            local p_key="填入你在机场后台生成的Reality私钥(PrivateKey)"
+            if [[ -f /usr/local/V2bX/V2bX ]]; then
+                p_key=$(/usr/local/V2bX/V2bX x25519 2>/dev/null | grep "Private" | awk '{print $3}')
+            fi
+            
+            config_addon=',
+      "EnableReality": true,
+      "RealitySettings": {
+        "Show": false,
+        "Dest": "'"${r_dest}"'",
+        "ProxyProtocol": 0,
+        "ServerNames": ["'"${r_sni}"'"],
+        "PrivateKey": "'"${p_key}"'",
+        "MinVersion": "1.3",
+        "MaxVersion": "1.3",
+        "CipherSuites": "",
+        "ShortIds": ["0123456789abcdef"]
+      }'
+            echo -e "${magenta}[提示] 已预配 Reality 结构！私钥若与前端面板不符，请稍后按0自行修改。${plain}"
+        fi
+    fi
+
+    # --- 逻辑分流二：针对 Trojan, Hy2, TUIC 以及普通 TLS 节点的证书路径判定 ---
+    # 如果是 Trojan、Hy2、TUIC，或者用户主动对 VMess/VLess 开启普通 TLS
+    local need_tls="false"
+    if [[ "$node_type" == "Trojan" || "$node_type" == "Hysteria2" || "$node_type" == "TUIC" ]]; then
+        need_tls="true"
+    elif [[ "$node_type" == "VMess" || ("$node_type" == "VLess" && "$is_reality" != "y" && "$is_reality" != "Y") ]]; then
+        read -rp "该 VMess/VLess 节点是否需要开启标准 TLS 证书加密？[y/n] (默认n): " is_tls
+        [[ "$is_tls" == "y" || "$is_tls" == "Y" ]] && need_tls="true"
+    fi
+
+    if [[ "$need_tls" == "true" ]]; then
+        echo -e "\n${cyan}--- TLS 证书配置引导 ---${plain}"
+        echo -e " [1] 机场前端面板自动申请并下发证书 (推荐：HTTP/DNS/自签全部在面板设好即可)"
+        echo -e " [2] 使用当前小鸡本地已有的证书文件 (手动指定路径)"
+        read -rp "请选择证书来源 [1-2, 默认1]: " cert_type
+        [[ -z "$cert_type" ]] && cert_type="1"
+        
+        if [[ "$cert_type" == "2" ]]; then
+            read -rp " -> 请输入小鸡本地证书 CRT 绝对路径 (如 /etc/V2bX/cert.crt): " local_crt
+            read -rp " -> 请输入小鸡本地证书 KEY 绝对路径 (如 /etc/V2bX/cert.key): " local_key
+            config_addon=',
+      "EnableTLS": true,
+      "CertConfig": {
+        "CertMode": "file",
+        "CertDomain": "你的节点绑定的域名.com",
+        "CertFile": "'"${local_crt}"'",
+        "KeyFile": "'"${local_key}"'"
+      }'
+            echo -e "${magenta}[提示] 已锁定小鸡本地证书文件。请确保路径及权限正确。${plain}"
+        else
+            config_addon=',
+      "EnableTLS": true,
+      "CertConfig": {
+        "CertMode": "http",
+        "CertDomain": "你的节点绑定的域名.com",
+        "Provider": "cloudflare",
+        "Email": "test@gmail.com"
+      }'
+            echo -e "${green}[提示] 已开启前端面板托管证书模式！面板上选 HTTP、DNS 或自签，小鸡将自动同步！${plain}"
+        fi
+    fi
+
+    # 格式规范构建
     cat << EOF > /etc/V2bX/config.json
 {
   "Log": { "Level": "info", "Output": "" },
   "Cores": [ { "Type": "sing", "Log": { "Level": "info", "Timestamp": true } } ],
-  "Nodes": [ { "Core": "sing", "ApiHost": "${api_host}", "ApiKey": "${api_key}", "NodeID": ${node_id}, "NodeType": "${node_type}", "Timeout": 30, "ListenIP": "0.0.0.0", "SendIP": "0.0.0.0", "SniffEnabled": true } ]
+  "Nodes": [ { "Core": "sing", "ApiHost": "${api_host}", "ApiKey": "${api_key}", "NodeID": ${node_id}, "NodeType": "${node_type}", "Timeout": 30, "ListenIP": "0.0.0.0", "SendIP": "0.0.0.0", "SniffEnabled": true${config_addon} } ]
 }
 EOF
-    echo -e "${green}[成功] 专属全协议配置文件已写入到 /etc/V2bX/config.json！${plain}"
+    echo -e "${green}[成功] 豪华大满贯配置文件已安全规范写入到 /etc/V2bX/config.json！${plain}"
 }
 
-# 🌟 全能高可用下载核心（全面适配官方最新版 server 运行逻辑并进行强效锁闭防护）
+# 下载核心
 self_install_core() {
     echo -e "${yellow}正在安全部署麦卖云原生全功能官方核心组件...${plain}"
-    
-    # 安装时强制停掉守护，避免旧逻辑死锁干扰
     crontab -l 2>/dev/null | grep -v "V2bX_daemon" | crontab -
     systemctl stop V2bX >/dev/null 2>&1
     killall -9 V2bX >/dev/null 2>&1
@@ -157,40 +235,30 @@ self_install_core() {
     mkdir -p /usr/local/V2bX /etc/V2bX
     rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
     
-    # 完美适配官方最新发布标准（下载 64 位通用压缩包）
     local urls=(
         "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-64.zip"
         "https://mirror.ghproxy.com/https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-64.zip"
     )
-    
     local success=false
 
     for url in "${urls[@]}"; do
         echo -e "${yellow}正在拉取官方压缩包: ${url}${plain}"
         local tmp_zip="/tmp/v2bx_tmp_${RANDOM}.zip"
         local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
-        
         wget -O "$tmp_zip" "$url" --timeout=20 2>/dev/null
         
         if [[ -f "$tmp_zip" && -s "$tmp_zip" ]]; then
-            # 静默解压
             mkdir -p "$tmp_dir"
             unzip -q -o "$tmp_zip" -d "$tmp_dir" >/dev/null 2>&1
-            
-            # 智能搜寻解压出的可执行核心
             local target_binary=""
-            if [[ -f "$tmp_dir/V2bX" ]]; then
-                target_binary="$tmp_dir/V2bX"
-            elif [[ -f "$tmp_dir/V2bX-linux-64" ]]; then
-                target_binary="$tmp_dir/V2bX-linux-64"
-            fi
+            [[ -f "$tmp_dir/V2bX" ]] && target_binary="$tmp_dir/V2bX"
+            [[ -f "$tmp_dir/V2bX-linux-64" ]] && target_binary="$tmp_dir/V2bX-linux-64"
             
-            # 安全防空：验证是不是真正的 ELF 二进制格式
             if [[ -n "$target_binary" && -f "$target_binary" ]]; then
                 if head -c 4 "$target_binary" | grep -q 'ELF'; then
                     mv -f "$target_binary" /usr/local/V2bX/V2bX
                     chmod +x /usr/local/V2bX/V2bX
-                    echo -e "${green}[成功] 核心文件由小鸡自主解压并成功通过 ELF 二进制强校验！${plain}"
+                    echo -e "${green}[成功] 核心文件由小鸡自主解压并通过 ELF 校验！${plain}"
                     success=true
                     rm -rf "$tmp_zip" "$tmp_dir"
                     break
@@ -198,21 +266,18 @@ self_install_core() {
             fi
         fi
         rm -rf "$tmp_zip" "$tmp_dir"
-        echo -e "${red}[警告] 当前压缩包源拉取或解压失败，正在自动切线下拉...${plain}"
     done
 
     if [ "$success" = false ]; then
-        echo -e "${red}错误：所有官方压缩包分发源均拉取失败，请检查小鸡的 DNS 或海外网络状况！${plain}"
+        echo -e "${red}错误：所有官方压缩包分发源均拉取失败！${plain}"
         return 1
     fi
     
-    # 部署路由规则数据库
     wget -O /usr/local/V2bX/geoip.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null || wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
     wget -O /usr/local/V2bX/geosite.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null || wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
 
     if [ ! -f /etc/V2bX/config.json ]; then make_config; fi
 
-    # 🌟【彻底重构】使用符合新版核心规则的配合 server 命令启动
     cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service
@@ -232,12 +297,9 @@ EOF
     echo -e "${green}V2bX 核心部署成功！服务已安全拉起。${plain}"
 }
 
-# 辅助豪华功能函数集
+# 辅助豪华功能
 install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
-update_shell() {
-    curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
-    register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0
-}
+update_shell() { curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0; }
 open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F; echo -e "${green}已放行所有网络端口${plain}"; }
 run_clean_script() { free -h; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}清理挂机残留完成${plain}"; }
 run_network_test() { res=$(curl -o /dev/null -s -w '%{time_total}' --connect-timeout 4 "https://www.google.com"); echo -e "${green}连接谷歌耗时: ${res} 秒${plain}"; }
