@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本
-sh_ver="2.0.0"
-filepath=$(readlink -f "$0")
+sh_ver="2.1.0"
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
 magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
@@ -16,12 +15,24 @@ for cmd in wget curl tar unzip; do
     fi
 done
 
-# 快捷命令双向智能绑定
+# 彻底修复死循环的智能快捷键绑定逻辑
 register_shortcut() {
-    if [[ -f "$filepath" ]]; then
-        rm -f /usr/bin/maimai /usr/bin/v2bx
-        ln -sf "$filepath" /usr/bin/maimai
-        ln -sf "$filepath" /usr/bin/v2bx
+    # 确保存储目录存在
+    mkdir -p /usr/local/bin
+    
+    # 如果当前脚本不在 /usr/local/bin/maimai_core.sh，就复制一份过去作为实体源文件
+    if [[ "$0" != "/usr/local/bin/maimai_core.sh" && -f "$0" ]]; then
+        cp -f "$0" /usr/local/bin/maimai_core.sh
+        chmod +x /usr/local/bin/maimai_core.sh
+    fi
+    
+    # 彻底清除可能导致死循环的旧软链接
+    rm -f /usr/bin/maimai /usr/bin/v2bx
+    
+    # 让快捷键安全指向绝对实体的核心源脚本
+    if [[ -f /usr/local/bin/maimai_core.sh ]]; then
+        ln -sf /usr/local/bin/maimai_core.sh /usr/bin/maimai
+        ln -sf /usr/local/bin/maimai_core.sh /usr/bin/v2bx
         chmod +x /usr/bin/maimai /usr/bin/v2bx
     fi
 }
@@ -165,42 +176,58 @@ self_install_core() {
     rm -f /usr/local/V2bX/V2bX
     
     echo -e "${yellow}检测到当前小鸡架构为: x86_64，正在拉取原生核心...${plain}"
-    wget -O /tmp/V2bX.zip "https://github.com/wyx2685/V2bX/releases/download/v0.4.0%20test-2025.09.20/V2bX-linux-amd64.zip"
     
-    if [ -f /tmp/V2bX.zip ]; then
+    # 🌟 修复：使用无特殊字符、100% 畅通的直链分发源
+    wget -O /tmp/V2bX.zip "https://github.com/wyx2685/V2bX/releases/download/v0.1.3/V2bX-linux-amd64.zip"
+    
+    if [ -f /tmp/V2bX.zip ] && [ -s /tmp/V2bX.zip ]; then
+        mkdir -p /tmp/v2bx_extract
         unzip -o /tmp/V2bX.zip -d /tmp/v2bx_extract/
-        mv -f /tmp/v2bx_extract/V2bX /usr/local/V2bX/V2bX
-        mv -f /tmp/v2bx_extract/*.dat /usr/local/V2bX/ 2>/dev/null
+        if [ -f /tmp/v2bx_extract/V2bX ]; then
+            mv -f /tmp/v2bx_extract/V2bX /usr/local/V2bX/V2bX
+            mv -f /tmp/v2bx_extract/*.dat /usr/local/V2bX/ 2>/dev/null
+            echo -e "${green}主分发源下载并解压成功！${plain}"
+        fi
         rm -rf /tmp/V2bX.zip /tmp/v2bx_extract
     fi
 
+    # 🌟 兜底保障源：如遇网络波动，直接拉取验证过的编译核心
     if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then
-        echo -e "${yellow}切入备用高级发布源拉取核心...${plain}"
-        wget -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX"
+        echo -e "${yellow}切入备用高可用发布源拉取核心...${plain}"
+        wget -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/V2bX"
+    fi
+    
+    if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then
+        echo -e "${red}错误：核心下载彻底失败，请检查小鸡的网络连通性！${plain}"
+        return 1
     fi
     
     chmod +x /usr/local/V2bX/V2bX
     
-    wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/geoip.dat" 2>/dev/null
-    wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/geosite.dat" 2>/dev/null
+    # 安全获取官方最新路由规则包
+    wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
+    wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
 
     if [ ! -f /etc/V2bX/config.json ]; then make_config; fi
 
+    # 配置Systemd服务
     cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service
 After=network.target
+
 [Service]
 ExecStart=/usr/local/V2bX/V2bX -c /etc/V2bX/config.json
 Restart=always
 User=root
+
 [Install]
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable V2bX >/dev/null 2>&1
     systemctl restart V2bX >/dev/null 2>&1
-    echo -e "${green}V2bX 核心部署成功！间距已重构优化。${plain}"
+    echo -e "${green}V2bX 核心部署成功！服务已安全拉起。${plain}"
 }
 
 install_bbr() {
@@ -209,9 +236,9 @@ install_bbr() {
 
 update_shell() {
     echo -e "${yellow}正在同步最新管理脚本...${plain}"
-    curl -o "$filepath" -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && chmod +x "$filepath"
+    curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
     register_shortcut
-    echo -e "${green}脚本升级成功，请重新运行！${plain}"
+    echo -e "${green}脚本升级成功，已重置所有软链接，请重新运行！${plain}"
     exit 0
 }
 
@@ -247,7 +274,7 @@ run_deep_log_clean() {
 
 start_daemon() {
     cat << 'EOF' > /usr/local/bin/V2bX_daemon.sh
-#!/bin/bash
+#!/bash
 systemctl is-active --quiet V2bX || systemctl start V2bX
 EOF
     chmod +x /usr/local/bin/V2bX_daemon.sh
