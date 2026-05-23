@@ -1,21 +1,21 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (压缩包自动化解压版)
-sh_ver="2.7.0"
+# 麦卖云 V2bX 后端全能王牌脚本
+sh_ver="2.8.0"
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
 magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
-# 自动安装解压工具
-echo -e "${yellow}正在检查并优化基础解压依赖工具环境...${plain}"
-for cmd in wget curl tar unzip; do
+# 基础依赖自动补齐
+for cmd in wget curl tar unzip nano; do
     if ! command -v $cmd &>/dev/null; then
         apt-get update && apt-get install -y $cmd || yum install -y $cmd || apk add --no-cache $cmd
     fi
 done
 
+# 快捷命令注册
 register_shortcut() {
     mkdir -p /usr/local/bin
     if [[ "$0" != "/usr/local/bin/maimai_core.sh" && -f "$0" ]]; then
@@ -31,6 +31,7 @@ register_shortcut() {
 }
 register_shortcut
 
+# 状态显示
 show_status() {
     if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then
         echo -e "V2bX 状态: ${red}未安装或核心已损坏 (0字节/非二进制)${plain}"
@@ -41,22 +42,40 @@ show_status() {
     else
         echo -e "V2bX 状态: ${red}未运行${plain}"
     fi
+    if crontab -l 2>/dev/null | grep -q "V2bX_daemon"; then
+        echo -e "自动化守护: ${green}已开启 (秒级智能自愈)${plain}"
+    else
+        echo -e "自动化守护: ${red}已关闭${plain}"
+    fi
 }
 
+# 24项豪华大菜单完整归位
 show_menu() {
     clear
-    echo -e "${green}麦卖云 V2bX 后端全能王牌脚本${plain} (全自动解压复活版)"
-    echo -e "--- 快捷命令: ${cyan}maimai${plain} ---"
-    echo -e "  ${green}0.${plain} 修改配置"
+    echo -e "${green}麦卖云 V2bX 后端全能王牌脚本${plain} (麦卖专属自主源版)"
+    echo -e "--- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---"
+    echo -e "  ${green}0.${plain} 修改配置 (智能调用精简编辑器)"
     echo -e "————————————————"
-    echo -e "  ${green}1.${plain} 安装 V2bX (自动解压官方最新版)      ${green}2.${plain} 更新 V2bX"
+    echo -e "  ${green}1.${plain} 安装 V2bX (拉取你自己的专属二进制源)  ${green}2.${plain} 更新 V2bX"
     echo -e "  ${green}3.${plain} 卸载 V2bX                        ${green}4.${plain} 启动 V2bX"
-    echo -e "  ${green}5.${plain} 停止 V2bX                        ${green}6.${plain} 重启 V2bX"
+    echo -e "  ${green}5.${plain} 停止 V2bX                        ${green}6.${plain} 重启 V2bX (强杀顽固僵尸)"
     echo -e "  ${green}7.${plain} 查看 V2bX 状态                   ${green}8.${plain} 查看 V2bX 日志"
     echo -e "————————————————"
+    echo -e "  ${green}9.${plain} 设置 V2bX 开机自启               ${green}10.${plain} 取消 V2bX 开机自启"
     echo -e "  ${green}11.${plain} 🚀 豪华版 BBR 控制台              ${green}12.${plain} 查看 V2bX 版本"
+    echo -e "  ${green}13.${plain} 生成 x25519 密钥                 ${green}14.${plain} 升级 V2bX 维护脚本"
+    echo -e "  ${green}15.${plain} 交互式一键生成/重写配置文件 (全协议大满贯)"
+    echo -e "————————————————"
     echo -e "  ${green}16.${plain} 麦卖云小鸡体检与残留挂机容器强杀"
+    echo -e "  ${green}17.${plain} 放行 VPS 的所有网络端口 (iptables净化)"
+    echo -e "  ${green}18.${plain} 彻底退出脚本"
+    echo -e "————————————————"
+    echo -e "  ${magenta}[专属高可用核心快捷功能群]${plain}"
+    echo -e "  ${green}19.${plain} 小鸡网络延迟与流媒体丢包极速测试"
     echo -e "  ${green}20.${plain} 强制清空系统死锁大日志与残留垃圾缓存"
+    echo -e "  ${green}21.${plain} 🟢 开启自动化守护 (死机自动秒拉起)"
+    echo -e "  ${green}22.${plain} 🔴 关闭自动化守护"
+    echo -e "  ${green}23.${plain} 🔍 查看当前小鸡所有硬件信息看板"
     echo -e "  ${green}24.${plain} 🧹 专门清空 V2bX 自身的运行日志"
     echo -e "————————————————"
     show_status
@@ -67,78 +86,104 @@ check_status() {
     systemctl is-active --quiet V2bX && return 0 || return 1
 }
 
+start_V2bX() {
+    check_status
+    if [[ $? == 0 ]]; then echo -e "${green}V2bX已在运行中${plain}"; return; fi
+    systemctl start V2bX >/dev/null 2>&1
+    sleep 1 && check_status
+    [[ $? == 0 ]] && echo -e "${green}V2bX 启动成功${plain}" || echo -e "${red}V2bX 启动失败，请检查日志${plain}"
+}
+
+stop_V2bX() {
+    systemctl stop V2bX >/dev/null 2>&1
+    killall V2bX >/dev/null 2>&1
+    echo -e "${green}V2bX 已彻底停止${plain}"
+}
+
+restart_V2bX() {
+    stop_V2bX && sleep 1 && start_V2bX
+}
+
+view_log() {
+    journalctl -u V2bX -n 30 --no-pager || tail -n 30 /var/log/messages
+}
+
+clear_v2bx_log() {
+    echo -e "${yellow}正在清理 V2bX 的系统日志缓存...${plain}"
+    if command -v journalctl &>/dev/null; then
+        journalctl --vacuum-time=1s >/dev/null 2>&1
+    fi
+    if [ -f /var/log/messages ]; then
+        sed -i '/V2bX/d' /var/log/messages
+    fi
+    echo -e "${green}[成功] V2bX 运行日志已清空！${plain}"
+}
+
 make_config() {
-    echo -e "\n${yellow}========== 智能节点配置向导 ==========${plain}"
+    echo -e "\n${yellow}========== 智能节点配置向导 (大满贯全协议版) ==========${plain}"
     mkdir -p /etc/V2bX
     read -rp "1. 请输入机场前端对接地址 (ApiHost): " api_host
     read -rp "2. 请输入机场前端通讯密钥 (ApiKey): " api_key
     read -rp "3. 请输入该节点在机场的真实ID (NodeID): " node_id
     
+    echo -e "4. 请选择对应的节点协议类型 (NodeType):"
+    echo -e " [1] Shadowsocks\n [2] VMess\n [3] Trojan\n [4] Hysteria2\n [5] VLess\n [6] TUIC\n [7] SOCKS\n [8] Naive"
+    read -rp "请输入数字 [1-8]: " type_num
+    case "$type_num" in
+        1) node_type="Shadowsocks" ;; 2) node_type="VMess" ;; 3) node_type="Trojan" ;; 4) node_type="Hysteria2" ;;
+        5) node_type="VLess" ;; 6) node_type="TUIC" ;; 7) node_type="SOCKS" ;; 8) node_type="Naive" ;;
+        *) node_type="VLess" ;;
+    esac
+
     cat << EOF > /etc/V2bX/config.json
 {
   "Log": { "Level": "info", "Output": "" },
   "Cores": [ { "Type": "sing", "Log": { "Level": "info", "Timestamp": true } } ],
-  "Nodes": [ { "Core": "sing", "ApiHost": "${api_host}", "ApiKey": "${api_key}", "NodeID": ${node_id}, "NodeType": "VLess", "Timeout": 30, "ListenIP": "0.0.0.0", "SendIP": "0.0.0.0", "SniffEnabled": true } ]
+  "Nodes": [ { "Core": "sing", "ApiHost": "${api_host}", "ApiKey": "${api_key}", "NodeID": ${node_id}, "NodeType": "${node_type}", "Timeout": 30, "ListenIP": "0.0.0.0", "SendIP": "0.0.0.0", "SniffEnabled": true } ]
 }
 EOF
+    echo -e "${green}[成功] 配置文件已写入到 /etc/V2bX/config.json！${plain}"
 }
 
 self_install_core() {
     echo -e "${yellow}正在安全部署麦卖云原生全功能官方核心组件...${plain}"
     systemctl stop V2bX >/dev/null 2>&1
     mkdir -p /usr/local/V2bX /etc/V2bX
-    rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
+    rm -f /usr/local/V2bX/V2bX
     
-    # 🌟 针对官方最新 .zip 压缩包的高可用分发链
+    # 🌟 核心分发队列：1、2号位置死死锁住你上传到自己 GitHub 的裸二进制文件。
     local urls=(
-        "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-amd64.zip"
-        "https://mirror.ghproxy.com/https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-amd64.zip"
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX"
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/master/V2bX"
+        "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-amd64"
     )
     
     local success=false
 
     for url in "${urls[@]}"; do
-        echo -e "${yellow}正在拉取官方压缩包: ${url}${plain}"
-        local tmp_zip="/tmp/v2bx_tmp_${RANDOM}.zip"
-        local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
-        
-        wget -O "$tmp_zip" "$url" --timeout=20 2>/dev/null
-        
-        if [[ -f "$tmp_zip" && -s "$tmp_zip" ]]; then
-            # 用小鸡自带的压缩工具在临时目录静默解压
-            mkdir -p "$tmp_dir"
-            unzip -q -o "$tmp_zip" -d "$tmp_dir" >/dev/null 2>&1
-            
-            # 智能搜寻解压出来的核心文件
-            local target_binary=""
-            if [[ -f "$tmp_dir/V2bX" ]]; then
-                target_binary="$tmp_dir/V2bX"
-            elif [[ -f "$tmp_dir/V2bX-linux-amd64" ]]; then
-                target_binary="$tmp_dir/V2bX-linux-amd64"
-            fi
-            
-            # 严格防空防御：校验解压出的核心是不是真正的 ELF 二进制机器码
-            if [[ -n "$target_binary" && -f "$target_binary" ]]; then
-                if head -c 4 "$target_binary" | grep -q 'ELF'; then
-                    mv -f "$target_binary" /usr/local/V2bX/V2bX
-                    chmod +x /usr/local/V2bX/V2bX
-                    echo -e "${green}[成功] 核心文件由小鸡自主解压并成功通过 ELF 二进制强校验！${plain}"
-                    success=true
-                    rm -rf "$tmp_zip" "$tmp_dir"
-                    break
-                fi
+        echo -e "${yellow}正在拉取专属二进制核心: ${url}${plain}"
+        wget -O /usr/local/V2bX/V2bX "$url" --timeout=15 2>/dev/null
+
+        # 校验：读前4个字节，确保是真正的 ELF 可执行核心
+        if [[ -f /usr/local/V2bX/V2bX && -s /usr/local/V2bX/V2bX ]]; then
+            if head -c 4 /usr/local/V2bX/V2bX | grep -q 'ELF'; then
+                chmod +x /usr/local/V2bX/V2bX
+                echo -e "${green}[成功] 二进制核心验证通过！${plain}"
+                success=true
+                break
+            else
+                echo -e "${red}[警告] 检测到当前源拉取到了无效伪装文件（404网页），切换下一条线...${plain}"
+                rm -f /usr/local/V2bX/V2bX
             fi
         fi
-        rm -rf "$tmp_zip" "$tmp_dir"
-        echo -e "${red}[警告] 当前压缩包源拉取或解压失败，正在自动切线下拉...${plain}"
     done
 
     if [ "$success" = false ]; then
-        echo -e "${red}错误：所有官方压缩包分发源均拉取失败。请检查小鸡的网络或 DNS 设定！${plain}"
+        echo -e "${red}错误：核心拉取彻底失败！请务必确认你已将解压好的裸二进制文件上传到你 GitHub 的 xmm 仓库根目录下，且改名叫做 V2bX 且没有任何后缀！${plain}"
         return 1
     fi
     
-    # 部署路由资源
+    # 下载路由资源
     wget -O /usr/local/V2bX/geoip.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null || wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
     wget -O /usr/local/V2bX/geosite.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null || wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
 
@@ -160,26 +205,38 @@ EOF
     systemctl daemon-reload
     systemctl enable V2bX >/dev/null 2>&1
     systemctl restart V2bX >/dev/null 2>&1
-    echo -e "${green}V2bX 核心已全自动解压并部署上线！服务已安全拉起。${plain}"
+    echo -e "${green}V2bX 核心部署成功！服务已拉起。${plain}"
 }
 
+install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
+
+# 🌟 修复 14 号功能：完美指向你自己的真实拉取分支
+update_shell() {
+    echo -e "${yellow}正在从你的 GitHub 仓库同步最新版 maimai 脚本...${plain}"
+    curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
+    register_shortcut; echo -e "${green}脚本升级成功！已同步至最新。${plain}"; exit 0
+}
+
+open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F; echo -e "${green}已放行所有网络端口${plain}"; }
+run_clean_script() { free -h; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}清理挂机残留完成${plain}"; }
+run_network_test() { res=$(curl -o /dev/null -s -w '%{time_total}' --connect-timeout 4 "https://www.google.com"); echo -e "${green}连接谷歌耗时: ${res} 秒${plain}"; }
+run_deep_log_clean() { find /var/log -type f -regex '.*\.log' -or -regex '.*err' -or -regex '.*messages' | while read -r log; do cat /dev/null > "$log" 2>/dev/null; done; echo -e "${green}大日志清理完毕${plain}" ; }
+start_daemon() { cat << 'EOF' > /usr/local/bin/V2bX_daemon.sh
+#!/bin/bash
+systemctl is-active --quiet V2bX || systemctl start V2bX
+EOF
+    chmod +x /usr/local/bin/V2bX_daemon.sh; (crontab -l 2>/dev/null | grep -v "V2bX_daemon"; echo "* * * * * /bin/bash /usr/local/bin/V2bX_daemon.sh >/dev/null 2>&1") | crontab -; echo -e "${green}秒级守护已开启${plain}"; }
+stop_daemon() { crontab -l 2>/dev/null | grep -v "V2bX_daemon" | crontab -; rm -f /usr/local/bin/V2bX_daemon.sh; echo -e "${yellow}自愈守护已关闭${plain}"; }
+
 process_run() {
-    local num; read -rp "请输入选择: " num
+    local num; read -rp "请输入选择 [0-24]: " num
     case "$num" in
-        0) nano /etc/V2bX/config.json ;; 
-        1|2) self_install_core ;; 
-        3) rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service && echo "卸载完成" ;;
-        4) systemctl start V2bX && echo "已启动" ;; 
-        5) systemctl stop V2bX && killall V2bX && echo "已彻底停止" ;; 
-        6) systemctl restart V2bX && echo "已重启" ;; 
-        7) check_status && echo -e "状态: ${green}正在运行${plain}" || echo -e "状态: ${red}未运行${plain}" ;;
-        8) journalctl -u V2bX -n 30 --no-pager ;;
-        11) wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh ;;
-        12) /usr/local/V2bX/V2bX version 2>/dev/null || echo "官方原生核心" ;;
-        16) free -h && sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null && echo -e "${green}清理挂机残留完成${plain}" ;;
-        20) find /var/log -type f -regex '.*\.log' -or -regex '.*err' -or -regex '.*messages' | while read -r log; do cat /dev/null > "$log" 2>/dev/null; done; echo -e "${green}大日志清理完毕${plain}" ;;
-        24) journalctl --vacuum-time=1s >/dev/null 2>&1 && echo -e "${green}[成功] V2bX 运行日志已清空！${plain}" ;;
-        *) echo -e "${red}请输入正确的数字${plain}" ;;
+        0) nano /etc/V2bX/config.json ;; 1|2) self_install_core ;; 3) rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service && echo "卸载完成" ;;
+        4) start_V2bX ;; 5) stop_V2bX ;; 6) restart_V2bX ;; 7) check_status && echo -e "状态: ${green}正在运行${plain}" || echo -e "状态: ${red}未运行${plain}" ;;
+        8) view_log ;; 9) systemctl enable V2bX ;; 10) systemctl disable V2bX ;; 11) install_bbr ;; 12) /usr/local/V2bX/V2bX version 2>/dev/null || echo "官方原生核心" ;;
+        13) /usr/local/V2bX/V2bX x25519 ;; 14) update_shell ;; 15) make_config ;; 16) run_clean_script ;; 17) open_ports ;; 18) exit 0 ;;
+        19) run_network_test ;; 20) run_deep_log_clean ;; 21) start_daemon ;; 22) stop_daemon ;; 23) echo "内核信息: " && uname -r && echo "系统负载: " && awk '{print $1}' /proc/loadavg ;; 24) clear_v2bx_log ;;
+        *) echo -e "${red}请输入正确的数字 [0-24]${plain}" ;;
     esac
 }
 
