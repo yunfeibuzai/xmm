@@ -8,7 +8,7 @@ magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
-# 基础依赖自动补齐 (确保有 unzip 工具用于解压官方新版压缩包)
+# 基础依赖自动补齐
 for cmd in wget curl tar unzip; do
     if ! command -v $cmd &>/dev/null; then
         apt-get update && apt-get install -y $cmd || yum install -y $cmd || apk add --no-cache $cmd
@@ -145,14 +145,14 @@ EOF
     echo -e "${green}[成功] 专属全协议配置文件已写入到 /etc/V2bX/config.json！${plain}"
 }
 
-# 🌟 全能高可用下载核心（完美融合官方全新 .zip 压缩包自动化解压流程与 ELF 强效校验）
+# 🌟 全能高可用下载核心（完美融合官方全新压缩包解压流程，并修复新版 server 启动参数命令）
 self_install_core() {
     echo -e "${yellow}正在安全部署麦卖云原生全功能官方核心组件...${plain}"
     systemctl stop V2bX >/dev/null 2>&1
     mkdir -p /usr/local/V2bX /etc/V2bX
     rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
     
-    # 已适配官方最新打包标准：拉取 AMD/Intel 64位通用的 V2bX-linux-64.zip
+    # 完美适配官方最新发布标准（下载 64 位通用压缩包）
     local urls=(
         "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-64.zip"
         "https://mirror.ghproxy.com/https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-linux-64.zip"
@@ -168,11 +168,11 @@ self_install_core() {
         wget -O "$tmp_zip" "$url" --timeout=20 2>/dev/null
         
         if [[ -f "$tmp_zip" && -s "$tmp_zip" ]]; then
-            # 建立临时目录静默解压
+            # 静默解压
             mkdir -p "$tmp_dir"
             unzip -q -o "$tmp_zip" -d "$tmp_dir" >/dev/null 2>&1
             
-            # 智能匹配解压出的核心可执行程序
+            # 智能搜寻解压出的可执行核心
             local target_binary=""
             if [[ -f "$tmp_dir/V2bX" ]]; then
                 target_binary="$tmp_dir/V2bX"
@@ -180,7 +180,7 @@ self_install_core() {
                 target_binary="$tmp_dir/V2bX-linux-64"
             fi
             
-            # 核心防空防御：读取前4个字节，确认为 Linux 专用的 ELF 格式二进制机器码才放行
+            # 安全防空：验证是不是真正的 ELF 二进制格式
             if [[ -n "$target_binary" && -f "$target_binary" ]]; then
                 if head -c 4 "$target_binary" | grep -q 'ELF'; then
                     mv -f "$target_binary" /usr/local/V2bX/V2bX
@@ -201,19 +201,20 @@ self_install_core() {
         return 1
     fi
     
-    # 高可用下载路由资源
+    # 部署路由规则数据库
     wget -O /usr/local/V2bX/geoip.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null || wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
     wget -O /usr/local/V2bX/geosite.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null || wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
 
     if [ ! -f /etc/V2bX/config.json ]; then make_config; fi
 
+    # 🌟【已修复】这里将原先的 ExecStart=/usr/local/V2bX/V2bX 修改为符合新版核心规则的配合 server 命令启动
     cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/V2bX/V2bX -c /etc/V2bX/config.json
+ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json
 Restart=always
 User=root
 
