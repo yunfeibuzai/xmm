@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端终极全能王牌脚本 (xmm 独立闭环 + 智能一键配置交互版)
-sh_ver="1.5.0"
+sh_ver="1.5.5"
 filepath=$(readlink -f "$0")
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
@@ -55,7 +55,7 @@ show_menu() {
     echo -e "  ${green}9.${plain} 设 置  V2bX 开 机 自 启             ${green}10.${plain} 取 消  V2bX 开机自启"
     echo -e "  ${green}11.${plain} 🚀 豪 华 版  BBR 控 制 台            ${green}12.${plain} 查 看  V2bX 版 本"
     echo -e "  ${green}13.${plain} 生 成  x25519 密 钥               ${green}14.${plain} 升 级  V2bX 维 护 脚 本"
-    echo -e "  ${green}15.${plain} 交互式一键生成/重写配置文件 (高仿wyx2685版)"
+    echo -e "  ${green}15.${plain} 交互式一键生成/重写配置文件"
     echo -e "————————————————"
     echo -e "  ${green}16.${plain} 麦 卖 云 小 鸡 体 检 与 残 留 挂 机 容 器 强 杀"
     echo -e "  ${green}17.${plain} 放 行  VPS 的 所 有 网 络 端 口  (iptables 净化)"
@@ -126,12 +126,10 @@ edit_config() {
     fi
 }
 
-# 🌟 核心新功能：高仿 wyx2685 的脚本一键智能写配置文件函数
 make_config() {
     echo -e "\n${yellow}========== 智能节点配置向导 (手机友好交互) ==========${plain}"
     mkdir -p /etc/V2bX
     
-    # 引导用户输入机场对接核心参数
     read -rp "1. 请输入机场前端对接地址 (ApiHost，例如 https://maimai.cloud): " api_host
     read -rp "2. 请输入机场前端通讯密钥 (ApiKey/Token): " api_key
     read -rp "3. 请输入该节点在机场的真实ID (NodeID): " node_id
@@ -151,7 +149,6 @@ make_config() {
     read -rp "请输入数字 [1-2] (默认1): " core_num
     [[ "$core_num" == "2" ]] && core_type="xray" || core_type="sing"
 
-    # 精准拼接，直接一键写出合法规范的配置文件
     cat << EOF > /etc/V2bX/config.json
 {
   "Log": {
@@ -193,11 +190,12 @@ self_install_core() {
     wget -N -O /usr/local/V2bX/V2bX "https://raw.githubusercontent.com/yunfeibuzai/-./main/V2bX"
     chmod +x /usr/local/V2bX/V2bX
     
-    # 2. 下载自己仓库的本地基础数据路由库
-    wget -N -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/yunfeibuzai/-./main/geoip.dat"
-    wget -N -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/yunfeibuzai/-./main/geosite.dat"
+    # 🌟 2. 完美承接：直接从 wyx2685 官方最新发布里，强行把原生规则包给薅过来！
+    echo -e "${yellow}正在从 wyx2685 官方实时同步获取最新 geoip 和 geosite 路由包...${plain}"
+    wget -N -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat"
+    wget -N -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat"
     
-    # 3. 如果本地没有配置，或者用户执行的是安装，直接调起 wyx2685 风格的交互引导
+    # 3. 配置文件判断逻辑
     if [ ! -f /etc/V2bX/config.json ]; then
         make_config
     else
@@ -298,7 +296,7 @@ run_clean_script() {
                 echo -n "正在强杀并删除容器 [$cname] ($cid)... "
                 docker rm -f "$cid" >/dev/null 2>&1 && echo -e "\033[1;32m[成功]\033[0m" || echo -e "\033[1;31m[失败]\033[0m"
             done
-            echo "正在清理残留的无用数据卷..."
+            echo "正在清理残留 of 无用数据卷..."
             docker volume prune -f >/dev/null 2>&1
         else
             echo -e "\n\033[1;32m[干净]\033[0m 未发现挂机容器。"
