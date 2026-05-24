@@ -1,0 +1,148 @@
+#!/bin/bash
+
+# 麦卖云 V2bX 节点独立配置向导引擎
+red='\033[31m'; green='\033[32m'; yellow='\033[33m'
+magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
+
+echo -e "\n${yellow}========== 精确对齐向导式配置创建逻辑 ==========${plain}"
+mkdir -p /etc/V2bX
+
+local saved_file="/etc/V2bX/.saved_creds"
+local default_host="https://example.com"
+local default_key=""
+
+if [[ -f "$saved_file" ]]; then
+    source "$saved_file" 2>/dev/null
+    default_host=${saved_host:-"https://example.com"}
+    default_key=${saved_key:-""}
+fi
+
+local api_host="" api_key="" core_num="" core_type="" node_id="" protocol_num="" node_type=""
+local reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token=""
+
+read -rp "请 输 入 机 场 网 址 (如 ${default_host})： " input_host
+api_host=${input_host:-"$default_host"}
+
+if [[ -n "$default_key" ]]; then
+    read -rp "请 输 入 面 板 对 接 API Key (直接回车使用已保存的Key): " input_key
+    api_key=${input_key:-"$default_key"}
+else
+    while [[ -z "$api_key" ]]; do
+        read -rp "请 输 入 面 板 对 接 API Key： " api_key
+    done
+fi
+
+read -rp "是 否 设 置 固 定 的 机 场 网 址 和 API Key？ (y/n) " save_yn
+if [[ "$save_yn" == "y" || "$save_yn" == "Y" ]]; then
+    echo "saved_host=\"$api_host\"" > "$saved_file"
+    echo "saved_key=\"$api_key\"" >> "$saved_file"
+    echo -e "${green}[提示] 凭证已固定锁定。${plain}"
+fi
+
+echo -e "请 选 择 节 点 核 心 类 型 ："
+echo -e "1. xray"
+echo -e "2. singbox"
+echo -e "3. hysteria2"
+while [[ ! "$core_num" =~ ^[1-3]$ ]]; do
+    read -rp "请 输 入 ： " core_num
+done
+case "$core_num" in 1) core_type="xray" ;; 2) core_type="sing" ;; 3) core_type="hysteria2" ;; esac
+
+while [[ -z "$node_id" ]]; do
+    read -rp "请 输 入 节 点 Node ID： " node_id
+done
+
+echo -e "请 选 择 节 点 传 输 协 议 ："
+echo -e "1. Shadowsocks"
+echo -e "2. Vless"
+echo -e "3. Vmess"
+echo -e "4. Hysteria"
+echo -e "5. Hysteria2"
+echo -e "6. Trojan"
+echo -e "7. Tuic"
+echo -e "8. AnyTLS"
+while [[ ! "$protocol_num" =~ ^[1-8]$ ]]; do
+    read -rp "请 输 入 ： " protocol_num
+done
+
+case "$protocol_num" in
+    1) node_type="shadowsocks" ;; 2) node_type="vless" ;; 3) node_type="vmess" ;; 4) node_type="hysteria" ;;
+    5) node_type="hysteria2" ;; 6) node_type="trojan" ;; 7) node_type="tuic" ;; 8) node_type="anytls" ;;
+esac
+
+local run_tls_flow=false
+if [[ "$protocol_num" == "1" || "$protocol_num" == "3" || "$protocol_num" == "6" || "$protocol_num" == "8" ]]; then
+    read -rp "请 选 择 是 否 进 行 TLS配 置 ？ (y/n)" tls_yn
+    [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
+elif [[ "$protocol_num" == "2" ]]; then
+    read -rp "请 选 择 是 否 为 reality节 点 ？ (y/n)" reality_yn
+    if [[ "$reality_yn" == "y" || "$reality_yn" == "Y" ]]; then
+        cert_mode="none"
+    else
+        read -rp "请 选 择 是 否 进 行 TLS配 置 ？ (y/n)" tls_yn
+        [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
+    fi
+elif [[ "$protocol_num" == "4" || "$protocol_num" == "5" || "$protocol_num" == "7" ]]; then
+    run_tls_flow=true
+fi
+
+if [ "$run_tls_flow" = true ]; then
+    echo -e "请 选 择 证 书 申 请 模 式 ："
+    echo -e "1. http模 式 自 动 申 请 ， 节 点 域 名 已 正 确 解 析"
+    echo -e "2. dns模 式 自 动 申 请 ， 需 填 入 正 确 域名 服务 商 API参 数"
+    echo -e "3. self模 式 ， 自 签 证 书 或 提 供 已 有 证 书 文 件"
+    while [[ ! "$cert_mode_num" =~ ^[1-3]$ ]]; do
+        read -rp "请 输 入 ： " cert_mode_num
+    done
+
+    if [[ "$cert_mode_num" == "1" || "$cert_mode_num" == "2" ]]; then
+        while [[ -z "$cert_domain" ]]; do
+            read -rp "请输入证书申请域名 (如 domain.com): " cert_domain
+        done
+        if [[ "$cert_mode_num" == "1" ]]; then
+            cert_mode="http"
+        else
+            cert_mode="dns"
+            while [[ -z "$cf_token" ]]; do
+                read -rp "CLOUDFLARE_DNS_API_TOKEN: 请 输入 你的 真实 CF_Token_ 粘贴 在 这里: " cf_token
+            done
+        fi
+    elif [[ "$cert_mode_num" == "3" ]]; then
+        cert_mode="self"
+    fi
+fi
+
+local cert_block=""
+if [[ "$cert_mode" == "dns" ]]; then
+    cert_block='{ "CertMode": "dns", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com", "Provider": "cloudflare", "DNSEnv": { "CLOUDFLARE_DNS_API_TOKEN": "'"${cf_token}"'" } }'
+elif [[ "$cert_mode" == "http" ]]; then
+    cert_block='{ "CertMode": "http", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com" }'
+elif [[ "$cert_mode" == "self" ]]; then
+    cert_block='{ "CertMode": "self", "RejectUnknownSni": false, "CertDomain": "cf.babymonster.cc.cd", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com" }'
+else
+    cert_block='{ "CertMode": "none" }'
+fi
+
+if [[ ! -f /etc/V2bX/sing_origin.json ]]; then
+    cat << 'EOF' > /etc/V2bX/sing_origin.json
+{ "outbounds": [ { "type": "direct", "tag": "direct" } ] }
+EOF
+fi
+
+cat << EOF > /etc/V2bX/config.json
+{
+"Log": { "Level": "none", "Output": "" },
+"Cores": [{
+"Type": "${core_type}",
+"Log": { "Level": "error", "Timestamp": true },
+"NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 },
+"OriginalPath": "/etc/V2bX/sing_origin.json"
+}],
+"Nodes": [{
+"Core": "${core_type}", "ApiHost": "${api_host}", "ApiKey": "${api_key}", "NodeID": ${node_id}, "NodeType": "${node_type}",
+"Timeout": 30, "ListenIP": "::", "SendIP": "0.0.0.0", "Port": 20026, "DeviceOnlineMinTraffic": 200, "MinReportTraffic": 0,
+"TCPFastOpen": true, "SniffEnabled": true, "CertConfig": ${cert_block}
+}]
+}
+EOF
+echo -e "${green}[成功] 1:1 净版模板已精准写入 /etc/V2bX/config.json${plain}"
