@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (官方原生源码缝合版)
-sh_ver="3.5.0"
+# 麦卖云 V2bX 后端全能王牌脚本 (麦卖自主源绝对优先版)
+sh_ver="3.6.0"
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
 magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
-# 基础依赖自动补齐
+# 基础依赖自动补齐 (加固 jq 与 unzip 用于高精度解析与解压)
 for cmd in wget curl tar unzip jq; do
     if ! command -v $cmd &>/dev/null; then
         apt-get update && apt-get install -y $cmd || yum install -y $cmd || apk add --no-cache $cmd
@@ -52,11 +52,11 @@ show_status() {
 # 豪华大菜单
 show_menu() {
     clear
-    echo -e "${green}麦卖云 V2bX 后端全能王牌脚本${plain} (官方原生源码缝合版)"
+    echo -e "${green}麦卖云 V2bX 后端全能王牌脚本${plain} (麦卖自主源绝对优先版)"
     echo -e "--- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---"
     echo -e "  ${green}0.${plain} 修改配置 (智能调用精简编辑器)"
     echo -e "————————————————"
-    echo -e "  ${green}1.${plain} 安装 V2bX (缝合 Yuzuki616 官方源码)   ${green}2.${plain} 更新 V2bX"
+    echo -e "  ${green}1.${plain} 安装 V2bX (优先拉取麦卖云自主资产)   ${green}2.${plain} 更新 V2bX"
     echo -e "  ${green}3.${plain} 卸载 V2bX                        ${green}4.${plain} 启动 V2bX"
     echo -e "  ${green}5.${plain} 停止 V2bX                        ${green}6.${plain} 重启 V2bX (强杀顽固僵尸)"
     echo -e "  ${green}7.${plain} 查看 V2bX 状态                   ${green}8.${plain} 查看 V2bX 日志"
@@ -119,7 +119,7 @@ clear_v2bx_log() {
     echo -e "${green}[成功] V2bX 运行日志已全部清空！${plain}"
 }
 
-# 🌟【大满贯全协议配置生成向导】
+# 【大满贯全协议配置生成向导】
 make_config() {
     echo -e "\n${yellow}========== 智能节点配置向导 (大满贯全协议版) ==========${plain}"
     mkdir -p /etc/V2bX
@@ -201,9 +201,9 @@ EOF
     echo -e "${green}[成功] 配置文件已安全写入 /etc/V2bX/config.json！${plain}"
 }
 
-# 🌟【核心缝合手术】完美复刻 Yuzuki616/V2bX-script 官方脚本的核心下载安装逻辑
+# 🌟【主线大重构】麦卖专属自主源高可用分发引擎
 self_install_core() {
-    echo -e "${yellow}正在安全部署麦卖云原生全功能官方核心组件...${plain}"
+    echo -e "${yellow}正在安全部署麦卖云全功能核心组件...${plain}"
     crontab -l 2>/dev/null | grep -v "V2bX_daemon" | crontab -
     systemctl stop V2bX >/dev/null 2>&1
     killall -9 V2bX >/dev/null 2>&1
@@ -211,72 +211,80 @@ self_install_core() {
     mkdir -p /usr/local/V2bX /etc/V2bX
     rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
 
-    # 1. 缝合官方源码：智能检测小鸡系统架构 (x86_64 / arm64 等)
+    # 1. 智能识别小鸡架构
     local arch=$(uname -m)
     case "${arch}" in
         x86_64 | amd64) arch="linux-64" ;;
         arm64 | aarch64) arch="linux-arm64-v8a" ;;
-        *) arch="linux-64" && echo -e "${yellow}未识别的架构，默认判定为 linux-64${plain}" ;;
+        *) arch="linux-64" ;;
     esac
 
-    # 2. 缝合官方源码：智能抓取 wyx2685 仓库的最新最新 Tag 版本号
-    echo -e "${yellow}正在检测官方最新资产包版本号...${plain}"
+    # 2. 获取官方最新 Tag 用于高可用兜底
     local last_version=$(curl -Ls "https://api.github.com/repos/wyx2685/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ -z "$last_version" ]]; then
-        last_version="v0.3.9" # 抓取失败时的硬核版本兜底
-        echo -e "${yellow}抓取最新版本号超时，启用高可用稳定版本兜底: ${last_version}${plain}"
-    fi
+    [[ -z "$last_version" ]] && last_version="v0.3.9"
 
-    # 3. 缝合官方源码：动态构建带版本号的精准分发 URL 矩阵
+    # 3. 核心高可用阶梯队列 (Tier 0 锁死你自己的 GitHub 资产)
     local urls=(
-        "https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
-        "https://mirror.ghproxy.com/https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
-        "https://github.com/wyx2685/V2bX/releases/latest/download/V2bX-${arch}.zip"
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX"                          # 麦卖云主仓裸二进制
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX-linux-64.zip"              # 麦卖云主仓压缩包
+        "https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"    # 官方原版镜像A
+        "https://mirror.ghproxy.com/https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip" # 官方原版镜像B
     )
     
     local success=false
     for url in "${urls[@]}"; do
-        echo -e "${yellow}正在从以下节点拉取官方原生资产包: ${url}${plain}"
-        local tmp_zip="/tmp/v2bx_tmp_${RANDOM}.zip"
-        local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
-        wget -O "$tmp_zip" "$url" --timeout=20 2>/dev/null
+        echo -e "${yellow}正在对分发队列进行安全拉取: ${url}${plain}"
+        local tmp_file="/tmp/v2bx_tmp_${RANDOM}"
+        wget -O "$tmp_file" "$url" --timeout=15 2>/dev/null
         
-        if [[ -f "$tmp_zip" && -s "$tmp_zip" ]]; then
-            mkdir -p "$tmp_dir"
-            unzip -q -o "$tmp_zip" -d "$tmp_dir" >/dev/null 2>&1
-            
-            local target_binary=""
-            [[ -f "$tmp_dir/V2bX" ]] && target_binary="$tmp_dir/V2bX"
-            [[ -f "$tmp_dir/V2bX-${arch}" ]] && target_binary="$tmp_dir/V2bX-${arch}"
-            [[ -f "$tmp_dir/V2bX-linux-64" ]] && target_binary="$tmp_dir/V2bX-linux-64"
-            
-            if [[ -n "$target_binary" && -f "$target_binary" ]]; then
-                if head -c 4 "$target_binary" | grep -q 'ELF'; then
-                    mv -f "$target_binary" /usr/local/V2bX/V2bX
-                    chmod +x /usr/local/V2bX/V2bX
-                    echo -e "${green}[成功] 核心文件由小鸡成功解压并通过二进制 ELF 安全校验！${plain}"
-                    success=true
-                    rm -rf "$tmp_zip" "$tmp_dir"
-                    break
+        if [[ -f "$tmp_file" && -s "$tmp_file" ]]; then
+            # 区分处理：如果是 zip 压缩包
+            if head -c 4 "$tmp_file" | grep -q 'PK'; then
+                local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
+                mkdir -p "$tmp_dir"
+                unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1
+                
+                local target_binary=""
+                [[ -f "$tmp_dir/V2bX" ]] && target_binary="$tmp_dir/V2bX"
+                [[ -f "$tmp_dir/V2bX-${arch}" ]] && target_binary="$tmp_dir/V2bX-${arch}"
+                [[ -f "$tmp_dir/V2bX-linux-64" ]] && target_binary="$tmp_dir/V2bX-linux-64"
+                
+                if [[ -n "$target_binary" && -f "$target_binary" ]]; then
+                    if head -c 4 "$target_binary" | grep -q 'ELF'; then
+                        mv -f "$target_binary" /usr/local/V2bX/V2bX
+                        success=true
+                    fi
                 fi
+                rm -rf "$tmp_dir"
+            # 如果下载下来直接就是解压好的 ELF 裸二进制
+            elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
+                mv -f "$tmp_file" /usr/local/V2bX/V2bX
+                success=true
             fi
         fi
-        rm -rf "$tmp_zip" "$tmp_dir"
-        echo -e "${red}[警告] 当前源拉取或解压失败，正在自动切线下拉...${plain}"
+        rm -f "$tmp_file"
+        
+        if [ "$success" = true ]; then
+            chmod +x /usr/local/V2bX/V2bX
+            echo -e "${green}[成功] 核心已成功从当前高优先级队列部署并完成 ELF 校验！${plain}"
+            break
+        else
+            echo -e "${red}[注意] 当前资源未通过验证，自动轮询下一顺位备份线...${plain}"
+        fi
     done
 
     if [ "$success" = false ]; then
-        echo -e "${red}错误：缝合版官方压缩包分发源全部拉取失败！请检查小鸡 DNS！${plain}"
+        echo -e "${red}错误：所有分发队列均拉取失败，请检查小鸡外部网络连通性！${plain}"
         return 1
     fi
     
-    # 路由资源同步
+    # 动态同步路由资源
     wget -O /usr/local/V2bX/geoip.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null || wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
     wget -O /usr/local/V2bX/geosite.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null || wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
 
     if [ ! -f /etc/V2bX/config.json ]; then make_config; fi
 
-    # 完美的 systemd 守护进程注册
+    # 注册守护服务
     cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service
@@ -296,7 +304,7 @@ EOF
     echo -e "${green}V2bX 核心部署成功！服务已安全拉起。${plain}"
 }
 
-# 辅助豪华功能函数保持不变
+# 辅助豪华功能函数保持原样
 install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
 update_shell() { curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0; }
 open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F; echo -e "${green}已放行所有网络端口${plain}"; }
