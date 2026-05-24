@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (1:1 纯净定制模板版)
-sh_ver="3.7.3"
+# 麦卖云 V2bX 后端全能王牌脚本 (防泄密纯净交互版)
+sh_ver="3.7.4"
 
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
 magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
@@ -31,12 +31,13 @@ register_shortcut() {
 }
 register_shortcut
 
+# 状态看板颜色完全重构
 show_status() {
     if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then
         echo -e "V2bX 状态: ${red}未安装或核心损坏${plain}"
         return
     fi
-    systemctl is-active --quiet V2bX 2>/dev/null && echo -e "V2bX 状态: ${green}已运行${plain}" || echo -e "V2bX 状态: ${red}未运行${plain}"
+    systemctl is-active --quiet V2bX 2>/dev/null && echo -e "V2bX 状态: ${green}已运行${plain}" || echo -e "V2bX 状态: ${yellow}未启动${plain}"
     crontab -l 2>/dev/null | grep -q "V2bX_daemon" && echo -e "自动化守护: ${green}开${plain}" || echo -e "自动化守护: ${red}关${plain}"
 }
 
@@ -58,7 +59,7 @@ show_menu() {
     echo -e "  ${green}10.${plain} 取消开机自启动"
     echo -e "--------------------------------------------"
     echo -e "${magenta}[🌟 核心战力配置向导群]${plain}"
-    echo -e "  ${green}11.${plain} 🌟 1:1 纯净格式定制配置文件生成"
+    echo -e "  ${green}11.${plain} 🌟 纯净向导式配置创建逻辑"
     echo -e "  ${green}12.${plain} 📁 深度配置：一键生成外置高级组件"
     echo -e "  ${green}13.${plain} 生成 X25519 密钥 (Reality 必备)"
     echo -e "  ${green}14.${plain} 升级本维护脚本"
@@ -76,37 +77,170 @@ show_menu() {
     show_status
 }
 
-# ==================== 【11号功能：1:1 精确剔除杂项复刻版】 ====================
+# ==================== 【11号功能：精确对齐全新定制配置向导】 ====================
 make_full_config() {
-    echo -e "\n${yellow}========== 极简定制版配置生成器 (1:1 精确复刻) ==========${plain}"
+    echo -e "\n${yellow}========== 精确对齐向导式配置创建逻辑 ==========${plain}"
     mkdir -p /etc/V2bX
     
-    local api_host="" api_key="" node_id="" node_type="" node_port="" cert_domain="" cf_token=""
+    local saved_file="/etc/V2bX/.saved_creds"
+    local default_host="https://example.com"
+    local default_key=""
     
-    read -rp "1. 面板 API 对接地址 (默认: https://maimaiyun.qzz.io): " input_host
-    api_host=${input_host:-"https://maimaiyun.qzz.io"}
+    if [[ -f "$saved_file" ]]; then
+        source "$saved_file" 2>/dev/null
+        default_host=${saved_host:-"https://example.com"}
+        default_key=${saved_key:-""}
+    fi
+
+    local api_host="" api_key="" core_num="" core_type="" node_id="" protocol_num="" node_type=""
+    local reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token=""
+
+    # 1. 网址与 Key 采集
+    read -rp "请 输入 机场 网址 (如 ${default_host})： " input_host
+    api_host=${input_host:-"$default_host"}
     
-    while [[ -z "$api_key" ]]; do 
-        read -rp "2. 面板通讯密钥 (ApiKey): " api_key
+    if [[ -n "$default_key" ]]; then
+        read -rp "请 输入 面板 对接 API Key (直接回车使用已保存的Key): " input_key
+        api_key=${input_key:-"$default_key"}
+    else
+        while [[ -z "$api_key" ]]; do
+            read -rp "请 输入 面板 对接 API Key： " api_key
+        done
+    fi
+
+    # 2. 是否保存固定的凭证
+    read -rp "是 否 设 置 固 定 的 机 场 网 址 和 API Key？ (y/n): " save_yn
+    if [[ "$save_yn" == "y" || "$save_yn" == "Y" ]]; then
+        echo "saved_host=\"$api_host\"" > "$saved_file"
+        echo "saved_key=\"$api_key\"" >> "$saved_file"
+        echo -e "${green}[提示] 凭证已固定锁定，下次将默认自动读取。${plain}"
+    fi
+
+    # 3. 核心选择
+    echo -e "请 选择 节点 核心 类型 ："
+    echo -e "1. xray"
+    echo -e "2. singbox"
+    echo -e "3. hysteria2"
+    while [[ ! "$core_num" =~ ^[1-3]$ ]]; do
+        read -rp "请 输入 ： " core_num
     done
-    
-    read -rp "3. 面板节点数字 ID (NodeID, 默认: 387): " input_id
-    node_id=${input_id:-"387"}
-    
-    read -rp "4. 节点协议类型 (NodeType, 默认: vless): " input_type
-    node_type=${input_type:-"vless"}
-    
-    read -rp "5. 节点监听端口 (Port, 默认: 20026): " input_port
-    node_port=${input_port:-"20026"}
-    
-    read -rp "6. 证书申请域名 (CertDomain, 默认: cf.babymonster.cc.cd): " input_domain
-    cert_domain=${input_domain:-"cf.babymonster.cc.cd"}
-    
-    while [[ -z "$cf_token" ]]; do
-        read -rp "7. 请输入你的真实CF_Token_粘贴在这里: " cf_token
+    case "$core_num" in 1) core_type="xray" ;; 2) core_type="sing" ;; 3) core_type="hysteria2" ;; esac
+
+    # 4. 节点 ID
+    while [[ -z "$node_id" ]]; do
+        read -rp "请 输入 节点 Node ID： " node_id
     done
 
-    # 1:1 完全套用你的无杂质干净 JSON 模板，缩进和排版完全一致
+    # 5. 传输协议选择
+    echo -e "请 选择 节点 传输 协议 ："
+    echo -e "1. Shadowsocks"
+    echo -e "2. Vless"
+    echo -e "3. Vmess"
+    echo -e "4. Hysteria"
+    echo -e "5. Hysteria2"
+    echo -e "6. Trojan"
+    echo -e "7. Tuic"
+    echo -e "8. AnyTLS"
+    while [[ ! "$protocol_num" =~ ^[1-8]$ ]]; do
+        read -rp "请 输入 ： " protocol_num
+    done
+
+    case "$protocol_num" in
+        1) node_type="shadowsocks" ;;
+        2) node_type="vless" ;;
+        3) node_type="vmess" ;;
+        4) node_type="hysteria" ;;
+        5) node_type="hysteria2" ;;
+        6) node_type="trojan" ;;
+        7) node_type="tuic" ;;
+        8) node_type="anytls" ;;
+    esac
+
+    # 6. 精确路由跳转分支判断
+    local run_tls_flow=false
+
+    if [[ "$protocol_num" == "1" || "$protocol_num" == "3" || "$protocol_num" == "6" || "$protocol_num" == "8" ]]; then
+        read -rp "请 选择 是否 进 行 TLS配 置 ？ (y/n)" tls_yn
+        [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
+    elif [[ "$protocol_num" == "2" ]]; then
+        read -rp "请 选 择 是 否 为 reality节 点 ？ (y/n)" reality_yn
+        if [[ "$reality_yn" == "y" || "$reality_yn" == "Y" ]]; then
+            cert_mode="none" # Reality 证书交由后端控制，此处设置none
+        else
+            read -rp "请 选择 是否 进 行 TLS配 置 ？ (y/n)" tls_yn
+            [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
+        fi
+    elif [[ "$protocol_num" == "4" || "$protocol_num" == "5" || "$protocol_num" == "7" ]]; then
+        run_tls_flow=true
+    fi
+
+    # 7. TLS 证书参数采集段
+    if [ "$run_tls_flow" = true ]; then
+        echo -e "请 选择 证 书 申 请 模 式 ："
+        echo -e "1. http模 式 自 动 申 请 ， 节 点 域 名 已 正 确 解 析"
+        echo -e "2. dns模 式 自 动 申 请 ， 需 填 入 正 确 域 名 服 务 商 API参 数"
+        echo -e "3. self模 式 ， 自 签 证 书 或 提 供 已 有 证 书 文 件"
+        while [[ ! "$cert_mode_num" =~ ^[1-3]$ ]]; do
+            read -rp "请 输入 ： " cert_mode_num
+        done
+
+        if [[ "$cert_mode_num" == "1" || "$cert_mode_num" == "2" ]]; then
+            while [[ -z "$cert_domain" ]]; do
+                read -rp "请输入证书申请域名 (如 domain.com): " cert_domain
+            done
+            if [[ "$cert_mode_num" == "1" ]]; then
+                cert_mode="http"
+            else
+                cert_mode="dns"
+                while [[ -z "$cf_token" ]]; do
+                    read -rp "CLOUDFLARE_DNS_API_TOKEN: 请 输入 你的 真实 CF_Token_ 粘贴 在 这里: " cf_token
+                done
+            fi
+        elif [[ "$cert_mode_num" == "3" ]]; then
+            cert_mode="self"
+        fi
+    fi
+
+    # 8. 拼装纯净块 CertConfig
+    local cert_block=""
+    if [[ "$cert_mode" == "dns" ]]; then
+        cert_block='{
+                "CertMode": "dns",
+                "RejectUnknownSni": false,
+                "CertDomain": "'"${cert_domain}"'",
+                "CertFile": "/etc/V2bX/server.crt.cer",
+                "KeyFile": "/etc/V2bX/cert.key",
+                "Email": "v2bx@github.com",
+                "Provider": "cloudflare",
+                "DNSEnv": {
+                    "CLOUDFLARE_DNS_API_TOKEN": "'"${cf_token}"'"
+                }
+            }'
+    elif [[ "$cert_mode" == "http" ]]; then
+        cert_block='{
+                "CertMode": "http",
+                "RejectUnknownSni": false,
+                "CertDomain": "'"${cert_domain}"'",
+                "CertFile": "/etc/V2bX/server.crt.cer",
+                "KeyFile": "/etc/V2bX/cert.key",
+                "Email": "v2bx@github.com"
+            }'
+    elif [[ "$cert_mode" == "self" ]]; then
+        cert_block='{
+                "CertMode": "self",
+                "RejectUnknownSni": false,
+                "CertDomain": "cf.babymonster.cc.cd",
+                "CertFile": "/etc/V2bX/server.crt.cer",
+                "KeyFile": "/etc/V2bX/cert.key",
+                "Email": "v2bx@github.com"
+            }'
+    else
+        cert_block='{
+                "CertMode": "none"
+            }'
+    fi
+
+    # 9. 1:1 输出纯净排版（移除了多余端口提示，统一注入底座模板，可随时在配置文件中二次用 0 修改）
     cat << EOF > /etc/V2bX/config.json
 {
     "Log": {
@@ -115,7 +249,7 @@ make_full_config() {
     },
     "Cores": [
     {
-        "Type": "sing",
+        "Type": "${core_type}",
         "Log": {
             "Level": "error",
             "Timestamp": true
@@ -128,7 +262,7 @@ make_full_config() {
         "OriginalPath": "/etc/V2bX/sing_origin.json"
     }],
     "Nodes": [{
-            "Core": "sing",
+            "Core": "${core_type}",
             "ApiHost": "${api_host}",
             "ApiKey": "${api_key}",
             "NodeID": ${node_id},
@@ -136,30 +270,19 @@ make_full_config() {
             "Timeout": 30,
             "ListenIP": "::",
             "SendIP": "0.0.0.0",
-            "Port": ${node_port},
+            "Port": 20026,
             "DeviceOnlineMinTraffic": 200,
             "MinReportTraffic": 0,
             "TCPFastOpen": true,
             "SniffEnabled": true,
-            "CertConfig": {
-                "CertMode": "dns",
-                "RejectUnknownSni": false,
-                "CertDomain": "${cert_domain}",
-                "CertFile": "/etc/V2bX/server.crt.cer",
-                "KeyFile": "/etc/V2bX/cert.key",
-                "Email": "v2bx@github.com",
-                "Provider": "cloudflare",
-                "DNSEnv": {
-                    "CLOUDFLARE_DNS_API_TOKEN": "${cf_token}"
-                }
-            }
+            "CertConfig": ${cert_block}
         }]
 }
 EOF
-    echo -e "${green}[成功] 1:1 精确规格模板配置文件已成功写入 /etc/V2bX/config.json${plain}"
+    echo -e "${green}[成功] 1:1 净版模板已精准写入 /etc/V2bX/config.json${plain}"
 }
 
-# ==================== 【保留 0 - 22 完整功能支撑矩阵】 ====================
+# ==================== 【外部高可用组件基础矩阵保持不动】 ====================
 make_advanced_modules() {
     echo -e "\n${yellow}========== 进阶：高级外部功能矩阵配置生成器 ==========${plain}"
     echo -e " [1] 生成 Sing-box 自定义策略路由组件 (sing_origin.json)"
