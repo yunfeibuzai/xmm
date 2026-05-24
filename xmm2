@@ -1,15 +1,15 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 节点独立配置向导引擎
+# 麦卖云 V2bX 节点独立配置向导引擎 (云端独立执行版)
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 
 echo -e "\n${yellow}========== 精确对齐向导式配置创建逻辑 ==========${plain}"
 mkdir -p /etc/V2bX
 
-local saved_file="/etc/V2bX/.saved_creds"
-local default_host="https://example.com"
-local default_key=""
+saved_file="/etc/V2bX/.saved_creds"
+default_host="https://example.com"
+default_key=""
 
 if [[ -f "$saved_file" ]]; then
     source "$saved_file" 2>/dev/null
@@ -17,8 +17,8 @@ if [[ -f "$saved_file" ]]; then
     default_key=${saved_key:-""}
 fi
 
-local api_host="" api_key="" core_num="" core_type="" node_id="" protocol_num="" node_type=""
-local reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token=""
+api_host="" api_key="" core_num="" core_type="" node_id="" protocol_num="" node_type=""
+reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token=""
 
 read -rp "请 输 入 机 场 网 址 (如 ${default_host})： " input_host
 api_host=${input_host:-"$default_host"}
@@ -70,7 +70,7 @@ case "$protocol_num" in
     5) node_type="hysteria2" ;; 6) node_type="trojan" ;; 7) node_type="tuic" ;; 8) node_type="anytls" ;;
 esac
 
-local run_tls_flow=false
+run_tls_flow=false
 if [[ "$protocol_num" == "1" || "$protocol_num" == "3" || "$protocol_num" == "6" || "$protocol_num" == "8" ]]; then
     read -rp "请 选 择 是 否 进 行 TLS配 置 ？ (y/n)" tls_yn
     [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
@@ -89,7 +89,7 @@ fi
 if [ "$run_tls_flow" = true ]; then
     echo -e "请 选 择 证 书 申 请 模 式 ："
     echo -e "1. http模 式 自 动 申 请 ， 节 点 域 名 已 正 确 解 析"
-    echo -e "2. dns模 式 自 动 申 请 ， 需 填 入 正 确 域名 服务 商 API参 数"
+    echo -e "2. dns模 式 自 动 申 请 ， 需 填 入 正 确 域 名 服 务商 API参 数"
     echo -e "3. self模 式 ， 自 签 证 书 或 提 供 已 有 证 书 文 件"
     while [[ ! "$cert_mode_num" =~ ^[1-3]$ ]]; do
         read -rp "请 输 入 ： " cert_mode_num
@@ -112,7 +112,7 @@ if [ "$run_tls_flow" = true ]; then
     fi
 fi
 
-local cert_block=""
+cert_block=""
 if [[ "$cert_mode" == "dns" ]]; then
     cert_block='{ "CertMode": "dns", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com", "Provider": "cloudflare", "DNSEnv": { "CLOUDFLARE_DNS_API_TOKEN": "'"${cf_token}"'" } }'
 elif [[ "$cert_mode" == "http" ]]; then
