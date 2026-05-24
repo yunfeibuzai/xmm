@@ -1,9 +1,8 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (手机窄屏完美防撕裂版)
-sh_ver="3.7.1"
+# 麦卖云 V2bX 后端全能王牌脚本 (1:1 纯净定制模板版)
+sh_ver="3.7.3"
 
-# 完美修复：严丝合缝的标准 ANSI 终端颜色转义
 red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
 magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
 
@@ -59,7 +58,7 @@ show_menu() {
     echo -e "  ${green}10.${plain} 取消开机自启动"
     echo -e "--------------------------------------------"
     echo -e "${magenta}[🌟 核心战力配置向导群]${plain}"
-    echo -e "  ${green}11.${plain} 🌟 满配交互式生成主配置文件"
+    echo -e "  ${green}11.${plain} 🌟 1:1 纯净格式定制配置文件生成"
     echo -e "  ${green}12.${plain} 📁 深度配置：一键生成外置高级组件"
     echo -e "  ${green}13.${plain} 生成 X25519 密钥 (Reality 必备)"
     echo -e "  ${green}14.${plain} 升级本维护脚本"
@@ -77,137 +76,90 @@ show_menu() {
     show_status
 }
 
-# ==================== 【11号功能：官方级满配向导逻辑】 ====================
+# ==================== 【11号功能：1:1 精确剔除杂项复刻版】 ====================
 make_full_config() {
-    echo -e "\n${yellow}========== 智能节点对接配置向导 (官方谱系全特性复刻) ==========${plain}"
+    echo -e "\n${yellow}========== 极简定制版配置生成器 (1:1 精确复刻) ==========${plain}"
     mkdir -p /etc/V2bX
     
-    local api_host="" api_key="" node_id="" node_type="" type_num="" core_type="sing" core_name="sing_core"
+    local api_host="" api_key="" node_id="" node_type="" node_port="" cert_domain="" cf_token=""
     
-    while [[ -z "$api_host" ]]; do read -rp "1. 面板 API 对接地址 (如 https://demo.com 或 http://127.0.0.1:8008): " api_host; done
-    while [[ -z "$api_key" ]]; do read -rp "2. 面板通讯密钥 (ApiKey/Token): " api_key; done
-    while [[ -z "$node_id" || ! "$node_id" =~ ^[0-9]+$ ]]; do read -rp "3. 面板节点真实数字 ID (NodeID): " node_id; done
+    read -rp "1. 面板 API 对接地址 (默认: https://maimaiyun.qzz.io): " input_host
+    api_host=${input_host:-"https://maimaiyun.qzz.io"}
     
-    echo -e "4. 请选择节点协议大类 (NodeType):"
-    echo -e " [1] v2ray (兼容 VMess/VLESS)\n [2] trojan\n [3] shadowsocks                [4] hysteria2\n [5] tuic                       [6] socks"
-    while [[ ! "$type_num" =~ ^[1-6]$ ]]; do read -rp "请输入数字 [1-6]: " type_num; done
-    case "$type_num" in 1) node_type="v2ray" ;; 2) node_type="trojan" ;; 3) node_type="shadowsocks" ;; 4) node_type="hysteria2" ;; 5) node_type="tuic" ;; 6) node_type="socks" ;; esac
+    while [[ -z "$api_key" ]]; do 
+        read -rp "2. 面板通讯密钥 (ApiKey): " api_key
+    done
+    
+    read -rp "3. 面板节点数字 ID (NodeID, 默认: 387): " input_id
+    node_id=${input_id:-"387"}
+    
+    read -rp "4. 节点协议类型 (NodeType, 默认: vless): " input_type
+    node_type=${input_type:-"vless"}
+    
+    read -rp "5. 节点监听端口 (Port, 默认: 20026): " input_port
+    node_port=${input_port:-"20026"}
+    
+    read -rp "6. 证书申请域名 (CertDomain, 默认: cf.babymonster.cc.cd): " input_domain
+    cert_domain=${input_domain:-"cf.babymonster.cc.cd"}
+    
+    while [[ -z "$cf_token" ]]; do
+        read -rp "7. 请输入你的真实CF_Token_粘贴在这里: " cf_token
+    done
 
-    echo -e "5. 请选择承载当前节点的底层数据内核 (Core):"
-    echo -e " [1] sing (Sing-box 核心，多协议首选推荐)\n [2] xray (Xray 核心，老牌兼容性强)"
-    read -rp "请输入数字 [1-2, 默认1]: " core_num
-    if [[ "$core_num" == "2" ]]; then core_type="xray"; core_name="xray_core"; fi
-
-    local ntp_enable="false" ntp_block="" xray_paths_block="" 
-    local dev_traffic="100" min_report="0" tfo_enable="true"
-    local mux_enable="false" mux_block="" limit_block="" cert_block="" xray_dns_block=""
-
-    read -rp "🚀 是否需要开启高阶自定义配置？(限制在线IP/流控/Brutal加速/证书/多Core对调) [y/n] (默认 n): " adv_toggle
-    if [[ "$adv_toggle" == "y" || "$adv_toggle" == "Y" ]]; then
-        echo -e "\n${cyan}--- [进入深海自定义谱系] ---${plain}"
-        read -rp "-> 自定义此 Core 的全局标识名 (默认 ${core_name}): " user_core_name
-        [[ -n "$user_core_name" ]] && core_name="$user_core_name"
-
-        if [[ "$core_type" == "sing" ]]; then
-            read -rp "-> 是否为 VMess 启动官方推荐的 NTP 时间同步纠偏？[y/n] (默认 n): " ntp_yn
-            if [[ "$ntp_yn" == "y" || "$ntp_yn" == "Y" ]]; then
-                ntp_enable="true"
-                ntp_block=', "NTP": { "Enable": true, "Server": "time.apple.com", "ServerPort": 0 }'
-            fi
-            ntp_block="${ntp_block}, \"OriginalPath\": \"/etc/V2bX/sing_origin.json\""
-        else
-            xray_paths_block=', "AssetPath": "/usr/local/V2bX", "DnsConfigPath": "/etc/V2bX/dns.json", "RouteConfigPath": "/etc/V2bX/route.json", "InboundConfigPath": "/etc/V2bX/custom_inbound.json", "OutboundConfigPath": "/etc/V2bX/custom_outbound.json"'
-            read -rp "-> 是否为 Xray 节点开启自定义本地 DNS 解析控制？[y/n] (默认 n): " xray_dns_yn
-            if [[ "$xray_dns_yn" == "y" || "$xray_dns_yn" == "Y" ]]; then
-                echo -e "   选择 DNS 解析优先策略: [1] AsIs  [2] UseIP  [3] UseIPv4  [4] UseIPv6"
-                read -rp "   请输入数字 [1-4, 默认1]: " x_dns_p
-                local dns_t="AsIs"
-                [[ "$x_dns_p" == "2" ]] && dns_t="UseIP"
-                [[ "$x_dns_p" == "3" ]] && dns_t="UseIPv4"
-                [[ "$x_dns_p" == "4" ]] && dns_t="UseIPv6"
-                xray_dns_block=', "EnableDNS": true, "DNSType": "'"${dns_t}"'", "EnableUot": true'
-            fi
-        fi
-
-        read -rp "-> 设备在线判定流量阈值 (DeviceOnlineMinTraffic, 单位 kB, 默认 100): " input_dt
-        [[ "$input_dt" =~ ^[0-9]+$ ]] && dev_traffic="$input_dt"
-        read -rp "-> 最低上报流量阀值 (MinReportTraffic, 单位 kB, 默认 0): " input_mr
-        [[ "$input_mr" =~ ^[0-9]+$ ]] && min_report="$input_mr"
-        read -rp "-> 是否关闭 TCP Fast Open (TFO)? [y/n] (默认 n, 即保持开启): " tfo_yn
-        [[ "$tfo_yn" == "y" || "$tfo_yn" == "Y" ]] && tfo_enable="false"
-
-        if [[ "$core_type" == "sing" ]]; then
-            read -rp "-> 是否开启 Singbox 多路复用 (Multiplex) 与 TCP Brutal 暴力加速？[y/n] (默认 n): " mux_yn
-            if [[ "$mux_yn" == "y" || "$mux_yn" == "Y" ]]; then
-                read -rp "   请输入预期分配的节点上传带宽 (UpMbps, 默认 500): " up_m
-                [[ -z "$up_m" ]] && up_m="500"
-                read -rp "   请输入预期分配的节点下载带宽 (DownMbps, 默认 500): " down_m
-                [[ -z "$down_m" ]] && down_m="500"
-                mux_block=', "MultiplexConfig": { "Enable": true, "Padding": true, "Brutal": { "Enable": true, "UpMbps": '"${up_m}"', "DownMbps": '"${down_m}"' } }'
-            fi
-        fi
-
-        read -rp "-> 是否开启小鸡端强制限速 (SpeedLimit, 覆盖面板, 0为不限, 单位 Mbps, 默认 0): " s_lim
-        [[ ! "$s_lim" =~ ^[0-9]+$ ]] && s_lim="0"
-        limit_block=', "LimitConfig": { "SpeedLimit": '"${s_lim}"', "EnableDynamicSpeedLimit": false }'
-
-        echo -e "-> 请指定 TLS 证书申请运作模式 (CertMode):"
-        echo -e " [1] none (关闭或交由前端处理)\n [2] http (通过本地80端口HTTP申请)\n [3] dns (通过 Cloudflare DNS API 自动化申请)\n [4] self (载入本地指定证书文件)"
-        read -rp "请输入选择 [1-4, 默认1]: " c_mode_num
-        case "$c_mode_num" in
-            2) cert_block=', "CertConfig": { "CertMode": "http", "CertDomain": "换成你的域名.com", "CertFile": "/etc/V2bX/fullchain.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "owner@maimai.cloud" }' ;;
-            3) 
-               read -rp "   请输入你的 Cloudflare DNS API Token: " cf_token
-               [[ -z "$cf_token" ]] && cf_token="你的CF_API_TOKEN"
-               cert_block=', "CertConfig": { "CertMode": "dns", "CertDomain": "换成你的域名.com", "Provider": "cloudflare", "Email": "owner@maimai.cloud", "DNSEnv": { "CF_DNS_API_TOKEN": "'"${cf_token}"'" } }'
-               ;;
-            4)
-               read -rp "   请输入小鸡本地存在的证书 CRT 绝对路径: " l_crt
-               read -rp "   请输入小鸡本地存在的证书 KEY 绝对路径: " l_key
-               cert_block=', "CertConfig": { "CertMode": "self", "CertDomain": "换成你的域名.com", "CertFile": "'"${l_crt}"'", "KeyFile": "'"${l_key}"'" }'
-               ;;
-        esac
-    fi
-
+    # 1:1 完全套用你的无杂质干净 JSON 模板，缩进和排版完全一致
     cat << EOF > /etc/V2bX/config.json
 {
-  "Log": {
-    "Level": "error",
-    "Output": ""
-  },
-  "Cores": [
+    "Log": {
+        "Level": "none",
+        "Output": ""
+    },
+    "Cores": [
     {
-      "Type": "${core_type}",
-      "Name": "${core_name}",
-      "Log": {
-        "Level": "error",
-        "Timestamp": true
-      }${ntp_block}${xray_paths_block}
-    }
-  ],
-  "Nodes": [
-    {
-      "Name": "${core_type}_node_auto",
-      "Core": "${core_type}",
-      "CoreName": "${core_name}",
-      "ApiHost": "${api_host}",
-      "ApiKey": "${api_key}",
-      "NodeID": ${node_id},
-      "NodeType": "${node_type}",
-      "Timeout": 30,
-      "ListenIP": "0.0.0.0",
-      "SendIP": "0.0.0.0",
-      "DeviceOnlineMinTraffic": ${dev_traffic},
-      "MinReportTraffic": ${min_report},
-      "EnableTFO": ${tfo_enable}${mux_block}${limit_block}${cert_block}${xray_dns_block}
-    }
-  ]
+        "Type": "sing",
+        "Log": {
+            "Level": "error",
+            "Timestamp": true
+        },
+        "NTP": {
+            "Enable": false,
+            "Server": "time.apple.com",
+            "ServerPort": 0
+        },
+        "OriginalPath": "/etc/V2bX/sing_origin.json"
+    }],
+    "Nodes": [{
+            "Core": "sing",
+            "ApiHost": "${api_host}",
+            "ApiKey": "${api_key}",
+            "NodeID": ${node_id},
+            "NodeType": "${node_type}",
+            "Timeout": 30,
+            "ListenIP": "::",
+            "SendIP": "0.0.0.0",
+            "Port": ${node_port},
+            "DeviceOnlineMinTraffic": 200,
+            "MinReportTraffic": 0,
+            "TCPFastOpen": true,
+            "SniffEnabled": true,
+            "CertConfig": {
+                "CertMode": "dns",
+                "RejectUnknownSni": false,
+                "CertDomain": "${cert_domain}",
+                "CertFile": "/etc/V2bX/server.crt.cer",
+                "KeyFile": "/etc/V2bX/cert.key",
+                "Email": "v2bx@github.com",
+                "Provider": "cloudflare",
+                "DNSEnv": {
+                    "CLOUDFLARE_DNS_API_TOKEN": "${cf_token}"
+                }
+            }
+        }]
 }
 EOF
-    echo -e "${green}[成功] 1:1 官方全特性配置文件已经安全写入 /etc/V2bX/config.json${plain}"
+    echo -e "${green}[成功] 1:1 精确规格模板配置文件已成功写入 /etc/V2bX/config.json${plain}"
 }
 
-# ==================== 【12号功能：外置高级矩阵组件自动化生成】 ====================
+# ==================== 【保留 0 - 22 完整功能支撑矩阵】 ====================
 make_advanced_modules() {
     echo -e "\n${yellow}========== 进阶：高级外部功能矩阵配置生成器 ==========${plain}"
     echo -e " [1] 生成 Sing-box 自定义策略路由组件 (sing_origin.json)"
@@ -272,7 +224,6 @@ EOF
     esac
 }
 
-# ==================== 【高可用分发拉取主引擎】 ====================
 self_install_core() {
     echo -e "${yellow}正在安全部署麦卖云全功能核心组件...${plain}"
     systemctl stop V2bX >/dev/null 2>&1
