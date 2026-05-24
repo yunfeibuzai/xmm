@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (防泄密纯净交互版)
-sh_ver="3.7.4"
+# 麦卖云 V2bX 后端全能王牌脚本 (安装流控优化版)
+sh_ver="3.7.5"
 
-red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
-magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
+red='\033;31m'; green='\033;32m'; yellow='\033;33m'
+magenta='\033;35m'; cyan='\033;36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
@@ -31,7 +31,7 @@ register_shortcut() {
 }
 register_shortcut
 
-# 状态看板颜色完全重构
+# 状态看板颜色保持：未安装(红)、未启动(黄)、已运行(绿)
 show_status() {
     if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then
         echo -e "V2bX 状态: ${red}未安装或核心损坏${plain}"
@@ -77,7 +77,7 @@ show_menu() {
     show_status
 }
 
-# ==================== 【11号功能：精确对齐全新定制配置向导】 ====================
+# ==================== 【11号功能：纯净向导式配置创建逻辑】 ====================
 make_full_config() {
     echo -e "\n${yellow}========== 精确对齐向导式配置创建逻辑 ==========${plain}"
     mkdir -p /etc/V2bX
@@ -96,43 +96,43 @@ make_full_config() {
     local reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token=""
 
     # 1. 网址与 Key 采集
-    read -rp "请 输入 机场 网址 (如 ${default_host})： " input_host
+    read -rp "请 输 入 机 场 网 址 (如 ${default_host})： " input_host
     api_host=${input_host:-"$default_host"}
     
     if [[ -n "$default_key" ]]; then
-        read -rp "请 输入 面板 对接 API Key (直接回车使用已保存的Key): " input_key
+        read -rp "请 输 入 面 板 对 接 API Key (直接回车使用已保存的Key): " input_key
         api_key=${input_key:-"$default_key"}
     else
         while [[ -z "$api_key" ]]; do
-            read -rp "请 输入 面板 对接 API Key： " api_key
+            read -rp "请 输 入 面 板 对 接 API Key： " api_key
         done
     fi
 
     # 2. 是否保存固定的凭证
-    read -rp "是 否 设 置 固 定 的 机 场 网 址 和 API Key？ (y/n): " save_yn
+    read -rp "是 否 设 置 固 定 的 机 场 网 址 和 API Key？ (y/n) " save_yn
     if [[ "$save_yn" == "y" || "$save_yn" == "Y" ]]; then
         echo "saved_host=\"$api_host\"" > "$saved_file"
         echo "saved_key=\"$api_key\"" >> "$saved_file"
-        echo -e "${green}[提示] 凭证已固定锁定，下次将默认自动读取。${plain}"
+        echo -e "${green}[提示] 凭证已固定锁定。${plain}"
     fi
 
     # 3. 核心选择
-    echo -e "请 选择 节点 核心 类型 ："
+    echo -e "请 选 择 节 点 核 心 类 型 ："
     echo -e "1. xray"
     echo -e "2. singbox"
     echo -e "3. hysteria2"
     while [[ ! "$core_num" =~ ^[1-3]$ ]]; do
-        read -rp "请 输入 ： " core_num
+        read -rp "请 输 入 ： " core_num
     done
     case "$core_num" in 1) core_type="xray" ;; 2) core_type="sing" ;; 3) core_type="hysteria2" ;; esac
 
     # 4. 节点 ID
     while [[ -z "$node_id" ]]; do
-        read -rp "请 输入 节点 Node ID： " node_id
+        read -rp "请 输 入 节 点 Node ID： " node_id
     done
 
     # 5. 传输协议选择
-    echo -e "请 选择 节点 传输 协议 ："
+    echo -e "请 选 择 节 点 传 输 协 议 ："
     echo -e "1. Shadowsocks"
     echo -e "2. Vless"
     echo -e "3. Vmess"
@@ -142,7 +142,7 @@ make_full_config() {
     echo -e "7. Tuic"
     echo -e "8. AnyTLS"
     while [[ ! "$protocol_num" =~ ^[1-8]$ ]]; do
-        read -rp "请 输入 ： " protocol_num
+        read -rp "请 输 入 ： " protocol_num
     done
 
     case "$protocol_num" in
@@ -156,32 +156,32 @@ make_full_config() {
         8) node_type="anytls" ;;
     esac
 
-    # 6. 精确路由跳转分支判断
+    # 6. 路由跳转分支判断
     local run_tls_flow=false
 
     if [[ "$protocol_num" == "1" || "$protocol_num" == "3" || "$protocol_num" == "6" || "$protocol_num" == "8" ]]; then
-        read -rp "请 选择 是否 进 行 TLS配 置 ？ (y/n)" tls_yn
+        read -rp "请 选 择 是 否 进 行 TLS配 置 ？ (y/n)" tls_yn
         [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
     elif [[ "$protocol_num" == "2" ]]; then
         read -rp "请 选 择 是 否 为 reality节 点 ？ (y/n)" reality_yn
         if [[ "$reality_yn" == "y" || "$reality_yn" == "Y" ]]; then
-            cert_mode="none" # Reality 证书交由后端控制，此处设置none
+            cert_mode="none"
         else
-            read -rp "请 选择 是否 进 行 TLS配 置 ？ (y/n)" tls_yn
+            read -rp "请 选 择 是 否 进 行 TLS配 置 ？ (y/n)" tls_yn
             [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
         fi
     elif [[ "$protocol_num" == "4" || "$protocol_num" == "5" || "$protocol_num" == "7" ]]; then
         run_tls_flow=true
     fi
 
-    # 7. TLS 证书参数采集段
+    # 7. TLS 证书申请配置
     if [ "$run_tls_flow" = true ]; then
-        echo -e "请 选择 证 书 申 请 模 式 ："
+        echo -e "请 选 择 证 书 申 请 模 式 ："
         echo -e "1. http模 式 自 动 申 请 ， 节 点 域 名 已 正 确 解 析"
         echo -e "2. dns模 式 自 动 申 请 ， 需 填 入 正 确 域 名 服 务 商 API参 数"
         echo -e "3. self模 式 ， 自 签 证 书 或 提 供 已 有 证 书 文 件"
         while [[ ! "$cert_mode_num" =~ ^[1-3]$ ]]; do
-            read -rp "请 输入 ： " cert_mode_num
+            read -rp "请 输 入 ： " cert_mode_num
         done
 
         if [[ "$cert_mode_num" == "1" || "$cert_mode_num" == "2" ]]; then
@@ -240,7 +240,7 @@ make_full_config() {
             }'
     fi
 
-    # 9. 1:1 输出纯净排版（移除了多余端口提示，统一注入底座模板，可随时在配置文件中二次用 0 修改）
+    # 9. 1:1 输出无端口纯净底座
     cat << EOF > /etc/V2bX/config.json
 {
     "Log": {
@@ -282,7 +282,88 @@ EOF
     echo -e "${green}[成功] 1:1 净版模板已精准写入 /etc/V2bX/config.json${plain}"
 }
 
-# ==================== 【外部高可用组件基础矩阵保持不动】 ====================
+# ==================== 【核心安全部署控制流】 ====================
+self_install_core() {
+    echo -e "${yellow}正在安全部署麦卖云全功能核心组件...${plain}"
+    systemctl stop V2bX >/dev/null 2>&1
+    killall -9 V2bX >/dev/null 2>&1
+    mkdir -p /usr/local/V2bX /etc/V2bX
+    rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
+
+    local arch=$(uname -m)
+    case "${arch}" in x86_64 | amd64) arch="linux-64" ;; arm64 | aarch64) arch="linux-arm64-v8a" ;; *) arch="linux-64" ;; esac
+    local last_version=$(curl -Ls "https://api.github.com/repos/wyx2685/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    [[ -z "$last_version" ]] && last_version="v0.3.9"
+
+    local urls=(
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX"                          
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX-linux-64.zip"              
+        "https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"    
+        "https://mirror.ghproxy.com/https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
+    )
+    
+    local success=false
+    for url in "${urls[@]}"; do
+        echo -e "${yellow}探测拉取线: ${url}${plain}"
+        local tmp_file="/tmp/v2bx_tmp_${RANDOM}"
+        wget -O "$tmp_file" "$url" --timeout=15 2>/dev/null
+        
+        if [[ -f "$tmp_file" && -s "$tmp_file" ]]; then
+            if head -c 4 "$tmp_file" | grep -q 'PK'; then
+                local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
+                mkdir -p "$tmp_dir"
+                unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1
+                local b_target=""
+                [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
+                [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
+                [[ -f "$tmp_dir/V2bX-linux-64" ]] && b_target="$tmp_dir/V2bX-linux-64"
+                if [[ -n "$b_target" && -f "$b_target" ]] && head -c 4 "$b_target" | grep -q 'ELF'; then
+                    mv -f "$b_target" /usr/local/V2bX/V2bX && success=true
+                fi
+                rm -rf "$tmp_dir"
+            elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
+                mv -f "$tmp_file" /usr/local/V2bX/V2bX && success=true
+            fi
+        fi
+        rm -f "$tmp_file"
+        if [ "$success" = true ]; then
+            chmod +x /usr/local/V2bX/V2bX
+            echo -e "${green}[成功] 核心拉取成功并已通过 ELF 二进制合法性校验！${plain}"
+            break
+        fi
+    done
+
+    wget -O /usr/local/V2bX/geoip.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null || wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
+    wget -O /usr/local/V2bX/geosite.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null || wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
+
+    # 【新增修改点】核心部署后，针对缺失配置的情况进行明确的弹窗询问
+    if [ ! -f /etc/V2bX/config.json ]; then
+        read -rp "是否生成配置文件？(y/n)" ask_gen_config
+        if [[ "$ask_gen_config" == "y" || "$ask_gen_config" == "Y" ]]; then
+            make_full_config
+        else
+            echo -e "${yellow}[提示] 跳过配置文件自动生成，请后续通过功能 11 手动创建。${plain}"
+        fi
+    fi
+
+    cat << EOF > /etc/systemd/system/V2bX.service
+[Unit]
+Description=V2bX Service
+After=network.target
+
+[Service]
+ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload && systemctl enable V2bX >/dev/null 2>&1 && systemctl restart V2bX >/dev/null 2>&1
+    echo -e "${green}V2bX 服务已注册成功并拉起运转。${plain}"
+}
+
+# ==================== 【高级外部组件与高可用矩阵】 ====================
 make_advanced_modules() {
     echo -e "\n${yellow}========== 进阶：高级外部功能矩阵配置生成器 ==========${plain}"
     echo -e " [1] 生成 Sing-box 自定义策略路由组件 (sing_origin.json)"
@@ -345,78 +426,6 @@ EOF
             echo -e "${green}[成功] 入站与黑洞出口拦截器同步挂载完成！${plain}"
             ;;
     esac
-}
-
-self_install_core() {
-    echo -e "${yellow}正在安全部署麦卖云全功能核心组件...${plain}"
-    systemctl stop V2bX >/dev/null 2>&1
-    killall -9 V2bX >/dev/null 2>&1
-    mkdir -p /usr/local/V2bX /etc/V2bX
-    rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
-
-    local arch=$(uname -m)
-    case "${arch}" in x86_64 | amd64) arch="linux-64" ;; arm64 | aarch64) arch="linux-arm64-v8a" ;; *) arch="linux-64" ;; esac
-    local last_version=$(curl -Ls "https://api.github.com/repos/wyx2685/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$last_version" ]] && last_version="v0.3.9"
-
-    local urls=(
-        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX"                          
-        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX-linux-64.zip"              
-        "https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"    
-        "https://mirror.ghproxy.com/https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
-    )
-    
-    local success=false
-    for url in "${urls[@]}"; do
-        echo -e "${yellow}探测拉取线: ${url}${plain}"
-        local tmp_file="/tmp/v2bx_tmp_${RANDOM}"
-        wget -O "$tmp_file" "$url" --timeout=15 2>/dev/null
-        
-        if [[ -f "$tmp_file" && -s "$tmp_file" ]]; then
-            if head -c 4 "$tmp_file" | grep -q 'PK'; then
-                local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
-                mkdir -p "$tmp_dir"
-                unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1
-                local b_target=""
-                [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
-                [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
-                [[ -f "$tmp_dir/V2bX-linux-64" ]] && b_target="$tmp_dir/V2bX-linux-64"
-                if [[ -n "$b_target" && -f "$b_target" ]] && head -c 4 "$b_target" | grep -q 'ELF'; then
-                    mv -f "$b_target" /usr/local/V2bX/V2bX && success=true
-                fi
-                rm -rf "$tmp_dir"
-            elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
-                mv -f "$tmp_file" /usr/local/V2bX/V2bX && success=true
-            fi
-        fi
-        rm -f "$tmp_file"
-        if [ "$success" = true ]; then
-            chmod +x /usr/local/V2bX/V2bX
-            echo -e "${green}[成功] 核心拉取成功并已通过 ELF 二进制合法性校验！${plain}"
-            break
-        fi
-    done
-
-    wget -O /usr/local/V2bX/geoip.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null || wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
-    wget -O /usr/local/V2bX/geosite.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null || wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
-
-    if [ ! -f /etc/V2bX/config.json ]; then make_full_config; fi
-
-    cat << EOF > /etc/systemd/system/V2bX.service
-[Unit]
-Description=V2bX Service
-After=network.target
-
-[Service]
-ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json
-Restart=always
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload && systemctl enable V2bX >/dev/null 2>&1 && systemctl restart V2bX >/dev/null 2>&1
-    echo -e "${green}V2bX 服务已注册成功并拉起运转。${plain}"
 }
 
 install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
