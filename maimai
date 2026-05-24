@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (官方全特性能谱系融合版)
-sh_ver="3.7.0"
+# 麦卖云 V2bX 后端全能王牌脚本 (手机窄屏完美防撕裂版)
+sh_ver="3.7.1"
 
-red='\033;31m'; green='\033;32m'; yellow='\033;33m'
-magenta='\033;35m'; cyan='\033;36m'; plain='\033[0m'
+# 完美修复：严丝合缝的标准 ANSI 终端颜色转义
+red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'
+magenta='\033[0;35m'; cyan='\033[0;36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
@@ -42,27 +43,37 @@ show_status() {
 
 show_menu() {
     clear
-    echo -e "${green}麦卖云 V2bX 后端全能王牌脚本${plain} (官方谱系全特性融合版)"
+    echo -e "${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}"
     echo -e "--- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---"
     echo -e "  ${green}0.${plain} 快捷修改主配置 (config.json)"
-    echo -e "————————————————————————————————————————————————————————————————"
-    echo -e "  ${green}1.${plain} 安装 V2bX (优先自主源)              ${green}2.${plain} 更新 V2bX 核心"
-    echo -e "  ${green}3.${plain} 卸载 V2bX                          ${green}4.${plain} 启动 V2bX 服务"
-    echo -e "  ${green}5.${plain} 停止 V2bX 服务                     ${green}6.${plain} 重启 V2bX 服务"
-    echo -e "  ${green}7.${plain} 查看 V2bX 运行状态                 ${green}8.${plain} 查看 V2bX 实时日志"
-    echo -e "  ${green}9.${plain} 设置开机自启动                     ${green}10.${plain} 取消开机自启动"
-    echo -e "————————————————————————————————————————————————————————————————"
-    echo -e "  ${magenta}[🌟 核心战力配置向导群]${plain}"
-    echo -e "  ${green}11.${plain} 🌟 满配交互式生成主配置文件 (支持设备判定、高级流控与多Core)"
-    echo -e "  ${green}12.${plain} 📁 深度配置：一键矩阵生成外置组件 (dns/route/inbound/outbound)"
-    echo -e "  ${green}13.${plain} 生成 X25519 密钥 (Reality 必备)      ${green}14.${plain} 升级本维护脚本"
-    echo -e "————————————————————————————————————————————————————————————————"
-    echo -e "  ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}"
-    echo -e "  ${green}15.${plain} 开启自动化自愈守护 (死机秒拉起)     ${green}16.${plain} 关闭自动化自愈守护"
-    echo -e "  ${green}17.${plain} 豪华版 BBR 加速控制台              ${green}18.${plain} 放行全局端口 (iptables 净化)"
-    echo -e "  ${green}19.${plain} 强杀挂机残留与强制释放系统缓存     ${green}20.${plain} 彻底清空 V2bX 日志与系统死锁大日志"
-    echo -e "  ${green}21.${plain} 查看小鸡全套硬件看板与网速压测     ${green}22.${plain} 退出脚本"
-    echo -e "————————————————————————————————————————————————————————————————"
+    echo -e "--------------------------------------------"
+    echo -e "  ${green}1.${plain} 安装 V2bX (优先自主源)"
+    echo -e "  ${green}2.${plain} 更新 V2bX 核心"
+    echo -e "  ${green}3.${plain} 卸载 V2bX"
+    echo -e "  ${green}4.${plain} 启动 V2bX 服务"
+    echo -e "  ${green}5.${plain} 停止 V2bX 服务"
+    echo -e "  ${green}6.${plain} 重启 V2bX 服务"
+    echo -e "  ${green}7.${plain} 查看 V2bX 运行状态"
+    echo -e "  ${green}8.${plain} 查看 V2bX 实时日志"
+    echo -e "  ${green}9.${plain} 设置开机自启动"
+    echo -e "  ${green}10.${plain} 取消开机自启动"
+    echo -e "--------------------------------------------"
+    echo -e "${magenta}[🌟 核心战力配置向导群]${plain}"
+    echo -e "  ${green}11.${plain} 🌟 满配交互式生成主配置文件"
+    echo -e "  ${green}12.${plain} 📁 深度配置：一键生成外置高级组件"
+    echo -e "  ${green}13.${plain} 生成 X25519 密钥 (Reality 必备)"
+    echo -e "  ${green}14.${plain} 升级本维护脚本"
+    echo -e "--------------------------------------------"
+    echo -e "${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}"
+    echo -e "  ${green}15.${plain} 开启自动化自愈守护 (秒级拉起)"
+    echo -e "  ${green}16.${plain} 关闭自动化自愈守护"
+    echo -e "  ${green}17.${plain} 豪华版 BBR 加速控制台"
+    echo -e "  ${green}18.${plain} 放行全局端口 (iptables 净化)"
+    echo -e "  ${green}19.${plain} 强杀挂机残留与强制释放系统缓存"
+    echo -e "  ${green}20.${plain} 彻底清空各种顽固大日志"
+    echo -e "  ${green}21.${plain} 查看小鸡全套硬件看板"
+    echo -e "  ${green}22.${plain} 彻底退出脚本"
+    echo -e "--------------------------------------------"
     show_status
 }
 
@@ -75,10 +86,10 @@ make_full_config() {
     
     while [[ -z "$api_host" ]]; do read -rp "1. 面板 API 对接地址 (如 https://demo.com 或 http://127.0.0.1:8008): " api_host; done
     while [[ -z "$api_key" ]]; do read -rp "2. 面板通讯密钥 (ApiKey/Token): " api_key; done
-    while [[ -z "$node_id" || ! "$node_id" =~ ^[0-9]+$ ]]; do read -rp "3. 面板节点真实数字数字 ID (NodeID): " node_id; done
+    while [[ -z "$node_id" || ! "$node_id" =~ ^[0-9]+$ ]]; do read -rp "3. 面板节点真实数字 ID (NodeID): " node_id; done
     
     echo -e "4. 请选择节点协议大类 (NodeType):"
-    echo -e " [1] v2ray (兼容 VMess/VLESS)   [2] trojan\n [3] shadowsocks                [4] hysteria2\n [5] tuic                       [6] socks"
+    echo -e " [1] v2ray (兼容 VMess/VLESS)\n [2] trojan\n [3] shadowsocks                [4] hysteria2\n [5] tuic                       [6] socks"
     while [[ ! "$type_num" =~ ^[1-6]$ ]]; do read -rp "请输入数字 [1-6]: " type_num; done
     case "$type_num" in 1) node_type="v2ray" ;; 2) node_type="trojan" ;; 3) node_type="shadowsocks" ;; 4) node_type="hysteria2" ;; 5) node_type="tuic" ;; 6) node_type="socks" ;; esac
 
@@ -87,7 +98,6 @@ make_full_config() {
     read -rp "请输入数字 [1-2, 默认1]: " core_num
     if [[ "$core_num" == "2" ]]; then core_type="xray"; core_name="xray_core"; fi
 
-    # 默认初始化全谱系高级控制变量
     local ntp_enable="false" ntp_block="" xray_paths_block="" 
     local dev_traffic="100" min_report="0" tfo_enable="true"
     local mux_enable="false" mux_block="" limit_block="" cert_block="" xray_dns_block=""
@@ -95,7 +105,7 @@ make_full_config() {
     read -rp "🚀 是否需要开启高阶自定义配置？(限制在线IP/流控/Brutal加速/证书/多Core对调) [y/n] (默认 n): " adv_toggle
     if [[ "$adv_toggle" == "y" || "$adv_toggle" == "Y" ]]; then
         echo -e "\n${cyan}--- [进入深海自定义谱系] ---${plain}"
-        read -rp "-> 自定义此 Core 的全局标识名名 (默认 ${core_name}): " user_core_name
+        read -rp "-> 自定义此 Core 的全局标识名 (默认 ${core_name}): " user_core_name
         [[ -n "$user_core_name" ]] && core_name="$user_core_name"
 
         if [[ "$core_type" == "sing" ]]; then
@@ -104,10 +114,8 @@ make_full_config() {
                 ntp_enable="true"
                 ntp_block=', "NTP": { "Enable": true, "Server": "time.apple.com", "ServerPort": 0 }'
             fi
-            # 锁定高级联动路径
             ntp_block="${ntp_block}, \"OriginalPath\": \"/etc/V2bX/sing_origin.json\""
         else
-            # Xray 的专属全套外置组件路径链
             xray_paths_block=', "AssetPath": "/usr/local/V2bX", "DnsConfigPath": "/etc/V2bX/dns.json", "RouteConfigPath": "/etc/V2bX/route.json", "InboundConfigPath": "/etc/V2bX/custom_inbound.json", "OutboundConfigPath": "/etc/V2bX/custom_outbound.json"'
             read -rp "-> 是否为 Xray 节点开启自定义本地 DNS 解析控制？[y/n] (默认 n): " xray_dns_yn
             if [[ "$xray_dns_yn" == "y" || "$xray_dns_yn" == "Y" ]]; then
@@ -121,15 +129,13 @@ make_full_config() {
             fi
         fi
 
-        # 核心设备统计与阀值过滤
         read -rp "-> 设备在线判定流量阈值 (DeviceOnlineMinTraffic, 单位 kB, 默认 100): " input_dt
         [[ "$input_dt" =~ ^[0-9]+$ ]] && dev_traffic="$input_dt"
-        read -rp "-> 最低上报流量阀值 (MinReportTraffic, 极其省带宽, 单位 kB, 默认 0): " input_mr
+        read -rp "-> 最低上报流量阀值 (MinReportTraffic, 单位 kB, 默认 0): " input_mr
         [[ "$input_mr" =~ ^[0-9]+$ ]] && min_report="$input_mr"
         read -rp "-> 是否关闭 TCP Fast Open (TFO)? [y/n] (默认 n, 即保持开启): " tfo_yn
         [[ "$tfo_yn" == "y" || "$tfo_yn" == "Y" ]] && tfo_enable="false"
 
-        # 多路复用与 TCP Brutal 暴躁加速
         if [[ "$core_type" == "sing" ]]; then
             read -rp "-> 是否开启 Singbox 多路复用 (Multiplex) 与 TCP Brutal 暴力加速？[y/n] (默认 n): " mux_yn
             if [[ "$mux_yn" == "y" || "$mux_yn" == "Y" ]]; then
@@ -141,12 +147,10 @@ make_full_config() {
             fi
         fi
 
-        # 本地限制器控制
         read -rp "-> 是否开启小鸡端强制限速 (SpeedLimit, 覆盖面板, 0为不限, 单位 Mbps, 默认 0): " s_lim
         [[ ! "$s_lim" =~ ^[0-9]+$ ]] && s_lim="0"
         limit_block=', "LimitConfig": { "SpeedLimit": '"${s_lim}"', "EnableDynamicSpeedLimit": false }'
 
-        # 豪华全形态自动证书申请控制 (ACME 状态机)
         echo -e "-> 请指定 TLS 证书申请运作模式 (CertMode):"
         echo -e " [1] none (关闭或交由前端处理)\n [2] http (通过本地80端口HTTP申请)\n [3] dns (通过 Cloudflare DNS API 自动化申请)\n [4] self (载入本地指定证书文件)"
         read -rp "请输入选择 [1-4, 默认1]: " c_mode_num
@@ -165,7 +169,6 @@ make_full_config() {
         esac
     fi
 
-    # 1:1 官方树状高阶架构动态组装与落盘
     cat << EOF > /etc/V2bX/config.json
 {
   "Log": {
@@ -201,13 +204,16 @@ make_full_config() {
   ]
 }
 EOF
-    echo -e "${green}[成功] 1:1 官方底层全特性主配置文件已经安全写入 /etc/V2bX/config.json${plain}"
+    echo -e "${green}[成功] 1:1 官方全特性配置文件已经安全写入 /etc/V2bX/config.json${plain}"
 }
 
 # ==================== 【12号功能：外置高级矩阵组件自动化生成】 ====================
 make_advanced_modules() {
     echo -e "\n${yellow}========== 进阶：高级外部功能矩阵配置生成器 ==========${plain}"
-    echo -e " [1] 生成 Sing-box 自定义策略路由组件 (sing_origin.json)\n [2] 生成 Xray 自定义高级 DNS 解锁组件 (dns.json)\n [3] 生成 Xray 强审计自定义拦截路由组件 (route.json)\n [4] 生成 Xray 多端本地入站与自由出口拦截器 (custom_inbound/outbound)"
+    echo -e " [1] 生成 Sing-box 自定义策略路由组件 (sing_origin.json)"
+    echo -e " [2] 生成 Xray 自定义高级 DNS 解锁组件 (dns.json)"
+    echo -e " [3] 生成 Xray 强审计自定义拦截路由组件 (route.json)"
+    echo -e " [4] 生成 Xray 多端本地入站与自由出口拦截器"
     read -rp "请做出你的选择 [1-4]: " am_num
     
     case "$am_num" in
@@ -317,7 +323,6 @@ self_install_core() {
         fi
     done
 
-    # 动态路由规则同步
     wget -O /usr/local/V2bX/geoip.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null || wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
     wget -O /usr/local/V2bX/geosite.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null || wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
 
@@ -340,7 +345,6 @@ EOF
     echo -e "${green}V2bX 服务已注册成功并拉起运转。${plain}"
 }
 
-# 其他基础高可用小工具维持原样
 install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
 update_shell() { curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0; }
 open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F; echo -e "${green}已放行所有网络端口${plain}"; }
