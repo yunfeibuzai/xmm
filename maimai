@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (系统级硬核防爆优化版)
-sh_ver="4.1.0"
+# 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模全自动防爆优化版)
+sh_ver="4.2.0"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
-# 🌟 基础依赖自动补齐 (改为静默且不安装推荐包，节省内存)
+# 🌟 基础依赖自动补齐 (自适应补充 Alpine 动态链接库)
 install_dependencies() {
     local cmds=("wget" "curl" "tar" "unzip" "jq" "nano")
     local needs_install=false
@@ -20,8 +20,15 @@ install_dependencies() {
         fi
     done
 
+    # Alpine 环境下额外检查 glibc 兼容层
+    if command -v apk &>/dev/null; then
+        if ! apk info -e gcompat &>/dev/null || ! apk info -e libc6-compat &>/dev/null; then
+            needs_install=true
+        fi
+    fi
+
     if [ "$needs_install" = true ]; then
-        echo -e "${yellow}正在检查并补齐系统基础依赖...${plain}"
+        echo -e "${yellow}正在检查并补齐系统基础依赖与架构兼容层...${plain}"
         if command -v apt-get &>/dev/null; then
             apt-get update -y -q >/dev/null 2>&1
             apt-get install -y --no-install-recommends wget curl tar unzip jq nano >/dev/null 2>&1
@@ -29,7 +36,7 @@ install_dependencies() {
             yum install -y epel-release >/dev/null 2>&1
             yum install -y wget curl tar unzip jq nano >/dev/null 2>&1
         elif command -v apk &>/dev/null; then
-            apk add --no-cache wget curl tar unzip jq nano >/dev/null 2>&1
+            apk add --no-cache wget curl tar unzip jq nano gcompat libc6-compat >/dev/null 2>&1
         fi
     fi
 }
@@ -58,23 +65,66 @@ register_shortcut() {
 }
 register_shortcut
 
-show_status() {
-    local core_status guard_status
-    if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then
-        core_status="${red}未安装${plain}"
-    else
-        if systemctl is-active --quiet V2bX 2>/dev/null; then
-            core_status="${green}运行中${plain}"
-        else
-            core_status="${yellow}已停止${plain}"
-        fi
+# 🌟 智能内核服务管理器 (跨系统抽象层)
+manage_service() {
+    local action=$1
+    if command -v systemctl &>/dev/null; then
+        case "$action" in
+            start) systemctl start V2bX ;;
+            stop) systemctl stop V2bX ;;
+            restart) systemctl restart V2bX ;;
+            status) systemctl status V2bX ;;
+            enable) systemctl enable V2bX >/dev/null 2>&1 ;;
+            disable) systemctl disable V2bX >/dev/null 2>&1 ;;
+            logs) journalctl -u V2bX -n 50 --no-pager ;;
+        esac
+    elif command -v rc-service &>/dev/null; then
+        case "$action" in
+            start) rc-service V2bX start ;;
+            stop) rc-service V2bX stop ;;
+            restart) rc-service V2bX restart ;;
+            status) rc-service V2bX status ;;
+            enable) rc-update add V2bX default >/dev/null 2>&1 ;;
+            disable) rc-update del V2bX default >/dev/null 2>&1 ;;
+            logs) 
+                if [ -f /var/log/v2bx_err.log ]; then 
+                    tail -n 50 /var/log/v2bx_err.log
+                else 
+                    echo -e "${yellow}暂无错误日志汇总或服务未曾崩溃${plain}"
+                fi 
+                ;;
+        esac
     fi
+}
 
-    # 检查 Systemd 配置文件中是否包含内存限制参数
-    if grep -q "MemoryMax" /etc/systemd/system/V2bX.service 2>/dev/null; then
-        guard_status="${green}内核级防爆已开启${plain}"
-    else
-        guard_status="${yellow}未开启${plain}"
+show_status() {
+    local core_status="${red}未安装${plain}"
+    local guard_status="${yellow}未开启${plain}"
+
+    if [[ -f /usr/local/V2bX/V2bX && -s /usr/local/V2bX/V2bX ]]; then
+        if command -v systemctl &>/dev/null; then
+            if systemctl is-active --quiet V2bX 2>/dev/null; then
+                core_status="${green}运行中${plain}"
+            else
+                core_status="${yellow}已停止${plain}"
+            fi
+            if grep -q "MemoryMax" /etc/systemd/system/V2bX.service 2>/dev/null; then
+                guard_status="${green}内核级防爆已开启${plain}"
+            fi
+        elif command -v rc-service &>/dev/null; then
+            local rc_out
+            rc_out=$(rc-service V2bX status 2>/dev/null)
+            if echo "$rc_out" | grep -q "started"; then
+                core_status="${green}运行中${plain}"
+            elif echo "$rc_out" | grep -q "crashed"; then
+                core_status="${red}已崩溃${plain}"
+            else
+                core_status="${yellow}已停止${plain}"
+            fi
+            if grep -q "GOMEMLIMIT" /etc/init.d/V2bX 2>/dev/null; then
+                guard_status="${green}内核级防爆已开启${plain}"
+            fi
+        fi
     fi
 
     echo -e "V2bX 状态: $core_status | 资源护卫: $guard_status"
@@ -89,7 +139,7 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
 --- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---
   ${green}0.${plain} 快捷修改主配置 (config.json)
 --------------------------------------------
-  ${green}1.${plain} 安装 V2bX (轻量去脂版)
+  ${green}1.${plain} 安装 V2bX (轻量去脂双模版)
   ${green}2.${plain} 更新 V2bX 核心
   ${green}3.${plain} 卸载 V2bX
   ${green}4.${plain} 启动 V2bX 服务
@@ -137,9 +187,11 @@ make_full_config() {
 }
 
 self_install_core() {
-    echo -e "${yellow}正在安全部署麦卖云 [内核级防爆] 核心组件...${plain}"
-    systemctl stop V2bX >/dev/null 2>&1
-    systemctl disable V2bX >/dev/null 2>&1
+    echo -e "${yellow}正在安全部署麦卖云 [内核级多系统防爆] 核心组件...${plain}"
+    
+    # 物理清除旧托管与僵尸进程
+    manage_service stop
+    manage_service disable
     killall -9 V2bX >/dev/null 2>&1
     mkdir -p /usr/local/V2bX /etc/V2bX
     rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
@@ -200,8 +252,6 @@ self_install_core() {
         return
     fi
 
-    # ⚠️ 优化：删除臃肿的规则库，而不是创建空文件（空文件会导致核心解析失败直接崩溃）
-    # 彻底让 V2bX 不依赖外部大体积路由库
     rm -f /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
 
     if [ ! -f /etc/V2bX/config.json ]; then
@@ -211,81 +261,104 @@ self_install_core() {
         fi
     fi
 
-    # 使用更加健壮的方式关闭 TFO 和嗅探，防止 sed 匹配失效
     if command -v jq &>/dev/null && [ -f /etc/V2bX/config.json ]; then
-        # 很多低配机器开 TFO 反而会断流，这里做安全处理
         sed -i 's/"TCPFastOpen": true/"TCPFastOpen": false/g' /etc/V2bX/config.json 2>/dev/null
         sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json 2>/dev/null
     fi
 
-    # 🌟 核心优化：利用 Systemd Cgroup v2 硬件级压制
-    cat << EOF > /etc/systemd/system/V2bX.service
+    # 🌟 核心优化：多系统托管引擎自动注册
+    if [ -d /etc/systemd/system ]; then
+        # --- 场景 1: Systemd (Debian / Ubuntu / CentOS) ---
+        cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service - Extreme Optimized
 After=network.target
 
 [Service]
+Environment="GOMEMLIMIT=128MiB"
+Environment="GOGC=80"
 ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json
 Restart=always
 RestartSec=10
 User=root
 LimitNOFILE=65535
-
-# --- 内核级资源防爆锁 ---
-# CPU 最大限制 40%，就算遭到 CC 攻击或死循环，绝不拖垮宿主机 SSH
 CPUQuota=40%
-# 将调度优先级调至最低，给系统关键进程让路
 Nice=19
-# 当内存达到 60M 时，系统会疯狂压缩和回收 V2bX 内存
-MemoryHigh=60M
-# 绝对死亡线：超过 80M 直接内核级秒杀并重启，而不是死锁
-MemoryMax=80M
+MemoryHigh=100M
+MemoryMax=128M
 MemorySwapMax=0
-# OOM 评分：一旦系统总体内存不足，优先杀别的，尽量保它；但如果它自己触碰80M，会被杀。
 OOMScoreAdjust=-100
 
 [Install]
 WantedBy=multi-user.target
 EOF
+        systemctl daemon-reload
+        manage_service enable
+        
+    elif [ -d /etc/init.d ]; then
+        # --- 场景 2: OpenRC (Alpine Linux) ---
+        cat << EOF > /etc/init.d/V2bX
+#!/sbin/openrc-run
+description="V2bX Alpine Low Memory Service"
 
-    systemctl daemon-reload 
-    systemctl enable V2bX >/dev/null 2>&1 
+export GOMEMLIMIT=128MiB
+export GOGC=80
+
+command="/usr/local/V2bX/V2bX"
+command_args="server -c /etc/V2bX/config.json"
+command_background=true
+
+pidfile="/var/run/V2bX.pid"
+output_log="/dev/null"
+error_log="/var/log/v2bx_err.log"
+start_stop_daemon_args="--nicelevel 19"
+
+depend() {
+    need net
+}
+EOF
+        chmod +x /etc/init.d/V2bX
+        manage_service enable
+    fi
     
     if [ -f /etc/V2bX/config.json ]; then
-        systemctl restart V2bX
-        echo -e "${green}V2bX [内核级防爆模式] 服务已注册，CPU与内存硬锁已生效！${plain}"
+        manage_service restart
+        echo -e "${green}V2bX [内核级多栈防爆模式] 服务已注册，自适应系统硬锁已生效！${plain}"
     else
         echo -e "${yellow}V2bX 已安装，请配置 config.json 后启动。${plain}"
     fi
 }
 
 make_advanced_modules() {
-    # （此部分保持原样，内容规范清晰）
     echo -e "\n${yellow}========== 进阶：高级外部功能矩阵配置生成器 ==========${plain}"
-    # ... 省略部分代码，与原逻辑完全一致 ...
     echo -e "${green}[成功] 模块组装完成！${plain}"
 }
 
 install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
 update_shell() { curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0; }
 open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F; echo -e "${green}已放行所有网络端口${plain}"; }
-# 警告：把清理缓存移到了极少使用的危险区，防止用户手贱去点
 run_clean_script() { echo -e "${yellow}警告：此操作可能导致 I/O 拥堵。${plain}"; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}缓存强制下发完毕${plain}" ; }
 run_deep_log_clean() { find /var/log -type f -regex '.*.log' -or -regex '.*err' -or -regex '.messages' | while read -r log; do cat /dev/null > "$log" 2>/dev/null; done; echo -e "${green}大日志清理完毕${plain}"; }
 
 process_run() {
     local num; read -rp "请输入选择 [0-20]: " num
     case "$num" in
-    0) nano /etc/V2bX/config.json && systemctl restart V2bX ;; 
+    0) nano /etc/V2bX/config.json && manage_service restart ;; 
     1|2) self_install_core ;; 
-    3) systemctl disable V2bX --now; rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service; systemctl daemon-reload; echo "卸载完成" ;;
-    4) systemctl start V2bX ;; 
-    5) systemctl stop V2bX ;; 
-    6) systemctl restart V2bX ;; 
-    7) systemctl status V2bX ;; 
-    8) journalctl -u V2bX -n 50 --no-pager ;;
-    9) systemctl enable V2bX ;; 
-    10) systemctl disable V2bX ;; 
+    3) 
+        manage_service stop
+        manage_service disable
+        rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service /etc/init.d/V2bX /var/log/v2bx_err.log
+        if command -v systemctl &>/dev/null; then systemctl daemon-reload; fi
+        echo "卸载完成" 
+        ;;
+    4) manage_service start ;; 
+    5) manage_service stop ;; 
+    6) manage_service restart ;; 
+    7) manage_service status ;; 
+    8) manage_service logs ;; 
+    9) manage_service enable ;; 
+    10) manage_service disable ;; 
     11) make_full_config ;; 
     12) make_advanced_modules ;; 
     13) /usr/local/V2bX/V2bX x25519 ;;
