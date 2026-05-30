@@ -1,19 +1,39 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (系统深度净化版)
-sh_ver="3.7.8"
+sh_ver="3.7.9"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
-# 基础依赖自动补齐
-for cmd in wget curl tar unzip jq nano; do
-    if ! command -v $cmd &>/dev/null; then
-        apt-get update && apt-get install -y $cmd || yum install -y $cmd || apk add --no-cache $cmd
+# 🌟 增强版：基础依赖自动补齐 (修复 update 失败导致无法安装的问题)
+install_dependencies() {
+    local cmds=("wget" "curl" "tar" "unzip" "jq" "nano")
+    local needs_install=false
+
+    for cmd in "${cmds[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            needs_install=true
+            break
+        fi
+    done
+
+    if [ "$needs_install" = true ]; then
+        echo -e "${yellow}正在检查并补齐系统基础依赖...${plain}"
+        if command -v apt-get &>/dev/null; then
+            apt-get update -y >/dev/null 2>&1
+            apt-get install -y wget curl tar unzip jq nano >/dev/null 2>&1
+        elif command -v yum &>/dev/null; then
+            yum install -y epel-release >/dev/null 2>&1
+            yum install -y wget curl tar unzip jq nano >/dev/null 2>&1
+        elif command -v apk &>/dev/null; then
+            apk add --no-cache wget curl tar unzip jq nano >/dev/null 2>&1
+        fi
     fi
-done
+}
+install_dependencies
 
 # 快捷命令注册
 register_shortcut() {
@@ -89,12 +109,11 @@ make_full_config() {
     local remote_wizard_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
     local proxy_wizard_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
     
-    # 双重保险下载逻辑，增加镜像源防止墙
     wget -O /tmp/xmm2 "$proxy_wizard_url" --timeout=10 2>/dev/null || wget -O /tmp/xmm2 "$remote_wizard_url" --timeout=10 2>/dev/null || curl -sL "$remote_wizard_url" -o /tmp/xmm2
     
     if [[ -f /tmp/xmm2 && -s /tmp/xmm2 ]]; then
         chmod +x /tmp/xmm2
-        bash /tmp/xmm2  # 独立沙箱安全运行，防变量污染
+        bash /tmp/xmm2
         rm -f /tmp/xmm2
     else
         echo -e "${red}错误：无法连接到云端仓库，请检查网络或确认 GitHub 上的 xmm2 文件是否存在！${plain}"
@@ -104,7 +123,6 @@ make_full_config() {
 self_install_core() {
     echo -e "${yellow}正在安全部署麦卖云全功能核心组件...${plain}"
     
-    # 停止已有服务并清理旧文件
     systemctl stop V2bX >/dev/null 2>&1
     systemctl disable V2bX >/dev/null 2>&1
     killall -9 V2bX >/dev/null 2>&1
@@ -118,11 +136,9 @@ self_install_core() {
         *) arch="linux-64" ;; 
     esac
     
-    # 获取最新版本，若失败则默认 v0.3.9
     local last_version=$(curl -sL "https://api.github.com/repos/wyx2685/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     [[ -z "$last_version" ]] && last_version="v0.3.9"
 
-    # 替换已失效的 ghproxy.com，增加备用镜像节点
     local urls=(
         "https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
         "https://ghp.ci/https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
@@ -135,17 +151,26 @@ self_install_core() {
         echo -e "${yellow}探测拉取线: ${url}${plain}"
         local tmp_file="/tmp/v2bx_tmp_${RANDOM}.zip"
         
-        # 移除导致无法排错的 2>/dev/null，让用户能看到下载是成功还是 404
         wget -q --show-progress -O "$tmp_file" "$url" --timeout=15 
 
         if [[ -f "$tmp_file" && -s "$tmp_file" ]]; then
-            # 校验是否为 ZIP 文件
             if head -c 4 "$tmp_file" | grep -q 'PK'; then
+                
+                # 🌟 二次紧急救援：如果解压前发现没有 unzip，强制安装
+                if ! command -v unzip &>/dev/null; then
+                    echo -e "${red}[警告] 系统仍然缺失 unzip 组件，正在执行紧急安装...${plain}"
+                    apt-get install -y unzip >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || apk add --no-cache unzip >/dev/null 2>&1
+                    if ! command -v unzip &>/dev/null; then
+                        echo -e "${red}[致命错误] unzip 安装失败，无法解压核心文件，请手动运行 apt/yum install unzip 安装！${plain}"
+                        rm -f "$tmp_file"
+                        return
+                    fi
+                fi
+
                 local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
                 mkdir -p "$tmp_dir"
                 unzip -q -o "$tmp_file" -d "$tmp_dir"
                 
-                # 寻找解压出来的二进制文件
                 local b_target=""
                 [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
                 [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
@@ -156,7 +181,6 @@ self_install_core() {
                 fi
                 rm -rf "$tmp_dir"
             elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
-                # 如果直接下载的就是二进制文件
                 mv -f "$tmp_file" /usr/local/V2bX/V2bX && success=true
             fi
         fi
@@ -174,7 +198,6 @@ self_install_core() {
         return
     fi
 
-    # 替换失效代理获取规则文件
     echo -e "${cyan}正在拉取路由规则文件...${plain}"
     wget -q -O /usr/local/V2bX/geoip.dat "https://ghp.ci/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" || wget -q -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat"
     wget -q -O /usr/local/V2bX/geosite.dat "https://ghp.ci/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" || wget -q -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat"
@@ -188,7 +211,6 @@ self_install_core() {
         fi
     fi
 
-    # 增加 RestartSec 缓冲，防止无配置时的 CPU 爆满
     cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service
@@ -207,7 +229,6 @@ EOF
     systemctl daemon-reload 
     systemctl enable V2bX >/dev/null 2>&1 
     
-    # 仅当配置文件存在时才尝试拉起服务
     if [ -f /etc/V2bX/config.json ]; then
         systemctl restart V2bX
         echo -e "${green}V2bX 服务已注册成功并尝试拉起运转。${plain}"
@@ -264,7 +285,6 @@ open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptable
 run_clean_script() { free -h; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}系统残留空间已强制净化完毕${plain}"; }
 run_deep_log_clean() { find /var/log -type f -regex '.*.log' -or -regex '.*err' -or -regex '.messages' | while read -r log; do cat /dev/null > "$log" 2>/dev/null; done; echo -e "${green}大日志清理完毕${plain}"; }
 
-# 🌟 精准修复：补齐 5 个星号，健壮性安全判断写入状态
 start_daemon() { 
     cat << 'EOF' > /usr/local/bin/V2bX_daemon.sh
 #!/bin/bash
