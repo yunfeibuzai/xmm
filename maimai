@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模全自动防爆优化版)
-sh_ver="4.2.0"
+# 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+自定义防爆版)
+sh_ver="4.3.0"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
-# 🌟 基础依赖自动补齐 (自适应补充 Alpine 动态链接库)
+# 🌟 基础依赖自动补齐
 install_dependencies() {
     local cmds=("wget" "curl" "tar" "unzip" "jq" "nano")
     local needs_install=false
@@ -20,7 +20,6 @@ install_dependencies() {
         fi
     done
 
-    # Alpine 环境下额外检查 glibc 兼容层
     if command -v apk &>/dev/null; then
         if ! apk info -e gcompat &>/dev/null || ! apk info -e libc6-compat &>/dev/null; then
             needs_install=true
@@ -65,7 +64,7 @@ register_shortcut() {
 }
 register_shortcut
 
-# 🌟 智能内核服务管理器 (跨系统抽象层)
+# 🌟 智能内核服务管理器 (跨系统系统抽象层)
 manage_service() {
     local action=$1
     if command -v systemctl &>/dev/null; then
@@ -99,7 +98,7 @@ manage_service() {
 
 show_status() {
     local core_status="${red}未安装${plain}"
-    local guard_status="${yellow}未开启${plain}"
+    local guard_status="${yellow}未开启 (原生态无锁)${plain}"
 
     if [[ -f /usr/local/V2bX/V2bX && -s /usr/local/V2bX/V2bX ]]; then
         if command -v systemctl &>/dev/null; then
@@ -108,7 +107,7 @@ show_status() {
             else
                 core_status="${yellow}已停止${plain}"
             fi
-            if grep -q "MemoryMax" /etc/systemd/system/V2bX.service 2>/dev/null; then
+            if grep -q "MemoryMax" /etc/systemd/system/V2bX.service 2>/dev/null || grep -q "GOMEMLIMIT" /etc/systemd/system/V2bX.service 2>/dev/null; then
                 guard_status="${green}内核级防爆已开启${plain}"
             fi
         elif command -v rc-service &>/dev/null; then
@@ -139,7 +138,7 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
 --- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---
   ${green}0.${plain} 快捷修改主配置 (config.json)
 --------------------------------------------
-  ${green}1.${plain} 安装 V2bX (轻量去脂双模版)
+  ${green}1.${plain} 安装 V2bX (轻量去脂自适应版)
   ${green}2.${plain} 更新 V2bX 核心
   ${green}3.${plain} 卸载 V2bX
   ${green}4.${plain} 启动 V2bX 服务
@@ -187,8 +186,33 @@ make_full_config() {
 }
 
 self_install_core() {
-    echo -e "${yellow}正在安全部署麦卖云 [内核级多系统防爆] 核心组件...${plain}"
+    echo -e "${yellow}正在准备部署麦卖云后端核心组件...${plain}"
     
+    # 交互式选择资源护卫限额策略
+    echo -e "\n${cyan}====== 🛡️ 资源护卫限制策略选择 ======${plain}"
+    echo -e "  ${green}1.${plain} 原生态无锁版 (满血狂飙，适合高配小鸡或大流量节点)"
+    echo -e "  ${green}2.${plain} 标准防爆锁 (128M 内存锁 + 40% CPU 压制，推荐普通小鸡)"
+    echo -e "  ${green}3.${plain} 极致低配锁 (40M 内存锁 + 20% CPU 压制，适合极限清贫的 NAT 鸡)"
+    echo -e "  ${green}4.${plain} 自定义限额 (手动指定你想给的内存和 CPU 上限)"
+    read -rp "请选择限额策略 [1-4] (默认 1): " limit_opt
+    [[ -z "$limit_opt" ]] && limit_opt=1
+
+    local mem_limit=""
+    local cpu_limit=""
+    
+    if [ "$limit_opt" -eq 2 ]; then
+        mem_limit=128
+        cpu_limit=40
+    elif [ "$limit_opt" -eq 3 ]; then
+        mem_limit=40
+        cpu_limit=20
+    elif [ "$limit_opt" -eq 4 ]; then
+        read -rp "请输入允许核心使用的内存硬性上限 (单位 MiB, 例如 256): " mem_limit
+        read -rp "请输入允许核心使用的最大 CPU 使用率 (单位 %, 例如 60): " cpu_limit
+        [[ -z "$mem_limit" ]] && mem_limit=128
+        [[ -z "$cpu_limit" ]] && cpu_limit=40
+    fi
+
     # 物理清除旧托管与僵尸进程
     manage_service stop
     manage_service disable
@@ -266,32 +290,38 @@ self_install_core() {
         sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json 2>/dev/null
     fi
 
-    # 🌟 核心优化：多系统托管引擎自动注册
+    # 🌟 核心优化：多系统托管引擎自动注册 (动态注入护卫限额)
     if [ -d /etc/systemd/system ]; then
         # --- 场景 1: Systemd (Debian / Ubuntu / CentOS) ---
         cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
-Description=V2bX Service - Extreme Optimized
+Description=V2bX Service - Adaptive Managed
 After=network.target
 
 [Service]
-Environment="GOMEMLIMIT=128MiB"
-Environment="GOGC=80"
 ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json
 Restart=always
 RestartSec=10
 User=root
 LimitNOFILE=65535
-CPUQuota=40%
+EOF
+
+        # 如果不是原生态无锁版，动态向 Systemd 注入硬件限制参数
+        if [ "$limit_opt" -ne 1 ]; then
+            local high_mark=$((mem_limit * 8 / 10))
+            cat << EOF >> /etc/systemd/system/V2bX.service
+Environment="GOMEMLIMIT=${mem_limit}MiB"
+Environment="GOGC=80"
+CPUQuota=${cpu_limit}%
 Nice=19
-MemoryHigh=100M
-MemoryMax=128M
+MemoryHigh=${high_mark}M
+MemoryMax=${mem_limit}M
 MemorySwapMax=0
 OOMScoreAdjust=-100
-
-[Install]
-WantedBy=multi-user.target
 EOF
+        fi
+
+        echo -e "[Install]\nWantedBy=multi-user.target" >> /etc/systemd/system/V2bX.service
         systemctl daemon-reload
         manage_service enable
         
@@ -299,19 +329,30 @@ EOF
         # --- 场景 2: OpenRC (Alpine Linux) ---
         cat << EOF > /etc/init.d/V2bX
 #!/sbin/openrc-run
-description="V2bX Alpine Low Memory Service"
+description="V2bX Alpine Service"
+EOF
 
-export GOMEMLIMIT=128MiB
+        if [ "$limit_opt" -ne 1 ]; then
+            cat << EOF >> /etc/init.d/V2bX
+export GOMEMLIMIT=${mem_limit}MiB
 export GOGC=80
+EOF
+        fi
 
+        cat << EOF >> /etc/init.d/V2bX
 command="/usr/local/V2bX/V2bX"
 command_args="server -c /etc/V2bX/config.json"
 command_background=true
-
 pidfile="/var/run/V2bX.pid"
 output_log="/dev/null"
 error_log="/var/log/v2bx_err.log"
-start_stop_daemon_args="--nicelevel 19"
+EOF
+
+        if [ "$limit_opt" -ne 1 ]; then
+            echo 'start_stop_daemon_args="--nicelevel 19"' >> /etc/init.d/V2bX
+        fi
+
+        cat << EOF >> /etc/init.d/V2bX
 
 depend() {
     need net
@@ -323,7 +364,11 @@ EOF
     
     if [ -f /etc/V2bX/config.json ]; then
         manage_service restart
-        echo -e "${green}V2bX [内核级多栈防爆模式] 服务已注册，自适应系统硬锁已生效！${plain}"
+        if [ "$limit_opt" -eq 1 ]; then
+            echo -e "${green}V2bX [原生态无锁模式] 部署成功，性能封印已解除！${plain}"
+        else
+            echo -e "${green}V2bX [自定义资源护卫] 部署成功！限额参数已压制：内存 ${mem_limit}M / CPU ${cpu_limit}%！${plain}"
+        fi
     else
         echo -e "${yellow}V2bX 已安装，请配置 config.json 后启动。${plain}"
     fi
