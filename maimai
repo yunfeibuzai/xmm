@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (特卡内存深度净化与快捷键冲突完美修复版)
-sh_ver="3.9.5"
+# 麦卖云 V2bX 后端全能王牌脚本 (特卡去脂版 + 安全自愈守护 + 快捷键修复版)
+sh_ver="4.0.0"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
@@ -35,15 +35,15 @@ install_dependencies() {
 }
 install_dependencies
 
-# 🌟 快捷命令注册 (完美撕裂并解决 "are the same file" 自复制冲突死锁)
+# 🌟 快捷命令注册 (斩断 "are the same file" 自复制循环死锁)
 register_shortcut() {
     mkdir -p /usr/local/bin
     
-    # 1. 彻底斩断并清理旧的重名链接，防范 cp 指向性死锁
+    # 1. 彻底解开引用链，强删潜在冲突路径
     rm -f /usr/bin/maimai
     rm -f /usr/bin/v2bx
     
-    # 2. 仅当运行源文件与目标文件非同一实体时，执行物理拷贝
+    # 2. 只有当前执行路径不是目标核心路径时，才执行覆盖拷贝
     if [[ -f "$0" ]]; then
         local current_abs_path
         current_abs_path=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
@@ -54,7 +54,7 @@ register_shortcut() {
         fi
     fi
     
-    # 3. 干净利落地重建绝对路径软连接矩阵
+    # 3. 干净重建符号链接
     if [[ -f /usr/local/bin/maimai_core.sh ]]; then
         ln -sf /usr/local/bin/maimai_core.sh /usr/bin/maimai
         ln -sf /usr/local/bin/maimai_core.sh /usr/bin/v2bx
@@ -65,11 +65,24 @@ register_shortcut
 
 # 状态看板颜色保持
 show_status() {
+    local core_status daemon_status
     if [[ ! -f /usr/local/V2bX/V2bX ]] || [[ ! -s /usr/local/V2bX/V2bX ]]; then
-        echo -e "V2bX 状态: ${red}未安装或核心损坏${plain}"
-        return
+        core_status="${red}未安装或核心损坏${plain}"
+    else
+        if systemctl is-active --quiet V2bX 2>/dev/null; then
+            core_status="${green}开${plain}"
+        else
+            core_status="${yellow}未启动${plain}"
+        fi
     fi
-    systemctl is-active --quiet V2bX 2>/dev/null && echo -e "V2bX 状态: ${green}开${plain}" || echo -e "V2bX 状态: ${yellow}未启动${plain}"
+
+    if ps aux | grep -v grep | grep -q "V2bX_daemon.sh"; then
+        daemon_status="${green}已开启(安全低耗版)${plain}"
+    else
+        daemon_status="${red}未运行${plain}"
+    fi
+
+    echo -e "V2bX 状态: $core_status | 自愈守护: $daemon_status"
 }
 
 show_menu() {
@@ -97,6 +110,8 @@ ${magenta}[🌟 核心战力配置向导群]${plain}
   ${green}12.${plain} 📁 深度配置：一键生成外置高级组件
   ${green}13.${plain} 生成 X25519 密钥 (Reality 必备)
   ${green}14.${plain} 升级本维护脚本
+  ${green}15.${plain} ⚙️ 开启自动守护 (智能防爆/防卡死版)
+  ${green}16.${plain} ⚙️ 关闭自动守护
 --------------------------------------------
 ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}17.${plain} 豪华版 BBR 加速控制台
@@ -110,6 +125,47 @@ EOF
 )
     printf '\033[H\033[2J'
     printf '%b\n%b\n' "$menu_text" "$status_text"
+}
+
+# 🌟 新增：智能安全自愈守护引擎 (带物理内存防火墙，绝不锁死CPU)
+start_safe_daemon() {
+    echo -e "${cyan}正在配置麦卖云智能安全自愈守护进程...${plain}"
+    cat << 'EOF' > /usr/local/bin/V2bX_daemon.sh
+#!/bin/bash
+# 麦卖云智能自愈引擎 - 专治1G/512M特卡小鸡爆内存与CPU 100%死锁
+while true; do
+    if ! systemctl is-active --quiet V2bX 2>/dev/null; then
+        # 核心挂掉时，先拦截检测物理可用内存水位
+        avail_mem=$(free -m | awk '/Mem:/ {print $7}')
+        if [ -z "$avail_mem" ] || [ "$avail_mem" -lt 35 ]; then
+            # 物理内存危在旦夕，盲目拉起必锁死CPU！先强制物理回血，再温和启动
+            sync && echo 3 > /proc/sys/vm/drop_caches
+            sleep 3
+        fi
+        systemctl restart V2bX
+        sleep 20 # 预留20秒宽限期，等节点彻底完成初始化，防止高频激荡
+    fi
+    sleep 35 # 每35秒优雅巡检一次，将CPU开销降为0
+done
+EOF
+    chmod +x /usr/local/bin/V2bX_daemon.sh
+    
+    # 清理并挂载开机引导
+    crontab -l 2>/dev/null | grep -v "V2bX_daemon" | crontab -
+    (crontab -l 2>/dev/null; echo "@reboot nohup /usr/local/bin/V2bX_daemon.sh >/dev/null 2>&1 &") | crontab -
+    
+    # 强杀旧的并重新静默后台拉起
+    killall -9 V2bX_daemon.sh >/dev/null 2>&1
+    nohup /usr/local/bin/V2bX_daemon.sh >/dev/null 2>&1 &
+    echo -e "${green}[成功] 智能守护任务已挂载！已集成内存防火墙，探针和核心双向安全。${plain}"
+}
+
+stop_safe_daemon() {
+    echo -e "${yellow}正在卸载自愈守护...${plain}"
+    crontab -l 2>/dev/null | grep -v "V2bX_daemon" | crontab -
+    killall -9 V2bX_daemon.sh >/dev/null 2>&1
+    rm -f /usr/local/bin/V2bX_daemon.sh
+    echo -e "${green}[成功] 守护进程已彻底关闭并物理移除。${plain}"
 }
 
 make_full_config() {
@@ -129,8 +185,14 @@ make_full_config() {
 }
 
 self_install_core() {
+    # 内存极度濒危防御线
+    local cur_avail=$(free -m | awk '/Mem:/ {print $7}')
+    if [ -n "$cur_avail" ] && [ "$cur_avail" -lt 30 ]; then
+        echo -e "${yellow}[防御触发] 检测到当前小鸡可用内存低于30M，正在执行无感物理回血...${plain}"
+        sync && echo 3 > /proc/sys/vm/drop_caches
+    fi
+
     echo -e "${yellow}正在安全部署麦卖云 [轻量低耗] 核心组件...${plain}"
-    
     systemctl stop V2bX >/dev/null 2>&1
     systemctl disable V2bX >/dev/null 2>&1
     killall -9 V2bX >/dev/null 2>&1
@@ -164,15 +226,9 @@ self_install_core() {
         if [[ -f "$tmp_file" && -s "$tmp_file" ]]; then
             if head -c 4 "$tmp_file" | grep -q 'PK'; then
                 
-                # 二次紧急救援安装 unzip
                 if ! command -v unzip &>/dev/null; then
                     echo -e "${red}[警告] 系统仍然缺失 unzip 组件，正在执行紧急安装...${plain}"
                     apt-get install -y unzip >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || apk add --no-cache unzip >/dev/null 2>&1
-                    if ! command -v unzip &>/dev/null; then
-                        echo -e "${red}[致命错误] unzip 安装失败，请手动运行 apt/yum install unzip 安装！${plain}"
-                        rm -f "$tmp_file"
-                        return
-                    fi
                 fi
 
                 local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
@@ -206,7 +262,7 @@ self_install_core() {
         return
     fi
 
-    # 🌟 特卡极致去脂优化：物理剔除超占内存的 geoip/geosite 展开映射，改用空文件垫底
+    # 🌟 特卡极致去脂优化：剔除超占内存的 geoip/geosite，改用空文件垫底，完美降温
     rm -f /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
     touch /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
 
@@ -219,7 +275,7 @@ self_install_core() {
         fi
     fi
 
-    # 🌟 特卡极致位移降温：实时对落盘配置执行强力 sed 篡改，杜绝嗅探与 TFO 吃物理内存
+    # 🌟 特卡极致降温拦截器：关闭嗅探与 TFO 防止顶掉探针
     if [ -f /etc/V2bX/config.json ]; then
         sed -i 's/"TCPFastOpen": true/"TCPFastOpen": false/g' /etc/V2bX/config.json
         sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json
@@ -304,7 +360,7 @@ process_run() {
     case "$num" in
     0) nano /etc/V2bX/config.json && [ -f /etc/V2bX/config.json ] && sed -i 's/"TCPFastOpen": true/"TCPFastOpen": false/g' /etc/V2bX/config.json && sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json && systemctl daemon-reload && systemctl restart V2bX ;; 
     1|2) self_install_core ;; 
-    3) rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service && echo "卸载完成" ;;
+    3) stop_safe_daemon && rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service && echo "卸载完成" ;;
     4) systemctl daemon-reload && systemctl start V2bX ;; 
     5) systemctl stop V2bX ;; 
     6) systemctl daemon-reload && systemctl reset-failed V2bX && [ -f /etc/V2bX/config.json ] && sed -i 's/"TCPFastOpen": true/"TCPFastOpen": false/g' /etc/V2bX/config.json && sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json && systemctl restart V2bX ;; 
@@ -316,6 +372,8 @@ process_run() {
     12) make_advanced_modules ;; 
     13) /usr/local/V2bX/V2bX x25519 ;;
     14) update_shell ;; 
+    15) start_safe_daemon ;;
+    16) stop_safe_daemon ;;
     17) install_bbr ;; 
     18) open_ports ;; 
     19) run_clean_script ;; 
