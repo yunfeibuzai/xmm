@@ -87,9 +87,10 @@ EOF
 make_full_config() {
     echo -e "${cyan}正在从麦卖云秘密仓库拉取最新向导引擎...${plain}"
     local remote_wizard_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
+    local proxy_wizard_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
     
-    # 双重保险下载逻辑
-    wget -O /tmp/xmm2 "$remote_wizard_url" --timeout=10 2>/dev/null || curl -sL "$remote_wizard_url" -o /tmp/xmm2
+    # 双重保险下载逻辑，增加镜像源防止墙
+    wget -O /tmp/xmm2 "$proxy_wizard_url" --timeout=10 2>/dev/null || wget -O /tmp/xmm2 "$remote_wizard_url" --timeout=10 2>/dev/null || curl -sL "$remote_wizard_url" -o /tmp/xmm2
     
     if [[ -f /tmp/xmm2 && -s /tmp/xmm2 ]]; then
         chmod +x /tmp/xmm2
@@ -102,47 +103,65 @@ make_full_config() {
 
 self_install_core() {
     echo -e "${yellow}正在安全部署麦卖云全功能核心组件...${plain}"
+    
+    # 停止已有服务并清理旧文件
     systemctl stop V2bX >/dev/null 2>&1
+    systemctl disable V2bX >/dev/null 2>&1
     killall -9 V2bX >/dev/null 2>&1
     mkdir -p /usr/local/V2bX /etc/V2bX
     rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
 
     local arch=$(uname -m)
-    case "${arch}" in x86_64 | amd64) arch="linux-64" ;; arm64 | aarch64) arch="linux-arm64-v8a" ;; *) arch="linux-64" ;; esac
-    local last_version=$(curl -Ls "https://api.github.com/repos/wyx2685/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    case "${arch}" in 
+        x86_64 | amd64) arch="linux-64" ;; 
+        arm64 | aarch64) arch="linux-arm64-v8a" ;; 
+        *) arch="linux-64" ;; 
+    esac
+    
+    # 获取最新版本，若失败则默认 v0.3.9
+    local last_version=$(curl -sL "https://api.github.com/repos/wyx2685/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     [[ -z "$last_version" ]] && last_version="v0.3.9"
 
+    # 替换已失效的 ghproxy.com，增加备用镜像节点
     local urls=(
-        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX"
-        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX-linux-64.zip"
         "https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
-        "https://mirror.ghproxy.com/https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
+        "https://ghp.ci/https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
+        "https://mirror.ghproxy.net/https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bX-linux-64.zip"
     )
 
     local success=false
     for url in "${urls[@]}"; do
         echo -e "${yellow}探测拉取线: ${url}${plain}"
-        local tmp_file="/tmp/v2bx_tmp_${RANDOM}"
-        wget -O "$tmp_file" "$url" --timeout=15 2>/dev/null
+        local tmp_file="/tmp/v2bx_tmp_${RANDOM}.zip"
+        
+        # 移除导致无法排错的 2>/dev/null，让用户能看到下载是成功还是 404
+        wget -q --show-progress -O "$tmp_file" "$url" --timeout=15 
 
         if [[ -f "$tmp_file" && -s "$tmp_file" ]]; then
+            # 校验是否为 ZIP 文件
             if head -c 4 "$tmp_file" | grep -q 'PK'; then
                 local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
                 mkdir -p "$tmp_dir"
-                unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1
+                unzip -q -o "$tmp_file" -d "$tmp_dir"
+                
+                # 寻找解压出来的二进制文件
                 local b_target=""
                 [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
                 [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
                 [[ -f "$tmp_dir/V2bX-linux-64" ]] && b_target="$tmp_dir/V2bX-linux-64"
+                
                 if [[ -n "$b_target" && -f "$b_target" ]] && head -c 4 "$b_target" | grep -q 'ELF'; then
                     mv -f "$b_target" /usr/local/V2bX/V2bX && success=true
                 fi
                 rm -rf "$tmp_dir"
             elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
+                # 如果直接下载的就是二进制文件
                 mv -f "$tmp_file" /usr/local/V2bX/V2bX && success=true
             fi
         fi
         rm -f "$tmp_file"
+        
         if [ "$success" = true ]; then
             chmod +x /usr/local/V2bX/V2bX
             echo -e "${green}[成功] 核心拉取成功并已通过 ELF 二进制合法性校验！${plain}"
@@ -150,18 +169,26 @@ self_install_core() {
         fi
     done
 
-    wget -O /usr/local/V2bX/geoip.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null || wget -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" 2>/dev/null
-    wget -O /usr/local/V2bX/geosite.dat "https://mirror.ghproxy.com/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null || wget -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" 2>/dev/null
+    if [ "$success" = false ]; then
+        echo -e "${red}[错误] 所有拉取线路均失败，请检查服务器网络或 DNS 设置！${plain}"
+        return
+    fi
+
+    # 替换失效代理获取规则文件
+    echo -e "${cyan}正在拉取路由规则文件...${plain}"
+    wget -q -O /usr/local/V2bX/geoip.dat "https://ghp.ci/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" || wget -q -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat"
+    wget -q -O /usr/local/V2bX/geosite.dat "https://ghp.ci/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" || wget -q -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat"
 
     if [ ! -f /etc/V2bX/config.json ]; then
-        read -rp "是否生成配置文件？(y/n)" ask_gen_config
+        read -rp "未检测到配置文件，是否立即生成？(y/n) " ask_gen_config
         if [[ "$ask_gen_config" == "y" || "$ask_gen_config" == "Y" ]]; then
             make_full_config
         else
-            echo -e "${yellow}[提示] 跳过配置文件自动生成，请后续通过功能 11 手动创建。${plain}"
+            echo -e "${yellow}[警告] 跳过配置文件生成。服务将无法启动，请务必后续手动配置！${plain}"
         fi
     fi
 
+    # 增加 RestartSec 缓冲，防止无配置时的 CPU 爆满
     cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service
@@ -170,13 +197,23 @@ After=network.target
 [Service]
 ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json
 Restart=always
+RestartSec=3
 User=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload && systemctl enable V2bX >/dev/null 2>&1 && systemctl reset-failed V2bX >/dev/null 2>&1 && systemctl restart V2bX >/dev/null 2>&1
-    echo -e "${green}V2bX 服务已注册成功并拉起运转。${plain}"
+
+    systemctl daemon-reload 
+    systemctl enable V2bX >/dev/null 2>&1 
+    
+    # 仅当配置文件存在时才尝试拉起服务
+    if [ -f /etc/V2bX/config.json ]; then
+        systemctl restart V2bX
+        echo -e "${green}V2bX 服务已注册成功并尝试拉起运转。${plain}"
+    else
+        echo -e "${yellow}V2bX 已安装，但由于缺少 config.json，服务处于暂停状态，请配置后启动。${plain}"
+    fi
 }
 
 make_advanced_modules() {
