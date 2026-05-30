@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 节点独立配置向导引擎 (多节点循环矩阵美化版)
+sh_ver="2.1.0"
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 
@@ -21,11 +22,11 @@ read -rp "请 输 入 机 场 网 址 (如 ${default_host})： " input_host
 api_host=${input_host:-"$default_host"}
 
 if [[ -n "$default_key" ]]; then
-    read -rp "请 输 入 面 板 对 接 API Key (直接回车使用已保存的Key): " input_key
+    read -rp "请 输 入 面 面 对 接 API Key (直接回车使用已保存的Key): " input_key
     api_key=${input_key:-"$default_key"}
 else
     while [[ -z "$api_key" ]]; do
-        read -rp "请 输 入 面 板 对 接 API Key： " api_key
+        read -rp "请 输 入 面 面 对 接 API Key： " api_key
     done
 fi
 
@@ -51,7 +52,7 @@ while true; do
     core_num="" core_type="" node_id="" protocol_num="" node_type=""
     reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token="" node_port=""
 
-    echo -e "请 选 择 节 点 核 心 类 类型 ："
+    echo -e "请 选 择 节 点 核 心 类 型 ："
     echo -e "1. xray"
     echo -e "2. singbox"
     echo -e "3. hysteria2"
@@ -161,18 +162,20 @@ while true; do
     fi
 done
 
-cores_block=""
+# 🌟 精准修复：重构 Cores 拼装逻辑，优雅消除尾随逗号隐患
+cores_array=()
 if [ "$has_xray" = true ]; then
-    cores_block='{"Type": "xray", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}'
+    cores_array+=('{"Type": "xray", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}')
 fi
 if [ "$has_sing" = true ]; then
-    [[ -n "$cores_block" ]] && cores_block="${cores_block},"
-    cores_block="${cores_block}"'{"Type": "sing", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}'
+    cores_array+=('{"Type": "sing", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}')
 fi
 if [ "$has_hysteria2" = true ]; then
-    [[ -n "$cores_block" ]] && cores_block="${cores_block},"
-    cores_block="${cores_block}"'{"Type": "hysteria2", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}'
+    cores_array+=('{"Type": "hysteria2", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}')
 fi
+
+# 用逗号连接数组元素，保证绝对没有多余的尾巴逗号
+cores_block=$(IFS=,; echo "${cores_array[*]}")
 
 if [[ ! -f /etc/V2bX/sing_origin.json ]]; then
     cat << 'EOF' > /etc/V2bX/sing_origin.json
@@ -180,25 +183,31 @@ if [[ ! -f /etc/V2bX/sing_origin.json ]]; then
 EOF
 fi
 
-# 🌟 精准注入 jq 强力格式化排版矩阵
+# 🌟 精准排版：完美对接美化矩阵
 if command -v jq &>/dev/null; then
-    cat << EOF | jq . > /etc/V2bX/config.json 2>/dev/null
+    # 先做一层语法合法性验证，防止产生脏配置
+    raw_json=$(cat << EOF
 {
 "Log": { "Level": "none", "Output": "" },
 "Cores": [ ${cores_block} ],
 "Nodes": [ ${nodes_block} ]
 }
 EOF
-    # 如果 jq 意外解析失败，执行原生 Fallback 防呆保护
-    if [[ $? -ne 0 || ! -s /etc/V2bX/config.json ]]; then
-        cat << EOF > /etc/V2bX/config.json
-{"Log":{"Level":"none","Output":""},"Cores":[${cores_block}],"Nodes":[${nodes_block}]}
-EOF
+)
+    if echo "$raw_json" | jq . > /etc/V2bX/config.json 2>/dev/null; then
+        echo -e "${green}[成功] 共计 ${node_count} 个节点的合集矩阵已完成 jq 深度美化，并精准写入 /etc/V2bX/config.json${plain}"
+    else
+        # 即使 jq 解析失败，也留下有缩进的保底方案，不再缩成乱糟糟的一行
+        echo "$raw_json" > /etc/V2bX/config.json
+        echo -e "${yellow}[警告] jq 校验未通过，已写入标准原始配置，请检查参数合法性。${plain}"
     fi
 else
     cat << EOF > /etc/V2bX/config.json
-{"Log":{"Level":"none","Output":""},"Cores":[${cores_block}],"Nodes":[${nodes_block}]}
+{
+  "Log": { "Level": "none", "Output": "" },
+  "Cores": [ ${cores_block} ],
+  "Nodes": [ ${nodes_block} ]
+}
 EOF
+    echo -e "${green}[成功] 配置已成功落盘（由于未安装 jq，已进行标准预排版写入）。${plain}"
 fi
-
-echo -e "${green}[成功] 共计 ${node_count} 个节点的合集矩阵已完成 jq 深度美化，并精准写入 /etc/V2bX/config.json${plain}"
