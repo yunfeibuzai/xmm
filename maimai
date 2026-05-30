@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (系统深度净化版)
-sh_ver="3.7.9"
+# 麦卖云 V2bX 后端全能王牌脚本 (特卡内存深度净化版)
+sh_ver="3.8.0"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
 
-# 🌟 增强版：基础依赖自动补齐 (修复 update 失败导致无法安装的问题)
+# 🌟 基础依赖自动补齐
 install_dependencies() {
     local cmds=("wget" "curl" "tar" "unzip" "jq" "nano")
     local needs_install=false
@@ -58,7 +58,6 @@ show_status() {
         return
     fi
     systemctl is-active --quiet V2bX 2>/dev/null && echo -e "V2bX 状态: ${green}开${plain}" || echo -e "V2bX 状态: ${yellow}未启动${plain}"
-    crontab -l 2>/dev/null | grep -q "V2bX_daemon" && echo -e "自动化守护: ${green}开${plain}" || echo -e "自动化守护: ${red}关${plain}"
 }
 
 show_menu() {
@@ -70,7 +69,7 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
 --- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---
   ${green}0.${plain} 快捷修改主配置 (config.json)
 --------------------------------------------
-  ${green}1.${plain} 安装 V2bX (优先自主源)
+  ${green}1.${plain} 安装 V2bX (轻量去脂版)
   ${green}2.${plain} 更新 V2bX 核心
   ${green}3.${plain} 卸载 V2bX
   ${green}4.${plain} 启动 V2bX 服务
@@ -88,8 +87,6 @@ ${magenta}[🌟 核心战力配置向导群]${plain}
   ${green}14.${plain} 升级本维护脚本
 --------------------------------------------
 ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
-  ${green}15.${plain} 开启自动化自愈守护 (秒级拉起)
-  ${green}16.${plain} 关闭自动化自愈守护
   ${green}17.${plain} 豪华版 BBR 加速控制台
   ${green}18.${plain} 放行全局端口 (iptables 净化)
   ${green}19.${plain} 强杀挂机残留与强制释放系统缓存
@@ -103,7 +100,6 @@ EOF
     printf '%b\n%b\n' "$menu_text" "$status_text"
 }
 
-# 🌟 已精准重构：完全剥离出本地，实现全自动远程云调度
 make_full_config() {
     echo -e "${cyan}正在从麦卖云秘密仓库拉取最新向导引擎...${plain}"
     local remote_wizard_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
@@ -121,7 +117,7 @@ make_full_config() {
 }
 
 self_install_core() {
-    echo -e "${yellow}正在安全部署麦卖云全功能核心组件...${plain}"
+    echo -e "${yellow}正在安全部署麦卖云 [轻量低耗] 核心组件...${plain}"
     
     systemctl stop V2bX >/dev/null 2>&1
     systemctl disable V2bX >/dev/null 2>&1
@@ -137,7 +133,7 @@ self_install_core() {
     esac
     
     local last_version=$(curl -sL "https://api.github.com/repos/wyx2685/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$last_version" ]] && last_version="v0.3.9"
+    [[ -z "$last_version" ]] && last_version="v0.4.0"
 
     local urls=(
         "https://github.com/wyx2685/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
@@ -156,12 +152,12 @@ self_install_core() {
         if [[ -f "$tmp_file" && -s "$tmp_file" ]]; then
             if head -c 4 "$tmp_file" | grep -q 'PK'; then
                 
-                # 🌟 二次紧急救援：如果解压前发现没有 unzip，强制安装
+                # 二次紧急救援安装 unzip
                 if ! command -v unzip &>/dev/null; then
                     echo -e "${red}[警告] 系统仍然缺失 unzip 组件，正在执行紧急安装...${plain}"
                     apt-get install -y unzip >/dev/null 2>&1 || yum install -y unzip >/dev/null 2>&1 || apk add --no-cache unzip >/dev/null 2>&1
                     if ! command -v unzip &>/dev/null; then
-                        echo -e "${red}[致命错误] unzip 安装失败，无法解压核心文件，请手动运行 apt/yum install unzip 安装！${plain}"
+                        echo -e "${red}[致命错误] unzip 安装失败，请手动运行 apt/yum install unzip 安装！${plain}"
                         rm -f "$tmp_file"
                         return
                     fi
@@ -188,27 +184,33 @@ self_install_core() {
         
         if [ "$success" = true ]; then
             chmod +x /usr/local/V2bX/V2bX
-            echo -e "${green}[成功] 核心拉取成功并已通过 ELF 二进制合法性校验！${plain}"
+            echo -e "${green}[成功] 核心拉取成功！${plain}"
             break
         fi
     done
 
     if [ "$success" = false ]; then
-        echo -e "${red}[错误] 所有拉取线路均失败，请检查服务器网络或 DNS 设置！${plain}"
+        echo -e "${red}[错误] 所有拉取线路均失败，请检查服务器网络！${plain}"
         return
     fi
 
-    echo -e "${cyan}正在拉取路由规则文件...${plain}"
-    wget -q -O /usr/local/V2bX/geoip.dat "https://ghp.ci/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat" || wget -q -O /usr/local/V2bX/geoip.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geoip.dat"
-    wget -q -O /usr/local/V2bX/geosite.dat "https://ghp.ci/https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat" || wget -q -O /usr/local/V2bX/geosite.dat "https://raw.githubusercontent.com/wyx2685/V2bX-script/master/geosite.dat"
+    # 🌟 特卡极致去脂优化：不再拉取重载的 geoip/geosite 文件，并清理旧残留
+    rm -f /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
+    touch /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
 
     if [ ! -f /etc/V2bX/config.json ]; then
         read -rp "未检测到配置文件，是否立即生成？(y/n) " ask_gen_config
         if [[ "$ask_gen_config" == "y" || "$ask_gen_config" == "Y" ]]; then
             make_full_config
         else
-            echo -e "${yellow}[警告] 跳过配置文件生成。服务将无法启动，请务必后续手动配置！${plain}"
+            echo -e "${yellow}[警告] 跳过配置文件生成。${plain}"
         fi
+    fi
+
+    # 🌟 强制将现有的配置文件进行“特卡去脂格式化”（关闭嗅探与TFO降温）
+    if [ -f /etc/V2bX/config.json ]; then
+        sed -i 's/"TCPFastOpen": true/"TCPFastOpen": false/g' /etc/V2bX/config.json
+        sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json
     fi
 
     cat << EOF > /etc/systemd/system/V2bX.service
@@ -219,7 +221,7 @@ After=network.target
 [Service]
 ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json
 Restart=always
-RestartSec=3
+RestartSec=5
 User=root
 
 [Install]
@@ -231,9 +233,9 @@ EOF
     
     if [ -f /etc/V2bX/config.json ]; then
         systemctl restart V2bX
-        echo -e "${green}V2bX 服务已注册成功并尝试拉起运转。${plain}"
+        echo -e "${green}V2bX [轻量低耗模式] 服务已注册成功并尝试拉起运转。${plain}"
     else
-        echo -e "${yellow}V2bX 已安装，但由于缺少 config.json，服务处于暂停状态，请配置后启动。${plain}"
+        echo -e "${yellow}V2bX 已安装，请配置 config.json 后启动。${plain}"
     fi
 }
 
@@ -250,7 +252,7 @@ cat << 'EOF' > /etc/V2bX/sing_origin.json
 {
 "dns": { "servers": [ { "tag": "cloudflare", "address": "1.1.1.1", "strategy": "prefer_ipv4" } ] },
 "outbounds": [ { "tag": "direct", "type": "direct", "domain_strategy": "prefer_ipv4" } ],
-"route": { "rules": [ { "ip_is_private": true, "action": "reject" }, { "rule_set": [ "geosite-category-ads-all" ], "action": "reject" } ] }
+"route": { "rules": [ { "ip_is_private": true, "action": "reject" } ] }
 }
 EOF
         echo -e "${green}[成功] /etc/V2bX/sing_origin.json 生成完毕！${plain}"
@@ -263,7 +265,7 @@ EOF
         ;;
     3)
 cat << 'EOF' > /etc/V2bX/route.json
-{ "domainStrategy": "IPOnDemand", "rules": [ { "type": "field", "outboundTag": "block", "ip": [ "geoip:private" ] }, { "type": "field", "outboundTag": "block", "protocol": [ "bittorrent" ] } ] }
+{ "domainStrategy": "IPOnDemand", "rules": [ { "type": "field", "outboundTag": "block", "ip": [ "geoip:private" ] } ] }
 EOF
         echo -e "${green}[成功] /etc/V2bX/route.json 防BT审计策略阻断落盘！${plain}"
         ;;
@@ -282,27 +284,8 @@ EOF
 install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
 update_shell() { curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0; }
 open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F; echo -e "${green}已放行所有网络端口${plain}"; }
-run_clean_script() { free -h; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}系统残留空间已强制净化完毕${plain}"; }
+run_clean_script() { free -h; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}系统残留空间已强制净化完毕${plain}" ; }
 run_deep_log_clean() { find /var/log -type f -regex '.*.log' -or -regex '.*err' -or -regex '.messages' | while read -r log; do cat /dev/null > "$log" 2>/dev/null; done; echo -e "${green}大日志清理完毕${plain}"; }
-
-start_daemon() { 
-    cat << 'EOF' > /usr/local/bin/V2bX_daemon.sh
-#!/bin/bash
-systemctl is-active --quiet V2bX || (systemctl daemon-reload && systemctl start V2bX)
-EOF
-    chmod +x /usr/local/bin/V2bX_daemon.sh
-    if (crontab -l 2>/dev/null | grep -v "V2bX_daemon"; echo "* * * * * /bin/bash /usr/local/bin/V2bX_daemon.sh >/dev/null 2>&1") | crontab -; then
-        echo -e "${green}自动化自愈守护已成功开启！${plain}"
-    else
-        echo -e "${red}错误：定时任务写入失败，请检查系统 crontab 组件是否安装正常！${plain}"
-    fi
-}
-
-stop_daemon() { 
-    crontab -l 2>/dev/null | grep -v "V2bX_daemon" | crontab -
-    rm -f /usr/local/bin/V2bX_daemon.sh
-    echo -e "${yellow}自愈守护已关闭${plain}" 
-}
 
 process_run() {
     local num; read -rp "请输入选择 [0-22]: " num
@@ -321,13 +304,11 @@ process_run() {
     12) make_advanced_modules ;; 
     13) /usr/local/V2bX/V2bX x25519 ;;
     14) update_shell ;; 
-    15) start_daemon ;; 
-    16) stop_daemon ;; 
     17) install_bbr ;; 
     18) open_ports ;; 
     19) run_clean_script ;; 
     20) run_deep_log_clean ;;
-    21) uname -a && free -m && df -h ;; 
+    21) uptime && free -m && df -h ;; 
     22) exit 0 ;; 
     *) echo -e "${red}未知序号${plain}" ;;
     esac
