@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+自定义防爆版)
-sh_ver="4.3.0"
+# 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
+sh_ver="4.3.2-LogRotate"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
@@ -64,7 +64,7 @@ register_shortcut() {
 }
 register_shortcut
 
-# 🌟 智能内核服务管理器 (跨系统系统抽象层)
+# 🌟 智能内核服务管理器
 manage_service() {
     local action=$1
     if command -v systemctl &>/dev/null; then
@@ -145,7 +145,7 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
   ${green}5.${plain} 停止 V2bX 服务
   ${green}6.${plain} 重启 V2bX 服务
   ${green}7.${plain} 查看 V2bX 运行状态
-  ${green}8.${plain} 查看 V2bX 实时日志
+  ${green}8.${plain} 查看 V2bX 实时日志 (支持查看报错)
   ${green}9.${plain} 设置开机自启动
   ${green}10.${plain} 取消开机自启动
 --------------------------------------------
@@ -159,7 +159,7 @@ ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}15.${plain} 豪华版 BBR 加速控制台
   ${green}16.${plain} 放行全局端口 (iptables 净化)
   ${green}17.${plain} 【危险】强制释放系统缓存 (不建议频繁使用)
-  ${green}18.${plain} 彻底清空各种顽固大日志
+  ${green}18.${plain} 彻底清空各种顽固大日志 + 开启全局日志轮转硬控 (推荐)
   ${green}19.${plain} 查看小鸡全套硬件看板
   ${green}20.${plain} 彻底退出脚本
 --------------------------------------------
@@ -290,9 +290,8 @@ self_install_core() {
         sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json 2>/dev/null
     fi
 
-    # 🌟 核心优化：多系统托管引擎自动注册 (动态注入护卫限额)
+    # 🌟 核心修改：维持全透明标准输出（确保可以查看报错），拒绝盲人运维
     if [ -d /etc/systemd/system ]; then
-        # --- 场景 1: Systemd (Debian / Ubuntu / CentOS) ---
         cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service - Adaptive Managed
@@ -306,7 +305,6 @@ User=root
 LimitNOFILE=65535
 EOF
 
-        # 如果不是原生态无锁版，动态向 Systemd 注入硬件限制参数
         if [ "$limit_opt" -ne 1 ]; then
             local high_mark=$((mem_limit * 8 / 10))
             cat << EOF >> /etc/systemd/system/V2bX.service
@@ -326,7 +324,6 @@ EOF
         manage_service enable
         
     elif [ -d /etc/init.d ]; then
-        # --- 场景 2: OpenRC (Alpine Linux) ---
         cat << EOF > /etc/init.d/V2bX
 #!/sbin/openrc-run
 description="V2bX Alpine Service"
@@ -344,7 +341,7 @@ command="/usr/local/V2bX/V2bX"
 command_args="server -c /etc/V2bX/config.json"
 command_background=true
 pidfile="/var/run/V2bX.pid"
-output_log="/dev/null"
+output_log="/var/log/v2bx_out.log"
 error_log="/var/log/v2bx_err.log"
 EOF
 
@@ -364,11 +361,7 @@ EOF
     
     if [ -f /etc/V2bX/config.json ]; then
         manage_service restart
-        if [ "$limit_opt" -eq 1 ]; then
-            echo -e "${green}V2bX [原生态无锁模式] 部署成功，性能封印已解除！${plain}"
-        else
-            echo -e "${green}V2bX [自定义资源护卫] 部署成功！限额参数已压制：内存 ${mem_limit}M / CPU ${cpu_limit}%！${plain}"
-        fi
+        echo -e "${green}V2bX 部署成功！日志处于全透明模式（可在主菜单选项 8 查看实时报错）。${plain}"
     else
         echo -e "${yellow}V2bX 已安装，请配置 config.json 后启动。${plain}"
     fi
@@ -383,7 +376,72 @@ install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx201
 update_shell() { curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0; }
 open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F; echo -e "${green}已放行所有网络端口${plain}"; }
 run_clean_script() { echo -e "${yellow}警告：此操作可能导致 I/O 拥堵。${plain}"; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}缓存强制下发完毕${plain}" ; }
-run_deep_log_clean() { find /var/log -type f -regex '.*.log' -or -regex '.*err' -or -regex '.messages' | while read -r log; do cat /dev/null > "$log" 2>/dev/null; done; echo -e "${green}大日志清理完毕${plain}"; }
+
+# 🌟 全新重构的选项 18：既保留报错看日志能力，又死死掐住传统大日志上限
+run_deep_log_clean() {
+    echo -e "${yellow}=== 开始系统级日志深度清理与 Logrotate 轮转控容 ===${plain}"
+    
+    # 1. 强制清理包管理器缓存
+    echo -e "${cyan}[+] 正在清理系统包管理器缓存...${plain}"
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get autoclean -y >/dev/null 2>&1 && apt-get clean -y >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        yum clean all >/dev/null 2>&1
+    elif command -v apk >/dev/null 2>&1; then
+        apk cache clean >/dev/null 2>&1
+    fi
+
+    # 2. 限制 systemd-journald 自身日志为 100M 上限
+    if command -v journalctl >/dev/null 2>&1; then
+        echo -e "${cyan}[+] 正在配置 /etc/systemd/journald.conf 限制内建日志上限为 100M...${plain}"
+        if [ -f "/etc/systemd/journald.conf" ]; then
+            sed -i 's/#SystemMaxUse=/SystemMaxUse=100M/g' /etc/systemd/journald.conf
+            sed -i 's/SystemMaxUse=.*/SystemMaxUse=100M/g' /etc/systemd/journald.conf
+            systemctl restart systemd-journald >/dev/null 2>&1
+        fi
+        echo -e "${cyan}[+] 正在裁剪当前内建历史日志...${plain}"
+        journalctl --vacuum-size=50M >/dev/null 2>&1
+    fi
+
+    # 3. 🛡️ 核心黑科技：对传统的 syslog 和 daemon.log 注入高频硬轮转机制
+    # 原理：一旦文件超过 30M，自动切割压缩，最多留 2 个备份，旧的自动粉碎。彻底解决 V2bX 灌满磁盘的问题
+    if [ -d "/etc/logrotate.d" ]; then
+        echo -e "${cyan}[+] 正在为 syslog/daemon.log 注入 30M 强效硬控轮转规则...${plain}"
+        cat << 'EOF' > /etc/logrotate.d/v2bx_anti_explode
+/var/log/syslog
+/var/log/daemon.log
+/var/log/v2bx_err.log
+/var/log/v2bx_out.log
+{
+    size 30M
+    rotate 2
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate >/dev/null 2>&1 || systemctl restart rsyslog >/dev/null 2>&1 || kill -HUP `cat /var/run/syslogd.pid 2>/dev/null` >/dev/null 2>&1
+    endscript
+}
+EOF
+    fi
+
+    # 4. 安全置空当前积压的冗余超大文件（只清空当前，不影响后续报错写入）
+    echo -e "${cyan}[+] 正在释放当前积压的冗余日志空间...${plain}"
+    find /var/log -type f \( -name "*.log" -o -name "*.gz" -o -name "*.1" -o -name "*err" -o -name "*messages" \) 2>/dev/null | while read -r log_file; do
+        true > "$log_file" 2>/dev/null
+    done
+
+    # 5. 清理临时文件与探针残存
+    rm -rf /tmp/* /var/tmp/* 2>/dev/null
+    if [ -d "/opt/nezha/agent" ]; then
+        rm -f /opt/nezha/agent/systemd.* 2>/dev/null
+    fi
+
+    echo -e "${green}=== 配置成功！日志通道已开放，且增加了 [单文件最大 30M] 的自动熔断限制！===${plain}"
+    df -h /
+}
 
 process_run() {
     local num; read -rp "请输入选择 [0-20]: " num
@@ -393,7 +451,7 @@ process_run() {
     3) 
         manage_service stop
         manage_service disable
-        rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service /etc/init.d/V2bX /var/log/v2bx_err.log
+        rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service /etc/init.d/V2bX /var/log/v2bx_err.log /etc/logrotate.d/v2bx_anti_explode
         if command -v systemctl &>/dev/null; then systemctl daemon-reload; fi
         echo "卸载完成" 
         ;;
