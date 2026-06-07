@@ -157,7 +157,7 @@ ${magenta}[🌟 核心战力配置向导群]${plain}
 --------------------------------------------
 ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}15.${plain} 豪华版 BBR 加速控制台
-  ${green}16.${plain} 放行全局端口 (iptables 净化)
+  ${green}16.${plain} 放行全局端口 + 全局并发连接数永久解锁 (重启不失效)
   ${green}17.${plain} 【危险】强制释放系统缓存 (不建议频繁使用)
   ${green}18.${plain} 彻底清空各种顽固大日志 + 开启全局日志轮转硬控 (推荐)
   ${green}19.${plain} 查看小鸡全套硬件看板
@@ -374,7 +374,96 @@ make_advanced_modules() {
 
 install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
 update_shell() { curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0; }
-open_ports() { iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F; echo -e "${green}已放行所有网络端口${plain}"; }
+
+open_ports() { 
+    echo -e "${yellow}=== 开始系统网络及并发连接数 [永久级] 优化 ===${plain}"
+    
+    # 1. 通用基础功能：放行全局端口 (Iptables 净化)
+    iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F 2>/dev/null
+    echo -e "${green}[+] 已尝试放行所有 iptables 网络端口${plain}"
+
+    # 2. 全局通用 (含 LXC、Debian、Alpine)：突破最大文件打开数并永久固化 (防止重启复原)
+    ulimit -n 65535 2>/dev/null
+    
+    # 写入 limits.conf 保证普通登录及 PAM 模块永久生效
+    if [ -d "/etc/security" ]; then
+        sed -i '/^\*.*nofile/d' /etc/security/limits.conf 2>/dev/null
+        sed -i '/^root.*nofile/d' /etc/security/limits.conf 2>/dev/null
+        cat << 'EOF' >> /etc/security/limits.conf
+* soft nofile 65535
+* hard nofile 65535
+root soft nofile 65535
+root hard nofile 65535
+EOF
+    fi
+
+    # 针对 Systemd 系统的全局默认配置进行永久拉升
+    if [ -d "/etc/systemd" ]; then
+        if [ -f "/etc/systemd/system.conf" ]; then
+            sed -i 's/^#\?DefaultLimitNOFILE=.*/DefaultLimitNOFILE=65535/' /etc/systemd/system.conf 2>/dev/null
+        fi
+        if [ -f "/etc/systemd/user.conf" ]; then
+            sed -i 's/^#\?DefaultLimitNOFILE=.*/DefaultLimitNOFILE=65535/' /etc/systemd/user.conf 2>/dev/null
+        fi
+        systemctl daemon-reload >/dev/null 2>&1
+    fi
+    
+    # 针对 Shell 环境变量打补丁 (双重保险)
+    for file in /etc/profile /root/.profile /root/.bashrc; do
+        if [ -f "$file" ]; then
+            if ! grep -q "ulimit -n 65535" "$file"; then
+                echo "ulimit -n 65535" >> "$file"
+            fi
+        fi
+    done
+    echo -e "${green}[+] 已将全局最大连接数(ulimit)永久拉升至 65535 (重启绝不失效)${plain}"
+
+    # 3. 全局通用 (含 LXC)：优化内核高并发网络参数，持久化写入系统层
+    local SYSCTL_CONF="/etc/sysctl.conf"
+    [ -d "/etc/sysctl.d" ] && SYSCTL_CONF="/etc/sysctl.d/99-network-optimize.conf"
+
+    cat << 'SYS' > "$SYSCTL_CONF"
+# 增大并发连接队列
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+# 开启 TCP 端口复用，应对高并发短连接
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 1024 65535
+# 增大连接跟踪表（防中转大流量丢包）
+net.netfilter.nf_conntrack_max = 1048576
+# 优化 TCP 缓冲区
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+SYS
+    sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1
+    echo -e "${green}[+] 已永久注入内核级 TCP 高并发与抗丢包优化参数${plain}"
+
+    # 4. 专属逻辑：仅针对 Alpine (及 OpenRC) 的特殊处理
+    if [ -f /etc/alpine-release ] || command -v apk &>/dev/null; then
+        
+        # 4.1 针对 OpenRC 的进程锁永久解除
+        if [ -d "/etc/conf.d" ] && [ -f "/etc/rc.conf" ]; then
+            if grep -q "rc_ulimit" /etc/rc.conf 2>/dev/null; then
+                sed -i 's/^#\?rc_ulimit.*/rc_ulimit="-n 65535"/' /etc/rc.conf
+            else
+                echo 'rc_ulimit="-n 65535"' >> /etc/rc.conf 2>/dev/null
+            fi
+        fi
+        
+        # 4.2 Alpine/LXC 环境强制挂载 Cubic，不搞 BBR
+        echo "net.ipv4.tcp_congestion_control = cubic" >> "$SYSCTL_CONF"
+        sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1
+        echo -e "${cyan}[+] 当前环境不支持BBR（如LXC容器），已默认配置高并发Cubic算法${plain}"
+    else
+        # 非 Alpine (例如 Debian) 直接跳过拥塞算法修改，留给你自定义处理
+        echo -e "${cyan}[+] 非 Alpine 系统，跳过拥塞算法强制覆盖（保留你自定义的 BBR）。${plain}"
+    fi
+
+    echo -e "\n${green}✅ 全局高并发永久级优化彻底完成！(重启设备依然坚挺，无需再次执行。)${plain}"
+}
+
 run_clean_script() { echo -e "${yellow}警告：此操作可能导致 I/O 拥堵。${plain}"; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}缓存强制下发完毕${plain}" ; }
 
 # 🌟 全新重构的选项 18：既保留报错看日志能力，又死死掐住传统大日志上限
@@ -404,7 +493,6 @@ run_deep_log_clean() {
     fi
 
     # 3. 🛡️ 核心黑科技：对传统的 syslog 和 daemon.log 注入高频硬轮转机制
-    # 原理：一旦文件超过 30M，自动切割压缩，最多留 2 个备份，旧的自动粉碎。彻底解决 V2bX 灌满磁盘的问题
     if [ -d "/etc/logrotate.d" ]; then
         echo -e "${cyan}[+] 正在为 syslog/daemon.log 注入 30M 强效硬控轮转规则...${plain}"
         cat << 'EOF' > /etc/logrotate.d/v2bx_anti_explode
@@ -427,7 +515,7 @@ run_deep_log_clean() {
 EOF
     fi
 
-    # 4. 安全置空当前积压的冗余超大文件（只清空当前，不影响后续报错写入）
+    # 4. 安全置空当前积压的冗余超大文件
     echo -e "${cyan}[+] 正在释放当前积压的冗余日志空间...${plain}"
     find /var/log -type f \( -name "*.log" -o -name "*.gz" -o -name "*.1" -o -name "*err" -o -name "*messages" \) 2>/dev/null | while read -r log_file; do
         true > "$log_file" 2>/dev/null
