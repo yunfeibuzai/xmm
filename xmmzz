@@ -1,0 +1,84 @@
+#!/bin/bash
+
+echo "======================================================"
+echo "        极简中转转发脚本 (支持 TCP + UDP) "
+echo "        兼容 Debian / Ubuntu / Alpine / CentOS"
+echo "======================================================"
+
+# 1. 环境检测与 socat 及必要组件安装
+echo -e "\n[1/5] 正在检测并安装所需依赖 (socat)..."
+if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y socat cron >/dev/null 2>&1
+elif command -v apk >/dev/null 2>&1; then
+    # 核心修复：Alpine 环境下同时补全 bash 和 cronie
+    apk update >/dev/null 2>&1
+    apk add socat bash cronie >/dev/null 2>&1
+    rc-update add cronie default >/dev/null 2>&1 && rc-service cronie start >/dev/null 2>&1
+elif command -v yum >/dev/null 2>&1; then
+    yum install -y socat crontabs >/dev/null 2>&1
+else
+    echo "未找到支持的包管理器，请手动安装 socat。"
+    exit 1
+fi
+
+# 2. 交互式输入配置
+echo -e "\n[2/5] 请输入监听端口 (当前中转服务器开放、用于连接的端口):"
+read -r local_port
+
+echo -e "\n[3/5] 请输入落地服务器的转发类型 (输入 4 代表 IPv4, 输入 6 代表 IPv6):"
+read -r ip_type
+
+echo -e "\n[4/5] 请输入落地服务器的 IP 地址 (输入 V6 时可带括号也可不带):"
+read -r remote_ip
+
+echo -e "\n[5/5] 请输入落地服务器的端口 (实际的服务端口):"
+read -r remote_port
+
+# 3. 处理 IPv6 格式并生成命令
+# 去除可能自带的方括号，后面统一拼接，防止语法错误
+remote_ip=$(echo "$remote_ip" | tr -d '[]')
+
+if [ "$ip_type" == "4" ]; then
+    TARGET_TCP="TCP4:${remote_ip}:${remote_port}"
+    TARGET_UDP="UDP4:${remote_ip}:${remote_port}"
+elif [ "$ip_type" == "6" ]; then
+    TARGET_TCP="TCP6:[${remote_ip}]:${remote_port}"
+    TARGET_UDP="UDP6:[${remote_ip}]:${remote_port}"
+else
+    echo "输入错误：转发类型只能输入 4 或 6。"
+    exit 1
+fi
+
+# 4. 生成独立守护脚本
+SCRIPT_DIR="/root/relay_scripts"
+mkdir -p "$SCRIPT_DIR"
+SCRIPT_FILE="${SCRIPT_DIR}/relay_${local_port}.sh"
+
+cat << EOF > "$SCRIPT_FILE"
+#!/bin/bash
+# 启动 TCP 转发 (适配 VLESS / Trojan / Reality 等)
+nohup socat TCP-LISTEN:${local_port},reuseaddr,fork ${TARGET_TCP} > /dev/null 2>&1 &
+
+# 启动 UDP 转发 (适配 Hysteria2 / TUIC 等)
+nohup socat UDP-LISTEN:${local_port},reuseaddr,fork ${TARGET_UDP} > /dev/null 2>&1 &
+EOF
+
+chmod +x "$SCRIPT_FILE"
+
+# 5. 执行并利用 crontab 设置开机自启
+bash "$SCRIPT_FILE"
+
+if command -v crontab >/dev/null 2>&1; then
+    if ! crontab -l 2>/dev/null | grep -q "$SCRIPT_FILE"; then
+        (crontab -l 2>/dev/null; echo "@reboot bash $SCRIPT_FILE") | crontab -
+    fi
+fi
+
+echo "======================================================"
+echo "✅ 转发配置完成并已在后台运行！"
+echo "监听端口: ${local_port} (TCP/UDP 双栈)"
+echo "目标地址: ${remote_ip}"
+echo "目标端口: ${remote_port}"
+echo "开机自启: 已加入 crontab (@reboot)"
+echo "======================================================"
