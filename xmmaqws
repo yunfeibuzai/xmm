@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 
-# ==========================================
-# 麦卖云 / VPS 综合防病毒与异常监控面板
-# 支持环境: Debian, Ubuntu, Alpine, CentOS
-# ==========================================
+# =================================================================
+# VPS 安全综合查杀与异常清理脚本 (支持 Debian/Ubuntu/Alpine/CentOS)
+# =================================================================
 
+# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+# 自动处理 Alpine 环境下的 bash 依赖与重定向
+if [ -f /etc/alpine-release ] && ! command -v bash &> /dev/null; then
+    echo "检测到 Alpine 系统，正在自动安装 bash 以支持高级交互..."
+    apk update && apk add bash
+    exec bash "$0" "$@"
+fi
 
 # 检查 Root 权限
 if [ "$EUID" -ne 0 ]; then
@@ -17,18 +24,17 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 安装 `mm` 快捷命令
+# 一键绑定快捷命令
 if [ "$1" == "install" ]; then
     cp "$0" /usr/local/bin/mm
     chmod +x /usr/local/bin/mm
-    echo -e "${GREEN}安装成功！以后在终端直接输入 'mm' 即可调出菜单。${NC}"
+    echo -e "${GREEN}快捷命令安装成功！以后在终端直接输入 'mm' 即可打开控制菜单。${NC}"
     exit 0
 fi
 
-# 环境依赖检查与安装
+# 基础网络依赖检查
 install_dependencies() {
     if ! command -v netstat &> /dev/null && ! command -v ss &> /dev/null; then
-        echo -e "${YELLOW}正在安装必要的基础网络工具...${NC}"
         if [ -f /etc/alpine-release ]; then
             apk update && apk add net-tools
         elif [ -f /etc/debian_version ]; then
@@ -39,36 +45,10 @@ install_dependencies() {
     fi
 }
 
-# 1. 暴力占用异常进程扫描 (轻量级，极小内存可用)
-scan_abnormal() {
-    echo -e "\n${CYAN}============================================${NC}"
-    echo -e "${CYAN}      正在扫描高资源占用与异常网络连接      ${NC}"
-    echo -e "${CYAN}============================================${NC}"
-    
-    echo -e "\n${YELLOW}[!] CPU 占用前 5 的进程：${NC}"
-    ps -eo pid,user,cmd,%mem,%cpu --sort=-%cpu | head -n 6
-
-    echo -e "\n${YELLOW}[!] 内存 占用前 5 的进程：${NC}"
-    ps -eo pid,user,cmd,%mem,%cpu --sort=-%mem | head -n 6
-
-    echo -e "\n${YELLOW}[!] 网络连接数异常的 IP (疑似发包/被DDoS)：${NC}"
-    netstat -ntu | awk '{print $5}' | cut -d: -f1 | sort | uniq -c | sort -nr | head -n 5
-
-    echo -e "\n${CYAN}--------------------------------------------${NC}"
-    read -p "是否发现异常进程需要手动强制结束? (y/n): " kill_choice
-    if [[ "$kill_choice" == "y" || "$kill_choice" == "Y" ]]; then
-        read -p "请输入要结束的进程 PID (多个请用空格隔开): " pids
-        for pid in $pids; do
-            kill -9 "$pid" && echo -e "${GREEN}进程 $pid 已被成功击杀。${NC}" || echo -e "${RED}击杀进程 $pid 失败。${NC}"
-        done
-    fi
-    read -p "按回车键返回主菜单..."
-}
-
-# ClamAV 引擎安装与检查
+# 检查并安装大厂病毒库引擎 (ClamAV)
 check_clamav() {
     if ! command -v clamscan &> /dev/null; then
-        echo -e "${YELLOW}未检测到 ClamAV 引擎，正在为您自动安装...${NC}"
+        echo -e "${YELLOW}未检测到大厂 ClamAV 引擎，正在为您自动安装...${NC}"
         if [ -f /etc/alpine-release ]; then
             apk update && apk add clamav clamav-daemon
         elif [ -f /etc/debian_version ]; then
@@ -76,120 +56,227 @@ check_clamav() {
         elif [ -f /etc/redhat-release ]; then
             yum install -y epel-release && yum install -y clamav clamav-update
         fi
-        echo -e "${GREEN}正在更新大厂病毒库 (这可能需要几分钟，请耐心等待)...${NC}"
+        echo -e "${GREEN}正在同步最新大厂病毒定义 (首次更新可能需要几分钟)...${NC}"
         freshclam
     fi
 
-    # 内存容量警告 (防 OOM 崩溃)
-    total_mem=$(free -m | awk '/^Mem:/{print $2}')
-    if [ "$total_mem" -lt 512 ]; then
-        echo -e "\n${RED}警告: 您的服务器物理内存小于 512MB。大厂病毒库完整扫描可能会因为内存耗尽导致系统死机重置！${NC}"
-        echo -e "${YELLOW}建议您优先使用菜单中的【1】进行进程异常扫描。${NC}"
-        read -p "是否依然坚持运行病毒库扫描? (y/n): " force_run
-        if [[ "$force_run" != "y" && "$force_run" != "Y" ]]; then
-            return 1
+    # 低内存 VPS 防御逻辑 (小于512M提示)
+    if [ -f /proc/meminfo ]; then
+        total_mem=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+        if [ "$total_mem" -lt 524288 ]; then
+            echo -e "\n${RED}警告: 您的 VPS 物理内存小于 512MB。运行大厂深度扫描可能会引发内存耗尽而死机。${NC}"
+            read -p "是否依然坚持运行全盘/部分深度扫描？(y/n): " force_run
+            if [[ "$force_run" != "y" && "$force_run" != "Y" ]]; then
+                return 1
+            fi
         fi
     fi
     return 0
 }
 
-# 处理扫描结果 (防误杀，手动确认)
-process_scan_result() {
-    local scan_dir=$1
-    local log_file="/tmp/clamav_scan.log"
+# 功能 1：异常高负载进程查杀 (数字编号选择)
+scan_abnormal_processes() {
+    echo -e "\n${CYAN}==================================================${NC}"
+    echo -e "${CYAN}         正在扫描高资源占用与异常网络进程         ${NC}"
+    echo -e "${CYAN}==================================================${NC}"
+
+    echo -e "${YELLOW}当前系统高活动进程列表：${NC}"
+    echo -e "--------------------------------------------------"
+    printf "${CYAN}%-5s %-8s %-6s %-6s %-30s${NC}\n" "编号" "PID" "CPU%" "MEM%" "进程命令路径"
     
-    echo -e "${YELLOW}正在扫描 [$scan_dir] ，过程可能较长，请稍候...${NC}"
-    # -i 只显示被感染的文件，不自动删除
-    clamscan -r -i "$scan_dir" --exclude-dir="^/sys" --exclude-dir="^/dev" --exclude-dir="^/proc" > "$log_file"
+    local index=1
+    local pids=()
+    local cmds=()
     
-    infected_files=$(grep "FOUND" "$log_file" | awk -F: '{print $1}')
-    
-    echo -e "\n${CYAN}============================================${NC}"
-    if [ -z "$infected_files" ]; then
-        echo -e "${GREEN}太棒了！未在此目录下发现已知病毒。${NC}"
-    else
-        echo -e "${RED}警告！发现以下疑似被感染的文件：${NC}"
-        for file in $infected_files; do
-            echo -e "${YELLOW}感染文件 -> ${NC} $file"
-            read -p "是否立即删除此文件？(防止误杀请谨慎选择) (y/n): " del_choice
-            if [[ "$del_choice" == "y" || "$del_choice" == "Y" ]]; then
-                rm -f "$file"
-                echo -e "${GREEN}文件已删除。${NC}"
+    # 抓取 CPU 排序前 8 的进程
+    while read -r pid cpu mem cmd; do
+        if [ "$pid" != "PID" ] && [ -n "$pid" ] && [ "$pid" != "$$" ]; then
+            # 过滤脚本自身及高频基础安全系统进程，严防误杀
+            if [[ "$cmd" =~ "vps_scanner" || "$cmd" =~ "xmmaqws" || "$cmd" =~ "sshd" || "$cmd" =~ "bash" || "$cmd" =~ "ps" ]]; then
+                continue
+            fi
+            pids+=("$pid")
+            cmds+=("$cmd")
+            printf "[%2d]  %-8s %-6s %-6s %-30s\n" "$index" "$pid" "$cpu" "$mem" "${cmd:0:50}"
+            index=$((index + 1))
+        fi
+    done < <(ps -eo pid,%cpu,%mem,args --sort=-%cpu | head -n 9)
+
+    if [ ${#pids[@]} -eq 0 ]; then
+        echo -e "${GREEN}未发现明显的异常高负载进程。${NC}"
+        read -p "按回车键返回主菜单..."
+        return
+    fi
+
+    echo -e "--------------------------------------------------"
+    echo -e "${YELLOW}提示: 请检查上方列表。输入对应的【数字编号】即可将其杀掉（绝不误杀）。${NC}"
+    read -p "请输入要击杀的进程编号 (多个编号用空格隔开，直接回车取消操作): " choices
+
+    for choice in $choices; do
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#pids[@]}" ]; then
+            local arr_idx=$((choice - 1))
+            local target_pid="${pids[$arr_idx]}"
+            local target_cmd="${cmds[$arr_idx]}"
+            kill -9 "$target_pid" 2>/dev/null
+            echo -e "${GREEN}已成功强制强制结束编号 [$choice] 的进程 (PID: $target_pid)${NC}"
+        else
+            echo -e "${RED}无效的编号: $choice${NC}"
+        fi
+    done
+
+    read -p "处理完成，按回车键返回主菜单..."
+}
+
+# 核心处理：ClamAV 扫描结果数字化输出并交互式删除
+process_clamav_results() {
+    local scan_target="$1"
+    local log_file="/tmp/clamscan_res.log"
+
+    echo -e "\n${YELLOW}正在对 [$scan_target] 进行大厂病毒库匹配扫描，这可能需要一些时间，请稍候...${NC}"
+    # -r 递归，-i 只打印命中的受感染文件，屏蔽虚拟驱动盘
+    clamscan -r -i "$scan_target" --exclude-dir="^/sys" --exclude-dir="^/dev" --exclude-dir="^/proc" --exclude-dir="^/run" > "$log_file" 2>/dev/null
+
+    # 提取命中文件路径
+    local infected_files=()
+    while read -r line; do
+        if [[ "$line" =~ "FOUND" ]]; then
+            local file_path=$(echo "$line" | awk -F: '{print $1}')
+            if [ -f "$file_path" ]; then
+                infected_files+=("$file_path")
+            fi
+        fi
+    done < "$log_file"
+
+    rm -f "$log_file"
+
+    echo -e "\n${CYAN}==================================================${NC}"
+    echo -e "${CYAN}               大厂病毒库 扫描结果列表             ${NC}"
+    echo -e "${CYAN}==================================================${NC}"
+
+    if [ ${#infected_files[@]} -eq 0 ]; then
+        echo -e "${GREEN}太棒了！在此目录下未检测到任何已知病毒。${NC}"
+        echo -e "${CYAN}==================================================${NC}"
+        read -p "按回车键返回主菜单..."
+        return
+    fi
+
+    echo -e "${RED}警告！系统在此目录下揪出了 ${#infected_files[@]} 个被感染的嫌疑文件：${NC}"
+    echo -e "--------------------------------------------------"
+    for i in "${!infected_files[@]}"; do
+        printf "${YELLOW}[%2d]${NC} %s\n" "$((i + 1))" "${infected_files[$i]}"
+    done
+    echo -e "--------------------------------------------------"
+    echo -e "${YELLOW}防误杀交互：请输入你想处理的文件【数字编号】进行精准切除。${NC}"
+    echo -e "（支持多个编号用空格隔开，输入 'all' 清空全部，直接回车则不执行任何删除）"
+    read -p "请选择: " user_input
+
+    if [ "$user_input" == "all" ]; then
+        for file in "${infected_files[@]}"; do
+            rm -f "$file"
+            echo -e "${RED}已彻底删除嫌疑文件: $file${NC}"
+        done
+    elif [ -n "$user_input" ]; then
+        for choice in $user_input; do
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#infected_files[@]}" ]; then
+                local arr_idx=$((choice - 1))
+                local target_file="${infected_files[$arr_idx]}"
+                rm -f "$target_file"
+                echo -e "${RED}已彻底删除嫌疑文件: $target_file${NC}"
             else
-                echo -e "${CYAN}已跳过删除。${NC}"
+                echo -e "${RED}非法的数字编号: $choice${NC}"
             fi
         done
+    else
+        echo -e "${GREEN}您未选择任何编号，所有文件均已安全保留。${NC}"
     fi
-    echo -e "${CYAN}============================================${NC}"
-    rm -f "$log_file"
-    read -p "按回车键返回主菜单..."
+
+    echo -e "${CYAN}==================================================${NC}"
+    read -p "处理完成，按回车键返回主菜单..."
 }
 
-# 2. 全盘查杀
-full_scan() {
+# 功能 2：全盘深度查杀
+do_full_scan() {
     check_clamav || return
-    process_scan_result "/"
+    process_clamav_results "/"
 }
 
-# 3. 部分/自定义查杀
-partial_scan() {
+# 功能 3：部分目录自定义查杀 (数字列出服务器内所有数据等存放位置)
+do_partial_scan() {
     check_clamav || return
-    echo -e "\n${CYAN}============================================${NC}"
-    echo -e "${YELLOW}当前系统顶级目录列表如下：${NC}"
+    echo -e "\n${CYAN}==================================================${NC}"
+    echo -e "${CYAN}         部分查杀: 请选择你想扫描的数据存放位置     ${NC}"
+    echo -e "\n${CYAN}==================================================${NC}"
     
-    # 动态获取所有根目录并列出数字序号
-    local dirs=( $(ls -d /*/ | grep -v -E 'proc|sys|dev') )
-    for i in "${!dirs[@]}"; do
-        printf "[%2d] %s\n" "$i" "${dirs[$i]}"
+    # 动态分析根目录下具备实际存储意义的顶级目录 (动态屏蔽系统底层虚拟盘)
+    local scan_dirs=()
+    for d in /*; do
+        if [ -d "$d" ]; then
+            case "$d" in
+                /proc|/sys|/dev|/run|/lib|/lib64|/bin|/sbin)
+                    # 自动绕过系统虚拟、只读挂载点，防止死循环
+                    ;;
+                *)
+                    scan_dirs+=("$d")
+                    ;;
+            esac
+        fi
     done
-    
-    echo -e "${CYAN}--------------------------------------------${NC}"
-    read -p "请输入你想扫描的目录对应的数字序号: " dir_idx
-    
-    if [[ "$dir_idx" =~ ^[0-9]+$ ]] && [ "$dir_idx" -ge 0 ] && [ "$dir_idx" -lt "${#dirs[@]}" ]; then
-        process_scan_result "${dirs[$dir_idx]}"
+
+    echo -e "${YELLOW}服务器数据存放路径目录列表如下：${NC}"
+    echo -e "--------------------------------------------------"
+    for i in "${!scan_dirs[@]}"; do
+        printf "[%2d]  %s\n" "$((i + 1))" "${scan_dirs[$i]}"
+    done
+    echo -e "--------------------------------------------------"
+    read -p "请输入你想扫描的路径对应的数字序号 (直接回车取消): " dir_choice
+
+    if [[ "$dir_choice" =~ ^[0-9]+$ ]] && [ "$dir_choice" -ge 1 ] && [ "$dir_choice" -le "${#scan_dirs[@]}" ]; then
+        local target_dir="${scan_dirs[$((dir_choice - 1))]}"
+        process_clamav_results "$target_dir"
     else
-        echo -e "${RED}无效的序号，返回主菜单。${NC}"
-        sleep 2
+        echo -e "${RED}输入编号无效，返回主菜单。${NC}"
+        sleep 1.5
     fi
 }
 
-# 4. 手动更新病毒库
-update_db() {
-    echo -e "${YELLOW}正在连接大厂服务器同步最新病毒定义...${NC}"
+# 功能 4：同步最新大厂病毒定义
+do_update_db() {
+    echo -e "${YELLOW}正在连接各大网络安全骨干节点，拉取最新病毒定义...${NC}"
     if command -v freshclam &> /dev/null; then
-        systemctl stop clamav-freshclam 2>/dev/null
+        if command -v systemctl &> /dev/null; then
+            systemctl stop clamav-freshclam 2>/dev/null
+        fi
         freshclam
-        echo -e "${GREEN}病毒库更新完毕！${NC}"
+        echo -e "${GREEN}病毒特征库同步完毕！${NC}"
     else
-        echo -e "${RED}请先运行一次查杀任务，系统会自动安装查杀引擎。${NC}"
+        echo -e "${RED}请先执行菜单 2 或 3，系统在安装查杀引擎时会自动完成首次同步。${NC}"
     fi
     read -p "按回车键返回主菜单..."
 }
 
-# 主菜单
+# 菜单总控核心
 main_menu() {
     install_dependencies
     while true; do
         clear
-        echo -e "${CYAN}============================================${NC}"
-        echo -e "${GREEN}      VPS 安全综合管理与查杀终端 (v1.0)     ${NC}"
-        echo -e "${CYAN}============================================${NC}"
-        echo -e "  ${YELLOW}1.${NC} 暴力进程与宽带扫击 (轻量/高频使用)"
-        echo -e "  ${YELLOW}2.${NC} ClamAV 引擎: 全盘深度查杀"
-        echo -e "  ${YELLOW}3.${NC} ClamAV 引擎: 部分目录指定查杀"
-        echo -e "  ${YELLOW}4.${NC} 手动同步最新病毒库"
-        echo -e "  ${YELLOW}0.${NC} 退出面板"
-        echo -e "${CYAN}============================================${NC}"
-        read -p "请输入对应数字 [0-4]: " choice
+        echo -e "${CYAN}==================================================${NC}"
+        echo -e "${GREEN}          VPS 安全查杀与异常清理控制台           ${NC}"
+        echo -e "${CYAN}==================================================${NC}"
+        echo -e "  ${YELLOW}1.${NC} 异常高负载/高连接进程查杀 (数字编号击杀)"
+        echo -e "  ${YELLOW}2.${NC} 大厂病毒库: 全盘深度扫描与精准清除"
+        echo -e "  ${YELLOW}3.${NC} 大厂病毒库: 部分目录定向扫描 (数字位置选择)"
+        echo -e "  ${YELLOW}4.${NC} 手动同步最新病毒定义特征"
+        echo -e "  ${YELLOW}0.${NC} 退出当前安全控制台"
+        echo -e "${CYAN}==================================================${NC}"
+        read -p "请输入对应数字 [0-4]: " menu_choice
         
-        case $choice in
-            1) scan_abnormal ;;
-            2) full_scan ;;
-            3) partial_scan ;;
-            4) update_db ;;
-            0) echo -e "${GREEN}安全退出，祝你的服务器运行稳定！${NC}"; exit 0 ;;
-            *) echo -e "${RED}输入无效，请重新选择。${NC}"; sleep 1 ;;
+        case $menu_choice in
+            1) scan_abnormal_processes ;;
+            2) do_full_scan ;;
+            3) do_partial_scan ;;
+            4) do_update_db ;;
+            0) echo -e "${GREEN}安全退出，祝您的节点与服务器运行平稳稳定！${NC}"; exit 0 ;;
+            *) echo -e "${RED}非法选项，请重新选择。${NC}"; sleep 1 ;;
         esac
     done
 }
