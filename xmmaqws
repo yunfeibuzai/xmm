@@ -2,6 +2,7 @@
 
 # =================================================================
 # VPS 安全综合查杀与异常清理脚本 (支持 Debian/Ubuntu/Alpine/CentOS)
+# 包含一键自我升级功能
 # =================================================================
 
 # 颜色定义
@@ -45,6 +46,19 @@ install_dependencies() {
     fi
 }
 
+# 强制停止后台更新进程解除文件锁定
+force_stop_freshclam() {
+    if command -v systemctl &> /dev/null; then
+        systemctl stop clamav-freshclam 2>/dev/null
+    elif command -v rc-service &> /dev/null; then
+        rc-service clamav-freshclam stop 2>/dev/null
+    elif command -v service &> /dev/null; then
+        service clamav-freshclam stop 2>/dev/null
+    fi
+    # 彻底击杀可能存在的僵尸进程
+    killall -9 freshclam 2>/dev/null
+}
+
 # 检查并安装大厂病毒库引擎 (ClamAV)
 check_clamav() {
     if ! command -v clamscan &> /dev/null; then
@@ -57,6 +71,7 @@ check_clamav() {
             yum install -y epel-release && yum install -y clamav clamav-update
         fi
         echo -e "${GREEN}正在同步最新大厂病毒定义 (首次更新可能需要几分钟)...${NC}"
+        force_stop_freshclam
         freshclam
     fi
 
@@ -74,7 +89,7 @@ check_clamav() {
     return 0
 }
 
-# 功能 1：异常高负载进程查杀 (数字编号选择)
+# 功能 1：异常高负载进程查杀
 scan_abnormal_processes() {
     echo -e "\n${CYAN}==================================================${NC}"
     echo -e "${CYAN}         正在扫描高资源占用与异常网络进程         ${NC}"
@@ -88,11 +103,9 @@ scan_abnormal_processes() {
     local pids=()
     local cmds=()
     
-    # 抓取 CPU 排序前 8 的进程
     while read -r pid cpu mem cmd; do
         if [ "$pid" != "PID" ] && [ -n "$pid" ] && [ "$pid" != "$$" ]; then
-            # 过滤脚本自身及高频基础安全系统进程，严防误杀
-            if [[ "$cmd" =~ "vps_scanner" || "$cmd" =~ "xmmaqws" || "$cmd" =~ "sshd" || "$cmd" =~ "bash" || "$cmd" =~ "ps" ]]; then
+            if [[ "$cmd" =~ "mm" || "$cmd" =~ "xmmaqws" || "$cmd" =~ "sshd" || "$cmd" =~ "bash" || "$cmd" =~ "ps" ]]; then
                 continue
             fi
             pids+=("$pid")
@@ -116,7 +129,6 @@ scan_abnormal_processes() {
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#pids[@]}" ]; then
             local arr_idx=$((choice - 1))
             local target_pid="${pids[$arr_idx]}"
-            local target_cmd="${cmds[$arr_idx]}"
             kill -9 "$target_pid" 2>/dev/null
             echo -e "${GREEN}已成功强制强制结束编号 [$choice] 的进程 (PID: $target_pid)${NC}"
         else
@@ -127,16 +139,14 @@ scan_abnormal_processes() {
     read -p "处理完成，按回车键返回主菜单..."
 }
 
-# 核心处理：ClamAV 扫描结果数字化输出并交互式删除
+# 核心处理：ClamAV 扫描结果数字化输出
 process_clamav_results() {
     local scan_target="$1"
     local log_file="/tmp/clamscan_res.log"
 
     echo -e "\n${YELLOW}正在对 [$scan_target] 进行大厂病毒库匹配扫描，这可能需要一些时间，请稍候...${NC}"
-    # -r 递归，-i 只打印命中的受感染文件，屏蔽虚拟驱动盘
     clamscan -r -i "$scan_target" --exclude-dir="^/sys" --exclude-dir="^/dev" --exclude-dir="^/proc" --exclude-dir="^/run" > "$log_file" 2>/dev/null
 
-    # 提取命中文件路径
     local infected_files=()
     while read -r line; do
         if [[ "$line" =~ "FOUND" ]]; then
@@ -200,20 +210,18 @@ do_full_scan() {
     process_clamav_results "/"
 }
 
-# 功能 3：部分目录自定义查杀 (数字列出服务器内所有数据等存放位置)
+# 功能 3：部分目录自定义查杀
 do_partial_scan() {
     check_clamav || return
     echo -e "\n${CYAN}==================================================${NC}"
     echo -e "${CYAN}         部分查杀: 请选择你想扫描的数据存放位置     ${NC}"
     echo -e "\n${CYAN}==================================================${NC}"
     
-    # 动态分析根目录下具备实际存储意义的顶级目录 (动态屏蔽系统底层虚拟盘)
     local scan_dirs=()
     for d in /*; do
         if [ -d "$d" ]; then
             case "$d" in
                 /proc|/sys|/dev|/run|/lib|/lib64|/bin|/sbin)
-                    # 自动绕过系统虚拟、只读挂载点，防止死循环
                     ;;
                 *)
                     scan_dirs+=("$d")
@@ -243,15 +251,30 @@ do_partial_scan() {
 do_update_db() {
     echo -e "${YELLOW}正在连接各大网络安全骨干节点，拉取最新病毒定义...${NC}"
     if command -v freshclam &> /dev/null; then
-        if command -v systemctl &> /dev/null; then
-            systemctl stop clamav-freshclam 2>/dev/null
-        fi
+        force_stop_freshclam
         freshclam
         echo -e "${GREEN}病毒特征库同步完毕！${NC}"
     else
         echo -e "${RED}请先执行菜单 2 或 3，系统在安装查杀引擎时会自动完成首次同步。${NC}"
     fi
     read -p "按回车键返回主菜单..."
+}
+
+# 功能 5：一键自动更新脚本
+upgrade_script() {
+    echo -e "\n${CYAN}==================================================${NC}"
+    echo -e "${YELLOW}正在从 GitHub 拉取最新代码并覆盖安装...${NC}"
+    wget -O /usr/local/bin/mm https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmmaqws
+    
+    if [ $? -eq 0 ]; then
+        chmod +x /usr/local/bin/mm
+        echo -e "${GREEN}脚本升级成功！面板正在重新启动...${NC}"
+        sleep 2
+        exec /usr/local/bin/mm
+    else
+        echo -e "${RED}升级失败，请检查网络是否能访问 GitHub。${NC}"
+        read -p "按回车键返回主菜单..."
+    fi
 }
 
 # 菜单总控核心
@@ -266,15 +289,17 @@ main_menu() {
         echo -e "  ${YELLOW}2.${NC} 大厂病毒库: 全盘深度扫描与精准清除"
         echo -e "  ${YELLOW}3.${NC} 大厂病毒库: 部分目录定向扫描 (数字位置选择)"
         echo -e "  ${YELLOW}4.${NC} 手动同步最新病毒定义特征"
+        echo -e "  ${YELLOW}5.${NC} 一键升级本脚本 (从 GitHub 拉取最新版)"
         echo -e "  ${YELLOW}0.${NC} 退出当前安全控制台"
         echo -e "${CYAN}==================================================${NC}"
-        read -p "请输入对应数字 [0-4]: " menu_choice
+        read -p "请输入对应数字 [0-5]: " menu_choice
         
         case $menu_choice in
             1) scan_abnormal_processes ;;
             2) do_full_scan ;;
             3) do_partial_scan ;;
             4) do_update_db ;;
+            5) upgrade_script ;;
             0) echo -e "${GREEN}安全退出，祝您的节点与服务器运行平稳稳定！${NC}"; exit 0 ;;
             *) echo -e "${RED}非法选项，请重新选择。${NC}"; sleep 1 ;;
         esac
