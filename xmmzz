@@ -7,25 +7,41 @@ RED='\033[0;31m'
 PLAIN='\033[0m'
 
 # ==========================================
+# 自动配置 xmm 快捷指令面板
+# ==========================================
+if [ ! -f "/usr/local/bin/xmm" ] && [ ! -f "/usr/bin/xmm" ]; then
+    mkdir -p /root/relay_scripts
+    cp "$0" /root/relay_scripts/xmmzz.sh 2>/dev/null
+    chmod +x /root/relay_scripts/xmmzz.sh
+    if [ -d "/usr/local/bin" ]; then
+        ln -sf /root/relay_scripts/xmmzz.sh /usr/local/bin/xmm
+    else
+        ln -sf /root/relay_scripts/xmmzz.sh /usr/bin/xmm
+    fi
+    echo -e "${GREEN}🎉 快捷控制台面板已成功注入！${PLAIN}"
+    echo -e "${GREEN}以后在任意目录下输入快捷键：${YELLOW}xmm${GREEN} 即可直接唤醒此面板。${PLAIN}"
+    sleep 1.5
+fi
+
+# ==========================================
 # 功能 1：安装必要依赖
 # ==========================================
 install_deps() {
-    echo -e "\n${YELLOW}开始检测并安装所需依赖 (socat / cron)...${PLAIN}"
+    echo -e "\n${YELLOW}开始检测并安装所需依赖 (socat / cron / curl / 网络组件)...${PLAIN}"
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -y >/dev/null 2>&1
-        apt-get install -y socat cron >/dev/null 2>&1
+        apt-get install -y socat cron curl grep iproute2 net-tools >/dev/null 2>&1
         echo -e "${GREEN}✅ 依赖安装完成 (Debian/Ubuntu 环境)${PLAIN}"
     elif command -v apk >/dev/null 2>&1; then
-        # Alpine 环境下同时补全 bash 和 cronie
         apk update >/dev/null 2>&1
-        apk add socat bash cronie >/dev/null 2>&1
+        apk add socat bash cronie curl grep iproute2 net-tools >/dev/null 2>&1
         rc-update add cronie default >/dev/null 2>&1 && rc-service cronie start >/dev/null 2>&1
         echo -e "${GREEN}✅ 依赖安装完成 (Alpine 环境)${PLAIN}"
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y socat crontabs >/dev/null 2>&1
+        yum install -y socat crontabs curl grep iproute net-tools >/dev/null 2>&1
         echo -e "${GREEN}✅ 依赖安装完成 (CentOS/RHEL 环境)${PLAIN}"
     else
-        echo -e "${RED}❌ 未找到支持的包管理器，请手动安装 socat。${PLAIN}"
+        echo -e "${RED}❌ 未找到支持的包管理器，请手动安装必要组件。${PLAIN}"
     fi
     
     echo -e "\n请按回车键返回主菜单..."
@@ -33,12 +49,11 @@ install_deps() {
 }
 
 # ==========================================
-# 功能 2：一键中转对接脚本
+# 功能 2：一键中转对接脚本 (附带端口检测)
 # ==========================================
 setup_relay() {
     echo -e "\n${YELLOW}--- 开始配置中转转发 ---${PLAIN}"
     
-    # 检查 socat 是否安装
     if ! command -v socat >/dev/null 2>&1; then
         echo -e "${RED}警告：未检测到 socat，请先在主菜单选择 1 安装依赖！${PLAIN}"
         echo -e "\n请按回车键返回主菜单..."
@@ -49,6 +64,15 @@ setup_relay() {
     echo -e "\n[1/4] 请输入监听端口 (当前中转服务器开放、用于连接的端口):"
     read -r local_port
 
+    # 核心新增：端口占用检测逻辑 (双重保障适配不同系统)
+    if ss -tuln 2>/dev/null | grep -qE ":${local_port}\b" || netstat -tuln 2>/dev/null | grep -qE ":${local_port}\b"; then
+        echo -e "\n${RED}❌ 端口 ${local_port} 已被占用，请换一个！${PLAIN}"
+        echo -e "提示: 如果这是你刚刚添加的端口，说明转发已在运行；如果是其他服务占用了该端口，请重新选择。\n"
+        echo -e "请按回车键返回主菜单..."
+        read -r
+        return
+    fi
+
     echo -e "\n[2/4] 请输入落地服务器的转发类型 (输入 4 代表 IPv4, 输入 6 代表 IPv6):"
     read -r ip_type
 
@@ -58,7 +82,6 @@ setup_relay() {
     echo -e "\n[4/4] 请输入落地服务器的端口 (实际的服务端口):"
     read -r remote_port
 
-    # 处理 IPv6 格式并生成命令
     remote_ip=$(echo "$remote_ip" | tr -d '[]')
 
     if [ "$ip_type" == "4" ]; then
@@ -74,23 +97,17 @@ setup_relay() {
         return
     fi
 
-    # 生成独立守护脚本
     SCRIPT_DIR="/root/relay_scripts"
     mkdir -p "$SCRIPT_DIR"
     SCRIPT_FILE="${SCRIPT_DIR}/relay_${local_port}.sh"
 
     cat << EOF > "$SCRIPT_FILE"
 #!/bin/bash
-# 启动 TCP 转发
 nohup socat TCP-LISTEN:${local_port},reuseaddr,fork ${TARGET_TCP} > /dev/null 2>&1 &
-
-# 启动 UDP 转发
 nohup socat UDP-LISTEN:${local_port},reuseaddr,fork ${TARGET_UDP} > /dev/null 2>&1 &
 EOF
 
     chmod +x "$SCRIPT_FILE"
-
-    # 执行并利用 crontab 设置开机自启
     bash "$SCRIPT_FILE"
 
     if command -v crontab >/dev/null 2>&1; then
@@ -112,6 +129,177 @@ EOF
 }
 
 # ==========================================
+# 功能 3：Cloudflare DDNS 动态 IP 绑定
+# ==========================================
+setup_ddns() {
+    echo -e "\n${YELLOW}--- 开始配置 Cloudflare DDNS 动态 IP ---${PLAIN}"
+    
+    if ! command -v curl >/dev/null 2>&1; then
+        echo -e "${RED}警告：未检测到 curl，请先在主菜单选择 1 安装依赖！${PLAIN}"
+        echo -e "\n请按回车键返回主菜单..."
+        read -r
+        return
+    fi
+
+    echo "[1/4] 请输入已经在 CF 解析的完整域名 (例如: relay.xmm.com):"
+    read -r ddns_domain
+
+    echo -e "\n[2/4] 请选择域名解析记录类型 (输入 4 代表 A记录/IPv4, 输入 6 代表 AAAA记录/IPv6):"
+    read -r ddns_type
+
+    echo -e "\n[3/4] 请输入 Cloudflare API Token (需要具有 DNS:Edit 权限):"
+    read -r cf_token
+
+    echo -e "\n[4/4] 请输入 Cloudflare 区域 ID (Zone ID):"
+    read -r cf_zone_id
+
+    if [ "$ddns_type" == "4" ]; then
+        RECORD_TYPE="A"
+    elif [ "$ddns_type" == "6" ]; then
+        RECORD_TYPE="AAAA"
+    else
+        echo -e "${RED}❌ 输入错误：类型只能输入 4 或 6。${PLAIN}"
+        echo -e "\n请按回车键返回主菜单..."
+        read -r
+        return
+    fi
+
+    DDNS_SCRIPT="/root/relay_scripts/cf_ddns.sh"
+    mkdir -p /root/relay_scripts
+
+    cat << 'EOF' > "$DDNS_SCRIPT"
+#!/bin/bash
+DOMAIN="MY_DOMAIN"
+IP_TYPE="MY_IP_TYPE"
+CF_TOKEN="MY_CF_TOKEN"
+ZONE_ID="MY_ZONE_ID"
+RECORD_TYPE="MY_RECORD_TYPE"
+LOG_FILE="/var/log/xmm_ddns.log"
+
+# 核心新增：日志记录函数，限制物理行数永远不超过 30 行
+write_log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    tail -n 30 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+}
+
+# 获取本地公网 IP
+if [ "$IP_TYPE" == "4" ]; then
+    CURRENT_IP=$(curl -s4 https://api.ipify.org || curl -s4 https://ifconfig.me || curl -s4 https://ip.sb)
+else
+    CURRENT_IP=$(curl -s6 https://api64.ipify.org || curl -s6 https://ifconfig.me || curl -s6 https://ip.sb)
+fi
+
+if [ -z "$CURRENT_IP" ]; then
+    write_log "❌ 错误: 网络断开或无法获取本地公网 IP"
+    exit 1
+fi
+
+# 获取 Cloudflare 现有的解析记录
+RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=${RECORD_TYPE}&name=${DOMAIN}" \
+    -H "Authorization: Bearer ${CF_TOKEN}" \
+    -H "Content-Type: application/json")
+
+# 拦截并分析 Token/权限错误
+if echo "$RECORD_INFO" | grep -q '"success":false'; then
+    write_log "❌ 错误: API 请求被拒，请检查 Token 权限和 Zone ID"
+    echo "$RECORD_INFO" # 输出供终端测试捕获
+    exit 1
+fi
+
+RECORD_ID=$(echo "$RECORD_INFO" | tr ',' '\n' | grep -E '"id" *:' | cut -d'"' -f4 | head -n1)
+OLD_IP=$(echo "$RECORD_INFO" | tr ',' '\n' | grep -E '"content" *:' | cut -d'"' -f4 | head -n1)
+
+if [ -z "$RECORD_ID" ]; then
+    # 创建新记录
+    RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+        -H "Authorization: Bearer ${CF_TOKEN}" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
+    
+    if echo "$RESULT" | grep -q '"success":true'; then
+        write_log "✅ 成功: 新建域名解析指向 -> $CURRENT_IP"
+        echo "创建成功"
+    else
+        write_log "❌ 错误: 域名解析新建失败"
+    fi
+else
+    # 对比更新
+    if [ "$CURRENT_IP" != "$OLD_IP" ]; then
+        RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${RECORD_ID}" \
+            -H "Authorization: Bearer ${CF_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
+        
+        if echo "$RESULT" | grep -q '"success":true'; then
+            write_log "✅ 成功: 动态 IP 已更新 -> $CURRENT_IP"
+            echo "更新成功"
+        else
+            write_log "❌ 错误: 动态 IP 更新请求失败"
+        fi
+    else
+        write_log "ℹ️ 正常: IP 未改变 ($CURRENT_IP)，无需同步"
+        echo "无需同步"
+    fi
+fi
+EOF
+
+    sed -i "s|MY_DOMAIN|${ddns_domain}|g" "$DDNS_SCRIPT"
+    sed -i "s|MY_IP_TYPE|${ddns_type}|g" "$DDNS_SCRIPT"
+    sed -i "s|MY_CF_TOKEN|${cf_token}|g" "$DDNS_SCRIPT"
+    sed -i "s|MY_ZONE_ID|${cf_zone_id}|g" "$DDNS_SCRIPT"
+    sed -i "s|MY_RECORD_TYPE|${RECORD_TYPE}|g" "$DDNS_SCRIPT"
+
+    chmod +x "$DDNS_SCRIPT"
+    
+    echo -e "\n${YELLOW}正在尝试进行首次同步测试...${PLAIN}"
+    TEST_RUN=$(bash "$DDNS_SCRIPT" 2>&1)
+    
+    if echo "$TEST_RUN" | grep -q "成功" || echo "$TEST_RUN" | grep -q "无需同步"; then
+        echo "======================================================"
+        echo -e "${GREEN}✅ Cloudflare DDNS 配置成功并写入定时任务！${PLAIN}"
+        echo "绑定域名: ${ddns_domain}"
+        echo "详细状态可返回主菜单输入 4 查看日志。"
+        echo "======================================================"
+        
+        if command -v crontab >/dev/null 2>&1; then
+            if ! crontab -l 2>/dev/null | grep -q "$DDNS_SCRIPT"; then
+                (crontab -l 2>/dev/null; echo "*/5 * * * * bash $DDNS_SCRIPT > /dev/null 2>&1") | crontab -
+            fi
+        fi
+    else
+        echo "======================================================"
+        echo -e "${RED}❌ 首次同步测试失败！${PLAIN}"
+        echo -e "${YELLOW}由于 API 返回了 false 错误，可能原因：${PLAIN}"
+        echo "1. Token 复制少了或者多了空格。"
+        echo "2. Token 没有选择【编辑区域 DNS】权限。"
+        echo "3. Zone ID 填错了。"
+        echo -e "${RED}为防止无意义报错堆积，DDNS 定时任务已取消，请重新配置。${PLAIN}"
+        echo "======================================================"
+        rm -f "$DDNS_SCRIPT"
+    fi
+    
+    echo -e "\n请按回车键返回主菜单..."
+    read -r
+}
+
+# ==========================================
+# 功能 4：查看运行日志
+# ==========================================
+view_logs() {
+    echo -e "\n${YELLOW}=== DDNS 运行日志 (自动限制最新 30 条) ===${PLAIN}"
+    LOG_FILE="/var/log/xmm_ddns.log"
+    
+    if [ -f "$LOG_FILE" ]; then
+        cat "$LOG_FILE"
+    else
+        echo -e "${RED}暂无日志记录，如果你刚配置完，系统可能正准备第一次运行，或配置失败被拦截。${PLAIN}"
+    fi
+    echo -e "${YELLOW}==========================================${PLAIN}"
+    echo -e "\n请按回车键返回主菜单..."
+    read -r
+}
+
+# ==========================================
 # 主菜单循环
 # ==========================================
 while true; do
@@ -122,25 +310,19 @@ while true; do
     echo "======================================================"
     echo "  1. 安装必要依赖 (首次使用请先安装)"
     echo "  2. 一键配置中转对接"
+    echo "  3. 配置 Cloudflare DDNS 动态 IP 同步"
+    echo "  4. 查看 DDNS 运行状态与排错日志"
     echo "  0. 退出脚本"
     echo "======================================================"
-    echo -n "请输入选项 [0-2]: "
+    echo -n "请输入选项 [0-4]: "
     read -r choice
 
     case "$choice" in
-        1)
-            install_deps
-            ;;
-        2)
-            setup_relay
-            ;;
-        0)
-            echo -e "${GREEN}感谢使用，已退出！${PLAIN}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}输入错误，请输入 0, 1 或 2${PLAIN}"
-            sleep 2
-            ;;
+        1) install_deps ;;
+        2) setup_relay ;;
+        3) setup_ddns ;;
+        4) view_logs ;;
+        0) echo -e "${GREEN}感谢使用，已退出！${PLAIN}"; exit 0 ;;
+        *) echo -e "${RED}输入错误，请输入 0 到 4 之间的数字${PLAIN}"; sleep 1.5 ;;
     esac
 done
