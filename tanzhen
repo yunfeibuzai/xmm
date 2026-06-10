@@ -1,0 +1,142 @@
+#!/bin/bash
+
+# ====================================================================
+# 脚本名称: 麦卖小鸡挂机不卡死 - 哪吒探针 v2 极致降脂去爆一键脚本
+# 适用环境: Debian / Ubuntu / Alpine / CentOS (NAT/LXC/KVM 均可)
+# ====================================================================
+
+echo "=== 🚀 正在执行【麦卖小鸡挂机不卡死】哪吒探针精巧部署 ==="
+
+# 1. 默认配置区（如果运行脚本不带参数，则使用这里的默认值）
+DEFAULT_SERVER="v2bx.ccwu.cc:8008"
+DEFAULT_SECRET="Xwtjo655kUEIFpju0oqvs91G8wkBDGCA"
+
+# 动态接收参数：第一个参数为密钥，第二个参数为服务端地址
+NZ_SECRET="${1:-$DEFAULT_SECRET}"
+NZ_SERVER="${2:-$DEFAULT_SERVER}"
+
+# 2. 检查并补齐 unzip 解压依赖
+if ! command -v unzip &>/dev/null; then
+    echo "-> 正在安装解压依赖 unzip..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -y >/dev/null 2>&1 && apt-get install -y unzip >/dev/null 2>&1
+    elif command -v yum &>/dev/null; then
+        yum install -y unzip >/dev/null 2>&1
+    elif command -v apk &>/dev/null; then
+        apk add --no-cache unzip >/dev/null 2>&1
+    fi
+fi
+
+# 3. 物理净化旧进程与锁文件
+systemctl stop nezha-agent >/dev/null 2>&1
+rc-service nezha-agent stop >/dev/null 2>&1
+killall -9 nezha-agent >/dev/null 2>&1
+rm -f /var/run/nezha-agent.lock /var/run/nezha-agent.pid
+
+# 4. 自动识别架构
+ARCH=$(uname -m)
+case "${ARCH}" in
+    x86_64|amd64) NZ_ARCH="amd64" ;;
+    arm64|aarch64) NZ_ARCH="arm64" ;;
+    *) NZ_ARCH="amd64" ;;
+esac
+
+# 5. 轻量直链下载 v2 架构 ZIP 包
+mkdir -p /opt/nezha/agent
+echo "-> 正在下载哪吒 v2 核心二进制文件..."
+curl -L -s -H "User-Agent: Mozilla/5.0" "https://github.com/nezhahq/agent/releases/latest/download/nezha-agent_linux_${NZ_ARCH}.zip" -o /tmp/nz.zip
+
+if [ ! -f /tmp/nz.zip ] || [ ! -s /tmp/nz.zip ]; then
+    echo "⚠️ 官方源下载失败，正在启动 ghp.ci 镜像加速..."
+    curl -L -s "https://ghp.ci/https://github.com/nezhahq/agent/releases/latest/download/nezha-agent_linux_${NZ_ARCH}.zip" -o /tmp/nz.zip
+fi
+
+# 6. 安全解压并赋权
+unzip -q -o /tmp/nz.zip -d /opt/nezha/agent/
+if [ ! -f /opt/nezha/agent/nezha-agent ]; then
+    echo "❌ 核心文件解压失败，请检查网络或空间！"
+    exit 1
+fi
+chmod +x /opt/nezha/agent/nezha-agent
+rm -f /tmp/nz.zip
+
+# 7. 注入极致低功耗配置文件 (完美适配 v2 校验)
+CONF_FILE="/opt/nezha/agent/config.yml"
+cat << EOF > "$CONF_FILE"
+client_secret: ${NZ_SECRET}
+debug: false
+disable_auto_update: true
+disable_command_execute: true
+disable_nat: true
+gpu: false
+ip_report_period: 1800
+report_delay: 4
+server: ${NZ_SERVER}
+skip_connection_count: true
+skip_procs_count: true
+tls: false
+EOF
+
+# 8. 彻底清空潜在日志并建立黑洞软链接
+rm -f /opt/nezha/agent/*.log >/dev/null 2>&1
+ln -sf /dev/null /opt/nezha/agent/nezha.log 2>/dev/null || true
+
+# 9. 底层服务托管（CPU硬限制 15% 与 内存上限 35M）
+if [ -d /etc/systemd/system ]; then
+    # --- 场景 A: Debian/Ubuntu/CentOS (基于 Systemd) ---
+    SVC="/etc/systemd/system/nezha-agent.service"
+    cat << EOF > "$SVC"
+[Unit]
+Description=Nezha Agent Extreme Low Memory
+After=network.target
+
+[Service]
+Type=simple
+Environment="GOMEMLIMIT=35MiB"
+Environment="GOGC=50"
+StandardOutput=null
+StandardError=null
+CPUQuota=15%
+Nice=19
+IOSchedulingClass=idle
+MemoryMax=60M
+MemorySwapMax=0
+ExecStart=/opt/nezha/agent/nezha-agent -c /opt/nezha/agent/config.yml
+Restart=always
+RestartSec=20s
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable nezha-agent >/dev/null 2>&1
+    systemctl restart nezha-agent >/dev/null 2>&1
+
+elif [ -d /etc/init.d ]; then
+    # --- 场景 B: Alpine Linux (基于 OpenRC) ---
+    SVC="/etc/init.d/nezha-agent"
+    cat << 'EOF' > "$SVC"
+#!/sbin/openrc-run
+description="Nezha Agent Alpine Extreme"
+export GOMEMLIMIT=35MiB
+export GOGC=50
+command="/opt/nezha/agent/nezha-agent"
+command_args="-c /opt/nezha/agent/config.yml"
+command_background=true
+pidfile="/var/run/nezha-agent.pid"
+output_log="/dev/null"
+error_log="/dev/null"
+start_stop_daemon_args="--nicelevel 19"
+
+depend() {
+    need net
+}
+EOF
+    chmod +x "$SVC"
+    rc-update add nezha-agent default >/dev/null 2>&1
+    rc-service nezha-agent restart >/dev/null 2>&1
+fi
+
+echo "=== 🎉 降脂防爆版部署完成！目标面板: ${NZ_SERVER} ==="
