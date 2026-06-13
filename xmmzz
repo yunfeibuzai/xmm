@@ -6,6 +6,10 @@ YELLOW='\033[0;33m'
 RED='\033[0;31m'
 PLAIN='\033[0m'
 
+# 自定义配置：请把下面的链接修改为你 GitHub 仓库的 Raw 原始文件直连地址
+# 这样用户在使用一键升级时，默认就会从这个地址拉取最新版
+GITHUB_RAW_URL="https://raw.githubusercontent.com/你的用户名/你的仓库名/main/xmmzz.sh"
+
 # ==========================================
 # 自动配置 xmm 快捷指令面板
 # ==========================================
@@ -49,7 +53,7 @@ install_deps() {
 }
 
 # ==========================================
-# 功能 2：一键中转对接脚本 (附带端口检测)
+# 功能 2：一键中转对接脚本 (防换行安全重构版)
 # ==========================================
 setup_relay() {
     echo -e "\n${YELLOW}--- 开始配置中转转发 ---${PLAIN}"
@@ -64,7 +68,7 @@ setup_relay() {
     echo -e "\n[1/4] 请输入监听端口 (当前中转服务器开放、用于连接的端口):"
     read -r local_port
 
-    # 核心新增：端口占用检测逻辑 (双重保障适配不同系统)
+    # 端口占用检测逻辑
     if ss -tuln 2>/dev/null | grep -qE ":${local_port}\b" || netstat -tuln 2>/dev/null | grep -qE ":${local_port}\b"; then
         echo -e "\n${RED}❌ 端口 ${local_port} 已被占用，请换一个！${PLAIN}"
         echo -e "提示: 如果这是你刚刚添加的端口，说明转发已在运行；如果是其他服务占用了该端口，请重新选择。\n"
@@ -101,10 +105,13 @@ setup_relay() {
     mkdir -p "$SCRIPT_DIR"
     SCRIPT_FILE="${SCRIPT_DIR}/relay_${local_port}.sh"
 
+    # 防粘贴折断重构
     cat << EOF > "$SCRIPT_FILE"
 #!/bin/bash
-nohup socat TCP-LISTEN:${local_port},reuseaddr,fork ${TARGET_TCP} > /dev/null 2>&1 &
-nohup socat UDP-LISTEN:${local_port},reuseaddr,fork ${TARGET_UDP} > /dev/null 2>&1 &
+nohup socat TCP-LISTEN:${local_port},reuseaddr,fork ${TARGET_TCP} \\
+    >/dev/null 2>&1 &
+nohup socat UDP-LISTEN:${local_port},reuseaddr,fork ${TARGET_UDP} \\
+    >/dev/null 2>&1 &
 EOF
 
     chmod +x "$SCRIPT_FILE"
@@ -176,68 +183,65 @@ ZONE_ID="MY_ZONE_ID"
 RECORD_TYPE="MY_RECORD_TYPE"
 LOG_FILE="/var/log/xmm_ddns.log"
 
-# 核心新增：日志记录函数，限制物理行数永远不超过 30 行
+# 日志记录函数，限制物理行数永远不超过 30 行
 write_log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-    tail -n 30 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+    echo "\$(date '+%Y-%m-%d %H:%M:%S') - \$1" >> "\$LOG_FILE"
+    tail -n 30 "\$LOG_FILE" > "\${LOG_FILE}.tmp" && mv "\${LOG_FILE}.tmp" "\$LOG_FILE"
 }
 
 # 获取本地公网 IP
-if [ "$IP_TYPE" == "4" ]; then
-    CURRENT_IP=$(curl -s4 https://api.ipify.org || curl -s4 https://ifconfig.me || curl -s4 https://ip.sb)
+if [ "\$IP_TYPE" == "4" ]; then
+    CURRENT_IP=\$(curl -s4 https://api.ipify.org || curl -s4 https://ifconfig.me || curl -s4 https://ip.sb)
 else
-    CURRENT_IP=$(curl -s6 https://api64.ipify.org || curl -s6 https://ifconfig.me || curl -s6 https://ip.sb)
+    CURRENT_IP=\$(curl -s6 https://api64.ipify.org || curl -s6 https://ifconfig.me || curl -s6 https://ip.sb)
 fi
 
-if [ -z "$CURRENT_IP" ]; then
+if [ -z "\$CURRENT_IP" ]; then
     write_log "❌ 错误: 网络断开或无法获取本地公网 IP"
     exit 1
 fi
 
 # 获取 Cloudflare 现有的解析记录
-RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=${RECORD_TYPE}&name=${DOMAIN}" \
-    -H "Authorization: Bearer ${CF_TOKEN}" \
+RECORD_INFO=\$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/\${ZONE_ID}/dns_records?type=\${RECORD_TYPE}&name=\${DOMAIN}" \\
+    -H "Authorization: Bearer \${CF_TOKEN}" \\
     -H "Content-Type: application/json")
 
-# 拦截并分析 Token/权限错误
-if echo "$RECORD_INFO" | grep -q '"success":false'; then
+if echo "\$RECORD_INFO" | grep -q '"success":false'; then
     write_log "❌ 错误: API 请求被拒，请检查 Token 权限和 Zone ID"
-    echo "$RECORD_INFO" # 输出供终端测试捕获
+    echo "\$RECORD_INFO" 
     exit 1
 fi
 
-RECORD_ID=$(echo "$RECORD_INFO" | tr ',' '\n' | grep -E '"id" *:' | cut -d'"' -f4 | head -n1)
-OLD_IP=$(echo "$RECORD_INFO" | tr ',' '\n' | grep -E '"content" *:' | cut -d'"' -f4 | head -n1)
+RECORD_ID=\$(echo "\$RECORD_INFO" | tr ',' '\n' | grep -E '"id" *:' | cut -d'"' -f4 | head -n1)
+OLD_IP=\$(echo "\$RECORD_INFO" | tr ',' '\n' | grep -E '"content" *:' | cut -d'"' -f4 | head -n1)
 
-if [ -z "$RECORD_ID" ]; then
-    # 创建新记录
-    RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
-        -H "Authorization: Bearer ${CF_TOKEN}" \
-        -H "Content-Type: application/json" \
-        --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
+if [ -z "\$RECORD_ID" ]; then
+    RESULT=\$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/\${ZONE_ID}/dns_records" \\
+        -H "Authorization: Bearer \${CF_TOKEN}" \\
+        -H "Content-Type: application/json" \\
+        --data "{\"type\":\"\${RECORD_TYPE}\",\"name\":\"\${DOMAIN}\",\"content\":\"\${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
     
-    if echo "$RESULT" | grep -q '"success":true'; then
-        write_log "✅ 成功: 新建域名解析指向 -> $CURRENT_IP"
+    if echo "\$RESULT" | grep -q '"success":true'; then
+        write_log "✅ 成功: 新建域名解析指向 -> \$CURRENT_IP"
         echo "创建成功"
     else
         write_log "❌ 错误: 域名解析新建失败"
     fi
 else
-    # 对比更新
-    if [ "$CURRENT_IP" != "$OLD_IP" ]; then
-        RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${RECORD_ID}" \
-            -H "Authorization: Bearer ${CF_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
+    if [ "\$CURRENT_IP" != "\$OLD_IP" ]; then
+        RESULT=\$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/\${ZONE_ID}/dns_records/\${RECORD_ID}" \\
+            -H "Authorization: Bearer \${CF_TOKEN}" \\
+            -H "Content-Type: application/json" \\
+            --data "{\"type\":\"\${RECORD_TYPE}\",\"name\":\"\${DOMAIN}\",\"content\":\"\${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
         
-        if echo "$RESULT" | grep -q '"success":true'; then
-            write_log "✅ 成功: 动态 IP 已更新 -> $CURRENT_IP"
+        if echo "\$RESULT" | grep -q '"success":true'; then
+            write_log "✅ 成功: 动态 IP 已更新 -> \$CURRENT_IP"
             echo "更新成功"
         else
             write_log "❌ 错误: 动态 IP 更新请求失败"
         fi
     else
-        write_log "ℹ️ 正常: IP 未改变 ($CURRENT_IP)，无需同步"
+        write_log "ℹ️ 正常: IP 未改变 (\$CURRENT_IP)，无需同步"
         echo "无需同步"
     fi
 fi
@@ -269,10 +273,6 @@ EOF
     else
         echo "======================================================"
         echo -e "${RED}❌ 首次同步测试失败！${PLAIN}"
-        echo -e "${YELLOW}由于 API 返回了 false 错误，可能原因：${PLAIN}"
-        echo "1. Token 复制少了或者多了空格。"
-        echo "2. Token 没有选择【编辑区域 DNS】权限。"
-        echo "3. Zone ID 填错了。"
         echo -e "${RED}为防止无意义报错堆积，DDNS 定时任务已取消，请重新配置。${PLAIN}"
         echo "======================================================"
         rm -f "$DDNS_SCRIPT"
@@ -292,9 +292,62 @@ view_logs() {
     if [ -f "$LOG_FILE" ]; then
         cat "$LOG_FILE"
     else
-        echo -e "${RED}暂无日志记录，如果你刚配置完，系统可能正准备第一次运行，或配置失败被拦截。${PLAIN}"
+        echo -e "${RED}暂无日志记录。${PLAIN}"
     fi
     echo -e "${YELLOW}==========================================${PLAIN}"
+    echo -e "\n请按回车键返回主菜单..."
+    read -r
+}
+
+# ==========================================
+# 功能 5：核心新增——一键在线升级脚本
+# ==========================================
+update_script() {
+    echo -e "\n${YELLOW}--- 开始检查并在线升级脚本 ---${PLAIN}"
+    
+    if ! command -v curl >/dev/null 2>&1; then
+        echo -e "${RED}错误：未检测到 curl，请先在菜单选 1 安装依赖！${PLAIN}"
+        sleep 2
+        return
+    fi
+
+    # 如果默认配置还是占位符，提示输入
+    local download_url="$GITHUB_RAW_URL"
+    if [[ "$download_url" == *"你的用户名"* ]]; then
+        echo -e "${YELLOW}提示: 检测到脚本内置的 GitHub 链接未配置，请输入你的最新 xmmzz.sh 的 Raw 直连链接:${PLAIN}"
+        read -r input_url
+        if [ -n "$input_url" ]; then
+            download_url="$input_url"
+        else
+            echo -e "${RED}❌ 链接不能为空，升级取消。${PLAIN}"
+            sleep 1.5
+            return
+        fi
+    fi
+
+    echo -e "${YELLOW}正在连接 GitHub 远程同步最新代码...${PLAIN}"
+    local tmp_file="/root/relay_scripts/xmmzz.sh.tmp"
+    
+    # 下载最新脚本到临时文件
+    curl -sSfL "$download_url" -o "$tmp_file"
+    
+    if [ $? -eq 0 ] && [ -s "$tmp_file" ]; then
+        # 简单校验下载的文件是否为合法的 shell 脚本
+        if head -n 1 "$tmp_file" | grep -q "#!/bin/bash"; then
+            mv "$tmp_file" /root/relay_scripts/xmmzz.sh
+            chmod +x /root/relay_scripts/xmmzz.sh
+            echo -e "${GREEN}🎉 脚本升级成功！正在重新载入面板...${PLAIN}"
+            sleep 1.5
+            exec bash /root/relay_scripts/xmmzz.sh
+        else
+            echo -e "${RED}❌ 错误：下载的文件内容不合法，可能遭遇 GFW 拦截或链接错误，已撤销升级。${PLAIN}"
+            rm -f "$tmp_file"
+        fi
+    else
+        echo -e "${RED}❌ 错误：网络连接失败，无法下载最新脚本，请检查中转机能否连接 GitHub。${PLAIN}"
+        rm -f "$tmp_file"
+    fi
+    
     echo -e "\n请按回车键返回主菜单..."
     read -r
 }
@@ -312,9 +365,10 @@ while true; do
     echo "  2. 一键配置中转对接"
     echo "  3. 配置 Cloudflare DDNS 动态 IP 同步"
     echo "  4. 查看 DDNS 运行状态与排错日志"
+    echo -e "  ${GREEN}5. 一键升级本控制台脚本${PLAIN}"
     echo "  0. 退出脚本"
     echo "======================================================"
-    echo -n "请输入选项 [0-4]: "
+    echo -n "请输入选项 [0-5]: "
     read -r choice
 
     case "$choice" in
@@ -322,7 +376,8 @@ while true; do
         2) setup_relay ;;
         3) setup_ddns ;;
         4) view_logs ;;
+        5) update_script ;;
         0) echo -e "${GREEN}感谢使用，已退出！${PLAIN}"; exit 0 ;;
-        *) echo -e "${RED}输入错误，请输入 0 到 4 之间的数字${PLAIN}"; sleep 1.5 ;;
+        *) echo -e "${RED}输入错误，请输入 0 到 5 之间的数字${PLAIN}"; sleep 1.5 ;;
     esac
 done
