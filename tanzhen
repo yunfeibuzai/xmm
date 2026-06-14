@@ -1,19 +1,43 @@
 #!/bin/bash
 
 # ====================================================================
-# 脚本名称: 麦卖小鸡挂机不卡死 - 哪吒探针 v2 极致降脂去爆一键脚本
+# 脚本名称: 麦卖小鸡挂机不卡死 - 哪吒探针 v2 弹性降脂一键脚本
 # 适用环境: Debian / Ubuntu / Alpine / CentOS (NAT/LXC/KVM 均可)
+# GitHub 托管版 - 安全无硬编码
 # ====================================================================
 
-echo "=== 🚀 正在执行【麦卖小鸡挂机不卡死】哪吒探针精巧部署 ==="
+echo "=== 🚀 正在执行【麦卖小鸡挂机不卡死】哪吒探针弹性部署 ==="
 
-# 1. 默认配置区（如果运行脚本不带参数，则使用这里的默认值）
-DEFAULT_SERVER="v2bx.ccwu.cc:8008"
-DEFAULT_SECRET="Xwtjo655kUEIFpju0oqvs91G8wkBDGCA"
+# 动态接收参数
+NZ_SECRET="$1"
+NZ_SERVER="$2"
+NZ_MEM="${3:-40}"  # 内存限制默认 40M，兼顾低能耗与稳定性
 
-# 动态接收参数：第一个参数为密钥，第二个参数为服务端地址
-NZ_SECRET="${1:-$DEFAULT_SECRET}"
-NZ_SERVER="${2:-$DEFAULT_SERVER}"
+# 如果没有通过参数传递密钥和服务器，则进入交互式输入
+if [ -z "$NZ_SECRET" ] || [ -z "$NZ_SERVER" ]; then
+    echo "💡 提示：未检测到命令行参数，进入手动输入模式..."
+    
+    if [ -z "$NZ_SERVER" ]; then
+        read -p "请输入哪吒服务端地址 (例如 tz.domain.com:8008): " NZ_SERVER
+    fi
+    
+    if [ -z "$NZ_SECRET" ]; then
+        read -p "请输入哪吒 Agent 密钥 (Secret): " NZ_SECRET
+    fi
+    
+    # 再次检查，如果还是空的则退出
+    if [ -z "$NZ_SECRET" ] || [ -z "$NZ_SERVER" ]; then
+        echo "❌ 错误：服务端地址和密钥不能为空！"
+        echo "用法示例: bash install.sh <密钥> <域名:端口> [内存限制(MB,可选)]"
+        exit 1
+    fi
+fi
+
+# 自动计算 Systemd 的 MemoryMax 硬限制（留出 25M 缓冲区防止 Go 运行时突发 OOM）
+SYSTEMD_MEM_MAX=$((NZ_MEM + 25))
+
+echo "-> 当前配置：服务器: ${NZ_SERVER}"
+echo "-> 内存目标: ${NZ_MEM}MiB (最大硬限制 ${SYSTEMD_MEM_MAX}MiB), CPU 限制 15%"
 
 # 2. 检查并补齐 unzip 解压依赖
 if ! command -v unzip &>/dev/null; then
@@ -81,25 +105,25 @@ EOF
 rm -f /opt/nezha/agent/*.log >/dev/null 2>&1
 ln -sf /dev/null /opt/nezha/agent/nezha.log 2>/dev/null || true
 
-# 9. 底层服务托管（CPU硬限制 15% 与 内存上限 35M）
+# 9. 底层服务托管（引入自定义内存变量）
 if [ -d /etc/systemd/system ]; then
     # --- 场景 A: Debian/Ubuntu/CentOS (基于 Systemd) ---
     SVC="/etc/systemd/system/nezha-agent.service"
     cat << EOF > "$SVC"
 [Unit]
-Description=Nezha Agent Extreme Low Memory
+Description=Nezha Agent Flexible Low Memory
 After=network.target
 
 [Service]
 Type=simple
-Environment="GOMEMLIMIT=35MiB"
+Environment="GOMEMLIMIT=${NZ_MEM}MiB"
 Environment="GOGC=50"
 StandardOutput=null
 StandardError=null
 CPUQuota=15%
 Nice=19
 IOSchedulingClass=idle
-MemoryMax=60M
+MemoryMax=${SYSTEMD_MEM_MAX}M
 MemorySwapMax=0
 ExecStart=/opt/nezha/agent/nezha-agent -c /opt/nezha/agent/config.yml
 Restart=always
@@ -117,10 +141,10 @@ EOF
 elif [ -d /etc/init.d ]; then
     # --- 场景 B: Alpine Linux (基于 OpenRC) ---
     SVC="/etc/init.d/nezha-agent"
-    cat << 'EOF' > "$SVC"
+    cat << EOF > "$SVC"
 #!/sbin/openrc-run
-description="Nezha Agent Alpine Extreme"
-export GOMEMLIMIT=35MiB
+description="Nezha Agent Alpine Flexible"
+export GOMEMLIMIT=${NZ_MEM}MiB
 export GOGC=50
 command="/opt/nezha/agent/nezha-agent"
 command_args="-c /opt/nezha/agent/config.yml"
@@ -139,4 +163,4 @@ EOF
     rc-service nezha-agent restart >/dev/null 2>&1
 fi
 
-echo "=== 🎉 降脂防爆版部署完成！目标面板: ${NZ_SERVER} ==="
+echo "=== 🎉 弹性降脂版部署完成！目标面板: ${NZ_SERVER} ==="
