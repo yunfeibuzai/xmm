@@ -5,9 +5,9 @@
 # 支持环境: Debian / Ubuntu / Alpine / CentOS / RHEL
 # ====================================================
 
-# --- 全局配置区 (Fork 后请修改这里) ---
-GITHUB_REPO_URL="https://raw.githubusercontent.com/你的用户名/你的仓库名/main"
-SCRIPT_NAME="xmmzz.sh"
+# --- 全局配置区 ---
+GITHUB_REPO_URL="https://raw.githubusercontent.com/yunfeibuzai/xmm/main"
+SCRIPT_NAME="xmmzz"
 # --------------------------------------
 
 # 内部常量
@@ -345,15 +345,9 @@ update_script() {
     fi
 
     local target_url="${GITHUB_REPO_URL}/${SCRIPT_NAME}"
-    
-    # 交互式确认 URL
-    if [[ "$GITHUB_REPO_URL" == *"你的用户名"* ]]; then
-        echo -e "${YELLOW}当前配置的仓库地址未填写，请输入您的 ${SCRIPT_NAME} 文件的 RAW 直连网址：${PLAIN}"
-        read -r input_url
-        [ -n "$input_url" ] && target_url="$input_url" || { echo -e "${RED}[-] 取消升级。${PLAIN}"; sleep 1; return; }
-    fi
-
     local tmp_file="/tmp/${SCRIPT_NAME}.tmp"
+    
+    echo -e "${YELLOW}[*] 正在从 GitHub 仓库获取最新代码...${PLAIN}"
     curl -sSfL "$target_url" -o "$tmp_file"
     
     if [ $? -eq 0 ] && grep -q "#!/bin/bash" "$tmp_file"; then
@@ -363,7 +357,7 @@ update_script() {
         sleep 1.5
         exec bash "${SCRIPT_DIR}/${SCRIPT_NAME}"
     else
-        echo -e "${RED}[-] 下载失败或文件效验错误，已撤销。${PLAIN}"
+        echo -e "${RED}[-] 下载失败或文件效验错误，可能遭遇网络波动，已撤销升级。${PLAIN}"
         rm -f "$tmp_file"
     fi
     echo -e "\n按回车键返回..."
