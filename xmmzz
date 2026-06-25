@@ -1,55 +1,71 @@
 #!/bin/bash
+# ====================================================
+# 项目名称: 极简中转转发管理面板 (基于 socat)
+# 项目版本: v1.1.0
+# 支持环境: Debian / Ubuntu / Alpine / CentOS / RHEL
+# ====================================================
 
-# 定义颜色以便在终端显示更清晰
+# --- 全局配置区 (Fork 后请修改这里) ---
+GITHUB_REPO_URL="https://raw.githubusercontent.com/你的用户名/你的仓库名/main"
+SCRIPT_NAME="xmmzz.sh"
+# --------------------------------------
+
+# 内部常量
+SCRIPT_DIR="/root/relay_scripts"
+DDNS_LOG="/var/log/xmm_ddns.log"
+
+# 颜色定义
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
-# 自定义配置：请把下面的链接修改为你 GitHub 仓库的 Raw 原始文件直连地址
-GITHUB_RAW_URL="https://raw.githubusercontent.com/你的用户名/你的仓库名/main/xmmzz.sh"
-
-SCRIPT_DIR="/root/relay_scripts"
-
 # ==========================================
-# 自动配置 xmm 快捷指令面板
+# 0. 环境初始化与面板注入
 # ==========================================
-if [ ! -f "/usr/local/bin/xmm" ] && [ ! -f "/usr/bin/xmm" ]; then
-    mkdir -p "$SCRIPT_DIR"
-    cp "$0" "${SCRIPT_DIR}/xmmzz.sh" 2>/dev/null
-    chmod +x ${SCRIPT_DIR}/xmmzz.sh
-    if [ -d "/usr/local/bin" ]; then
-        ln -sf ${SCRIPT_DIR}/xmmzz.sh /usr/local/bin/xmm
-    else
-        ln -sf ${SCRIPT_DIR}/xmmzz.sh /usr/bin/xmm
+init_env() {
+    # 临时提升当前会话的最大文件句柄数 (防止高并发报错)
+    ulimit -n 65535 2>/dev/null
+
+    if [ ! -f "/usr/local/bin/xmm" ] && [ ! -f "/usr/bin/xmm" ]; then
+        echo -e "${CYAN}[*] 正在为您进行首次初始化设置...${PLAIN}"
+        mkdir -p "$SCRIPT_DIR"
+        cp "$0" "${SCRIPT_DIR}/${SCRIPT_NAME}" 2>/dev/null
+        chmod +x "${SCRIPT_DIR}/${SCRIPT_NAME}"
+        if [ -d "/usr/local/bin" ]; then
+            ln -sf "${SCRIPT_DIR}/${SCRIPT_NAME}" /usr/local/bin/xmm
+        else
+            ln -sf "${SCRIPT_DIR}/${SCRIPT_NAME}" /usr/bin/xmm
+        fi
+        echo -e "${GREEN}[+] 快捷控制台面板已成功注入！${PLAIN}"
+        echo -e "${GREEN}[+] 以后在任意目录下输入快捷键：${YELLOW}xmm${GREEN} 即可唤醒此面板。${PLAIN}"
+        sleep 2
     fi
-    echo -e "${GREEN}🎉 快捷控制台面板已成功注入！${PLAIN}"
-    echo -e "${GREEN}以后在任意目录下输入快捷键：${YELLOW}xmm${GREEN} 即可直接唤醒此面板。${PLAIN}"
-    sleep 1.5
-fi
+}
 
 # ==========================================
-# 功能 1：安装必要依赖 (已追加自动安装 nano 逻辑)
+# 功能 1：安装必要依赖
 # ==========================================
 install_deps() {
-    echo -e "\n${YELLOW}开始检测并安装所需依赖 (socat / cron / curl / nano / 网络组件)...${PLAIN}"
+    echo -e "\n${CYAN}[*] 开始检测并安装所需依赖 (socat / cron / curl / nano / 网络组件)...${PLAIN}"
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -y >/dev/null 2>&1
         apt-get install -y socat cron curl grep iproute2 net-tools nano >/dev/null 2>&1
-        echo -e "${GREEN}✅ 依赖安装完成 (Debian/Ubuntu 环境)${PLAIN}"
+        echo -e "${GREEN}[+] 依赖安装完成 (Debian/Ubuntu 环境)${PLAIN}"
     elif command -v apk >/dev/null 2>&1; then
         apk update >/dev/null 2>&1
         apk add socat bash cronie curl grep iproute2 net-tools nano >/dev/null 2>&1
         rc-update add cronie default >/dev/null 2>&1 && rc-service cronie start >/dev/null 2>&1
-        echo -e "${GREEN}✅ 依赖安装完成 (Alpine 环境)${PLAIN}"
+        echo -e "${GREEN}[+] 依赖安装完成 (Alpine 环境)${PLAIN}"
     elif command -v yum >/dev/null 2>&1; then
         yum install -y socat crontabs curl grep iproute net-tools nano >/dev/null 2>&1
-        echo -e "${GREEN}✅ 依赖安装完成 (CentOS/RHEL 环境)${PLAIN}"
+        echo -e "${GREEN}[+] 依赖安装完成 (CentOS/RHEL 环境)${PLAIN}"
     else
-        echo -e "${RED}❌ 未找到支持的包管理器，请手动安装必要组件。${PLAIN}"
+        echo -e "${RED}[-] 未找到支持的包管理器，请手动安装必要组件。${PLAIN}"
     fi
     
-    echo -e "\n请按回车键返回主菜单..."
+    echo -e "\n按回车键返回主菜单..."
     read -r
 }
 
@@ -58,31 +74,28 @@ install_deps() {
 # ==========================================
 _execute_relay_setup() {
     if ! command -v socat >/dev/null 2>&1; then
-        echo -e "${RED}警告：未检测到 socat，请先在主菜单选择 1 安装依赖！${PLAIN}"
-        echo -e "\n请按回车键返回主菜单..."
-        read -r
+        echo -e "${RED}[-] 警告：未检测到 socat，请先在主菜单选择 1 安装依赖！${PLAIN}"
+        sleep 2
         return
     fi
 
-    echo -e "\n[1/4] 请输入监听端口 (当前中转服务器开放、用于连接的端口):"
+    echo -e "\n${YELLOW}[1/4] 请输入监听端口 (当前中转服务器开放、用于连接的端口):${PLAIN}"
     read -r local_port
 
-    # 端口占用检测逻辑
     if ss -tuln 2>/dev/null | grep -qE ":${local_port}\b" || netstat -tuln 2>/dev/null | grep -qE ":${local_port}\b"; then
-        echo -e "\n${RED}❌ 端口 ${local_port} 已被占用，请换一个！${PLAIN}"
-        echo -e "提示: 如果这是你刚刚添加的端口，说明转发已在运行；如果是其他服务占用了该端口，请重新选择。\n"
-        echo -e "请按回车键返回主菜单..."
-        read -r
+        echo -e "\n${RED}[-] 端口 ${local_port} 已被占用，请换一个！${PLAIN}"
+        echo -e "提示: 如果这是你刚添加的端口，说明转发已在运行。\n"
+        sleep 2
         return
     fi
 
-    echo -e "\n[2/4] 请输入落地服务器的转发类型 (输入 4 代表 IPv4, 输入 6 代表 IPv6):"
+    echo -e "\n${YELLOW}[2/4] 请输入落地服务器的转发类型 (输入 4 代表 IPv4, 6 代表 IPv6):${PLAIN}"
     read -r ip_type
 
-    echo -e "\n[3/4] 请输入落地服务器的 IP 地址 (输入 V6 时可带括号也可不带):"
+    echo -e "\n${YELLOW}[3/4] 请输入落地服务器的 IP 地址 (输入 V6 时可带括号也可不带):${PLAIN}"
     read -r remote_ip
 
-    echo -e "\n[4/4] 请输入落地服务器的端口 (实际的服务端口):"
+    echo -e "\n${YELLOW}[4/4] 请输入落地服务器的端口 (实际的服务端口):${PLAIN}"
     read -r remote_port
 
     remote_ip=$(echo "$remote_ip" | tr -d '[]')
@@ -94,22 +107,20 @@ _execute_relay_setup() {
         TARGET_TCP="TCP6:[${remote_ip}]:${remote_port}"
         TARGET_UDP="UDP6:[${remote_ip}]:${remote_port}"
     else
-        echo -e "${RED}❌ 输入错误：转发类型只能输入 4 或 6。${PLAIN}"
-        echo -e "\n请按回车键返回主菜单..."
-        read -r
+        echo -e "${RED}[-] 输入错误：转发类型只能输入 4 或 6。${PLAIN}"
+        sleep 2
         return
     fi
 
     mkdir -p "$SCRIPT_DIR"
     SCRIPT_FILE="${SCRIPT_DIR}/relay_${local_port}.sh"
 
-    # 防粘贴折断重构
+    # 生成带并发优化限制的转发脚本
     cat << EOF > "$SCRIPT_FILE"
 #!/bin/bash
-nohup socat TCP-LISTEN:${local_port},reuseaddr,fork ${TARGET_TCP} \\
-    >/dev/null 2>&1 &
-nohup socat UDP-LISTEN:${local_port},reuseaddr,fork ${TARGET_UDP} \\
-    >/dev/null 2>&1 &
+ulimit -n 65535 2>/dev/null
+nohup socat TCP-LISTEN:${local_port},reuseaddr,fork ${TARGET_TCP} >/dev/null 2>&1 &
+nohup socat UDP-LISTEN:${local_port},reuseaddr,fork ${TARGET_UDP} >/dev/null 2>&1 &
 EOF
 
     chmod +x "$SCRIPT_FILE"
@@ -122,89 +133,77 @@ EOF
     fi
 
     echo "======================================================"
-    echo -e "${GREEN}✅ 转发配置完成并已在后台运行！${PLAIN}"
+    echo -e "${GREEN}[+] 转发配置完成并已在后台运行！${PLAIN}"
     echo "中转监听端口: ${local_port} (支持 TCP/UDP)"
-    echo "落地目标地址: ${remote_ip}"
-    echo "落地服务端口: ${remote_port}"
+    echo "落地目标地址: ${remote_ip}:${remote_port}"
     echo "自启状态: 已加入 crontab (@reboot)"
     echo "======================================================"
 }
 
 # ==========================================
-# 功能 2：追加新中转配置 (原配置保留)
+# 功能 2-4：中转管理规则
 # ==========================================
 add_relay_append() {
-    echo -e "\n${YELLOW}--- 模式：追加新中转配置 (现有转发保持不受影响) ---${PLAIN}"
+    echo -e "\n${CYAN}--- 模式：追加新中转配置 (现有转发保持不受影响) ---${PLAIN}"
     _execute_relay_setup
-    echo -e "\n请按回车键返回主菜单..."
+    echo -e "\n按回车键返回主菜单..."
     read -r
 }
 
-# ==========================================
-# 功能 3：重置并全新配置中转 (清空旧有全部中转)
-# ==========================================
 reset_and_setup_relay() {
-    echo -e "\n${RED}⚠️ 警告：此操作将终止当前机器上运行的所有中转规则并清除历史脚本！${PLAIN}"
+    echo -e "\n${RED}⚠️ 警告：此操作将终止当前由本脚本管理的所有中转进程并清除历史脚本！${PLAIN}"
     echo -n "是否确定继续？(y/n): "
     read -r confirm
-    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
         echo -e "${YELLOW}已取消重置操作。${PLAIN}"
         sleep 1
         return
     fi
 
-    echo -e "\n${YELLOW}[1/3] 正在强行停止所有正在后台运行的 socat 转发进程...${PLAIN}"
-    pkill -9 socat 2>/dev/null
-    killall socat 2>/dev/null
+    echo -e "\n${YELLOW}[1/3] 正在停止相关的 socat 转发进程...${PLAIN}"
+    # 安全清理：只杀脚本目录中注册过的端口，防误杀
+    for f in "$SCRIPT_DIR"/relay_*.sh; do
+        if [ -f "$f" ]; then
+            port=$(basename "$f" | sed 's/relay_//g' | sed 's/\.sh//g')
+            ps -ef | grep "socat" | grep "LISTEN:${port}," | grep -v "grep" | awk '{print $2}' | xargs kill -9 2>/dev/null
+        fi
+    done
     sleep 1
 
     echo -e "${YELLOW}[2/3] 正在清理旧的中转脚本文件...${PLAIN}"
-    if [ -d "$SCRIPT_DIR" ]; then
-        find "$SCRIPT_DIR" -type f -name "relay_*.sh" -delete 2>/dev/null
-    fi
+    rm -f "${SCRIPT_DIR}"/relay_*.sh
 
-    echo -e "${YELLOW}[3/3] 正在从 crontab 自启任务中剥离旧的中转项...${PLAIN}"
+    echo -e "${YELLOW}[3/3] 正在从 crontab 中剥离旧项...${PLAIN}"
     if command -v crontab >/dev/null 2>&1; then
         crontab -l 2>/dev/null | grep -v "relay_" | crontab - 2>/dev/null
     fi
 
-    echo -e "${GREEN}✅ 旧有中转规则已全部彻底洗净！下面开始引导全新配置。${PLAIN}"
+    echo -e "${GREEN}[+] 清理完毕！下面开始引导全新配置。${PLAIN}"
     echo "------------------------------------------------------"
-    
     _execute_relay_setup
-
-    echo -e "\n请按回车键返回主菜单..."
+    echo -e "\n按回车键返回主菜单..."
     read -r
 }
 
-# ==========================================
-# 核心新增 -> 功能 4：用 Nano 手动修改特定端口配置
-# ==========================================
 edit_relay_by_nano() {
-    echo -e "\n${YELLOW}--- 模式：手动修改现有中转配置 (基于 Nano 编辑器) ---${PLAIN}"
-    
-    # 自动保障 nano 存在
+    echo -e "\n${CYAN}--- 模式：手动修改现有配置 (Nano 编辑器) ---${PLAIN}"
     if ! command -v nano >/dev/null 2>&1; then
-        echo -e "${YELLOW}提示: 未检测到 nano 编辑器，正在为您自动安装...${PLAIN}"
-        if command -v apt-get >/dev/null 2>&1; then apt-get install -y nano >/dev/null 2>&1;
-        elif command -v yum >/dev/null 2>&1; then yum install -y nano >/dev/null 2>&1;
-        elif command -v apk >/dev/null 2>&1; then apk add nano >/dev/null 2>&1; fi
-    fi
-
-    # 扫描当前已存在哪些配置文件
-    local files=($(find "$SCRIPT_DIR" -type f -name "relay_*.sh" 2>/dev/null))
-    if [ ${#files[@]} -eq 0 ]; then
-        echo -e "${RED}❌ 系统当前没有任何中转配置记录，无法修改！${PLAIN}"
-        echo -e "\n请按回车键返回主菜单..."
-        read -r
+        echo -e "${YELLOW}提示: 未检测到 nano，请先在主菜单选择 1 安装依赖！${PLAIN}"
+        sleep 2
         return
     fi
 
-    echo -e "${GREEN}已检测到以下正在运行或已保存的中转规则端口：${PLAIN}"
+    local files=($(find "$SCRIPT_DIR" -type f -name "relay_*.sh" 2>/dev/null))
+    if [ ${#files[@]} -eq 0 ]; then
+        echo -e "${RED}[-] 系统当前没有任何中转配置记录，无法修改！${PLAIN}"
+        sleep 2
+        return
+    fi
+
+    echo -e "${GREEN}检测到以下正在运行或保存的规则：${PLAIN}"
     local ports=()
     local index=1
     for f in "${files[@]}"; do
-        # 提取文件名中的端口号
         local port=$(basename "$f" | sed 's/relay_//g' | sed 's/\.sh//g')
         ports+=("$port")
         echo -e "  [${index}] 监听端口：${YELLOW}${port}${PLAIN}"
@@ -214,81 +213,49 @@ edit_relay_by_nano() {
     echo -e "\n请输入需要编辑的规则序号 (例如 1):"
     read -r choice_idx
 
-    # 输入合法性简单校验
     if ! [[ "$choice_idx" =~ ^[0-9]+$ ]] || [ "$choice_idx" -lt 1 ] || [ "$choice_idx" -ge "$index" ]; then
-        echo -e "${RED}❌ 输入序号不合法，操作已取消。${PLAIN}"
-        echo -e "\n请按回车键返回主菜单..."
-        read -r
+        echo -e "${RED}[-] 序号输入不合法。${PLAIN}"
+        sleep 1.5
         return
     fi
 
     local selected_port="${ports[$((choice_idx-1))]}"
     local selected_file="${SCRIPT_DIR}/relay_${selected_port}.sh"
 
-    echo -e "\n${YELLOW}提示：即将呼出 Nano 文本界面。${PLAIN}"
-    echo -e "修改完成后，请按键盘组合键：${GREEN}Ctrl + O${PLAIN} 保存，再按回车确认，最后按 ${GREEN}Ctrl + X${PLAIN} 退出。"
-    echo -e "准备就绪，请按任意键打开编辑器..."
+    echo -e "\n${YELLOW}提示：修改完毕后按 Ctrl+O 保存，回车确认，Ctrl+X 退出。${PLAIN}"
+    echo "按任意键打开编辑器..."
     read -n 1 -s
 
-    # 唤醒 Nano 文本界面打开对应脚本
     nano "$selected_file"
 
-    echo -e "\n${YELLOW}正在为您执行配置热更新...${PLAIN}"
-    echo -e "正在清空该端口 (${selected_port}) 历史运行残留进程..."
-    
-    # 精准寻找并清理该端口对应的历史 socat 进程，不误杀其他端口转发
-    local pids=$(ps -ef | grep "socat" | grep "LISTEN:${selected_port}," | grep -v "grep" | awk '{print $2}')
-    if [ -n "$pids" ]; then
-        echo "$pids" | xargs kill -9 2>/dev/null
-    fi
+    echo -e "\n${CYAN}[*] 正在执行配置热更新...${PLAIN}"
+    ps -ef | grep "socat" | grep "LISTEN:${selected_port}," | grep -v "grep" | awk '{print $2}' | xargs kill -9 2>/dev/null
     sleep 0.5
-
-    echo -e "${GREEN}正在拉起您的自定义新规则后台服务...${PLAIN}"
     bash "$selected_file"
     
-    echo -e "${GREEN}✅ 该端口中转配置已手动修改完毕，且后台进程已完成热重启生效！${PLAIN}"
-    echo -e "\n请按回车键返回主菜单..."
+    echo -e "${GREEN}[+] 端口 ${selected_port} 已热重启生效！${PLAIN}"
+    echo -e "\n按回车键返回主菜单..."
     read -r
 }
 
 # ==========================================
-# 功能 5：Cloudflare DDNS 动态 IP 绑定
+# 功能 5-6：Cloudflare DDNS 同步
 # ==========================================
 setup_ddns() {
-    echo -e "\n${YELLOW}--- 开始配置 Cloudflare DDNS 动态 IP ---${PLAIN}"
-    
+    echo -e "\n${CYAN}--- 配置 Cloudflare DDNS 动态 IP ---${PLAIN}"
     if ! command -v curl >/dev/null 2>&1; then
-        echo -e "${RED}警告：未检测到 curl，请先在主菜单选择 1 安装依赖！${PLAIN}"
-        echo -e "\n请按回车键返回主菜单..."
-        read -r
+        echo -e "${RED}[-] 未检测到 curl，请先安装依赖！${PLAIN}"
+        sleep 2
         return
     fi
 
-    echo "[1/4] 请输入已经在 CF 解析的完整域名 (例如: relay.xmm.com):"
-    read -r ddns_domain
+    read -p "[1/4] 请输入在 CF 解析的完整域名 (例: relay.xmm.com): " ddns_domain
+    read -p "[2/4] 解析类型 (4=A记录/IPv4, 6=AAAA记录/IPv6): " ddns_type
+    read -p "[3/4] 请输入 Cloudflare API Token: " cf_token
+    read -p "[4/4] 请输入 Cloudflare Zone ID: " cf_zone_id
 
-    echo -e "\n[2/4] 请选择域名解析记录类型 (输入 4 代表 A记录/IPv4, 输入 6 代表 AAAA记录/IPv6):"
-    read -r ddns_type
-
-    echo -e "\n[3/4] 请输入 Cloudflare API Token (需要具有 DNS:Edit 权限):"
-    read -r cf_token
-
-    echo -e "\n[4/4] 请输入 Cloudflare 区域 ID (Zone ID):"
-    read -r cf_zone_id
-
-    if [ "$ddns_type" == "4" ]; then
-        RECORD_TYPE="A"
-    elif [ "$ddns_type" == "6" ]; then
-        RECORD_TYPE="AAAA"
-    else
-        echo -e "${RED}❌ 输入错误：类型只能输入 4 或 6。${PLAIN}"
-        echo -e "\n请按回车键返回主菜单..."
-        read -r
-        return
-    fi
-
+    RECORD_TYPE=$([ "$ddns_type" == "4" ] && echo "A" || echo "AAAA")
     DDNS_SCRIPT="${SCRIPT_DIR}/cf_ddns.sh"
-    mkdir -p "$SCRIPT_DIR"
 
     cat << 'EOF' > "$DDNS_SCRIPT"
 #!/bin/bash
@@ -297,191 +264,133 @@ IP_TYPE="MY_IP_TYPE"
 CF_TOKEN="MY_CF_TOKEN"
 ZONE_ID="MY_ZONE_ID"
 RECORD_TYPE="MY_RECORD_TYPE"
-LOG_FILE="/var/log/xmm_ddns.log"
+LOG_FILE="MY_LOG_FILE"
 
 write_log() {
-    echo "\$(date '+%Y-%m-%d %H:%M:%S') - \$1" >> "\$LOG_FILE"
-    tail -n 30 "\$LOG_FILE" > "\${LOG_FILE}.tmp" && mv "\${LOG_FILE}.tmp" "\$LOG_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    tail -n 30 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
 }
 
-if [ "\$IP_TYPE" == "4" ]; then
-    CURRENT_IP=\$(curl -s4 https://api.ipify.org || curl -s4 https://ifconfig.me || curl -s4 https://ip.sb)
-else
-    CURRENT_IP=\$(curl -s6 https://api64.ipify.org || curl -s6 https://ifconfig.me || curl -s6 https://ip.sb)
-fi
+CURRENT_IP=$([ "$IP_TYPE" == "4" ] && curl -s4 https://api.ipify.org || curl -s6 https://api64.ipify.org)
 
-if [ -z "\$CURRENT_IP" ]; then
-    write_log "❌ 错误: 网络断开或无法获取本地公网 IP"
+if [ -z "$CURRENT_IP" ]; then
+    write_log "❌ 错误: 网络断开或无法获取公网 IP"
     exit 1
 fi
 
-RECORD_INFO=\$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/\${ZONE_ID}/dns_records?type=\${RECORD_TYPE}&name=\${DOMAIN}" \\
-    -H "Authorization: Bearer \${CF_TOKEN}" \\
-    -H "Content-Type: application/json")
+RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=${RECORD_TYPE}&name=${DOMAIN}" \
+    -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json")
 
-if echo "\$RECORD_INFO" | grep -q '"success":false'; then
+if echo "$RECORD_INFO" | grep -q '"success":false'; then
     write_log "❌ 错误: API 请求被拒，请检查 Token 权限和 Zone ID"
-    echo "\$RECORD_INFO" 
     exit 1
 fi
 
-RECORD_ID=\$(echo "\$RECORD_INFO" | tr ',' '\n' | grep -E '"id" *:' | cut -d'"' -f4 | head -n1)
-OLD_IP=\$(echo "\$RECORD_INFO" | tr ',' '\n' | grep -E '"content" *:' | cut -d'"' -f4 | head -n1)
+RECORD_ID=$(echo "$RECORD_INFO" | grep -oP '(?<="id":")[^"]*' | head -n1)
+OLD_IP=$(echo "$RECORD_INFO" | grep -oP '(?<="content":")[^"]*' | head -n1)
 
-if [ -z "\$RECORD_ID" ]; then
-    RESULT=\$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/\${ZONE_ID}/dns_records" \\
-        -H "Authorization: Bearer \${CF_TOKEN}" \\
-        -H "Content-Type: application/json" \\
-        --data "{\"type\":\"\${RECORD_TYPE}\",\"name\":\"\${DOMAIN}\",\"content\":\"\${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
-    
-    if echo "\$RESULT" | grep -q '"success":true'; then
-        write_log "✅ 成功: 新建域名解析指向 -> \$CURRENT_IP"
-        echo "创建成功"
-    else
-        write_log "❌ 错误: 域名解析新建失败"
-    fi
+if [ -z "$RECORD_ID" ]; then
+    RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+        -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" \
+        --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
+    echo "$RESULT" | grep -q '"success":true' && write_log "✅ 新建域名解析 -> $CURRENT_IP" || write_log "❌ 域名新建失败"
 else
-    if [ "\$CURRENT_IP" != "\$OLD_IP" ]; then
-        RESULT=\$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/\${ZONE_ID}/dns_records/\${RECORD_ID}" \\
-            -H "Authorization: Bearer \${CF_TOKEN}" \\
-            -H "Content-Type: application/json" \\
-            --data "{\"type\":\"\${RECORD_TYPE}\",\"name\":\"\${DOMAIN}\",\"content\":\"\${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
-        
-        if echo "\$RESULT" | grep -q '"success":true'; then
-            write_log "✅ 成功: 动态 IP 已更新 -> \$CURRENT_IP"
-            echo "更新成功"
-        else
-            write_log "❌ 错误: 动态 IP 更新请求失败"
-        fi
+    if [ "$CURRENT_IP" != "$OLD_IP" ]; then
+        RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${RECORD_ID}" \
+            -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" \
+            --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
+        echo "$RESULT" | grep -q '"success":true' && write_log "✅ 动态 IP 已更新 -> $CURRENT_IP" || write_log "❌ 动态 IP 更新失败"
     else
-        write_log "ℹ️ 正常: IP 未改变 (\$CURRENT_IP)，无需同步"
-        echo "无需同步"
+        write_log "ℹ️ IP 未改变 ($CURRENT_IP)，无需同步"
     fi
 fi
 EOF
 
-    sed -i "s|MY_DOMAIN|${ddns_domain}|g" "$DDNS_SCRIPT"
-    sed -i "s|MY_IP_TYPE|${ddns_type}|g" "$DDNS_SCRIPT"
-    sed -i "s|MY_CF_TOKEN|${cf_token}|g" "$DDNS_SCRIPT"
-    sed -i "s|MY_ZONE_ID|${cf_zone_id}|g" "$DDNS_SCRIPT"
-    sed -i "s|MY_RECORD_TYPE|${RECORD_TYPE}|g" "$DDNS_SCRIPT"
-
+    # 替换变量
+    sed -i "s|MY_DOMAIN|${ddns_domain}|g; s|MY_IP_TYPE|${ddns_type}|g; s|MY_CF_TOKEN|${cf_token}|g; s|MY_ZONE_ID|${cf_zone_id}|g; s|MY_RECORD_TYPE|${RECORD_TYPE}|g; s|MY_LOG_FILE|${DDNS_LOG}|g" "$DDNS_SCRIPT"
     chmod +x "$DDNS_SCRIPT"
     
-    echo -e "\n${YELLOW}正在尝试进行首次同步测试...${PLAIN}"
-    TEST_RUN=$(bash "$DDNS_SCRIPT" 2>&1)
+    echo -e "\n${YELLOW}[*] 尝试首次同步测试...${PLAIN}"
+    bash "$DDNS_SCRIPT"
     
-    if echo "$TEST_RUN" | grep -q "成功" || echo "$TEST_RUN" | grep -q "无需同步"; then
-        echo "======================================================"
-        echo -e "${GREEN}✅ Cloudflare DDNS 配置成功并写入定时任务！${PLAIN}"
-        echo "绑定域名: ${ddns_domain}"
-        echo "详细状态可返回主菜单输入 6 查看日志。"
-        echo "======================================================"
-        
+    if tail -n 1 "$DDNS_LOG" | grep -qE "✅|ℹ️"; then
+        echo -e "${GREEN}[+] Cloudflare DDNS 配置成功！${PLAIN}"
         if command -v crontab >/dev/null 2>&1; then
-            if ! crontab -l 2>/dev/null | grep -q "$DDNS_SCRIPT"; then
-                (crontab -l 2>/dev/null; echo "*/5 * * * * bash $DDNS_SCRIPT > /dev/null 2>&1") | crontab -
-            fi
+            (crontab -l 2>/dev/null | grep -v "$DDNS_SCRIPT"; echo "*/5 * * * * bash $DDNS_SCRIPT >/dev/null 2>&1") | crontab -
         fi
     else
-        echo "======================================================"
-        echo -e "${RED}❌ 首次同步测试失败！${PLAIN}"
-        echo -e "${RED}为防止无意义报错堆积，DDNS 定时任务已取消，请重新配置。${PLAIN}"
-        echo "======================================================"
+        echo -e "${RED}[-] 测试失败！请返回主菜单选 6 查看日志。DDNS 任务未开启。${PLAIN}"
         rm -f "$DDNS_SCRIPT"
     fi
-    
-    echo -e "\n请按回车键返回主菜单..."
+    echo -e "\n按回车键返回..."
     read -r
 }
 
-# ==========================================
-# 功能 6：查看运行日志
-# ==========================================
 view_logs() {
-    echo -e "\n${YELLOW}=== DDNS 运行日志 (自动限制最新 30 条) ===${PLAIN}"
-    LOG_FILE="/var/log/xmm_ddns.log"
-    
-    if [ -f "$LOG_FILE" ]; then
-        cat "$LOG_FILE"
-    else
-        echo -e "${RED}暂无日志记录。${PLAIN}"
-    fi
-    echo -e "${YELLOW}==========================================${PLAIN}"
-    echo -e "\n请按回车键返回主菜单..."
+    echo -e "\n${CYAN}=== DDNS 运行日志 ===${PLAIN}"
+    [ -f "$DDNS_LOG" ] && cat "$DDNS_LOG" || echo -e "${RED}暂无日志记录。${PLAIN}"
+    echo -e "${CYAN}=====================${PLAIN}"
+    echo -e "\n按回车键返回..."
     read -r
 }
 
 # ==========================================
-# 功能 7：一键在线升级脚本
+# 功能 7：一键在线升级
 # ==========================================
 update_script() {
-    echo -e "\n${YELLOW}--- 开始检查并在线升级脚本 ---${PLAIN}"
-    
+    echo -e "\n${CYAN}[*] 开始检查并在线升级脚本...${PLAIN}"
     if ! command -v curl >/dev/null 2>&1; then
-        echo -e "${RED}错误：未检测到 curl，请先在菜单选 1 安装依赖！${PLAIN}"
-        sleep 2
-        return
+        echo -e "${RED}[-] 错误：未检测到 curl！${PLAIN}"
+        sleep 2; return
     fi
 
-    local download_url="$GITHUB_RAW_URL"
-    if [[ "$download_url" == *"你的用户名"* ]]; then
-        echo -e "${YELLOW}提示: 检测到脚本内置的 GitHub 链接未配置，请输入你的最新 xmmzz.sh 的 Raw 直连链接:${PLAIN}"
+    local target_url="${GITHUB_REPO_URL}/${SCRIPT_NAME}"
+    
+    # 交互式确认 URL
+    if [[ "$GITHUB_REPO_URL" == *"你的用户名"* ]]; then
+        echo -e "${YELLOW}当前配置的仓库地址未填写，请输入您的 ${SCRIPT_NAME} 文件的 RAW 直连网址：${PLAIN}"
         read -r input_url
-        if [ -n "$input_url" ]; then
-            download_url="$input_url"
-        else
-            echo -e "${RED}❌ 链接不能为空，升级取消。${PLAIN}"
-            sleep 1.5
-            return
-        fi
+        [ -n "$input_url" ] && target_url="$input_url" || { echo -e "${RED}[-] 取消升级。${PLAIN}"; sleep 1; return; }
     fi
 
-    echo -e "${YELLOW}正在连接 GitHub 远程同步最新代码...${PLAIN}"
-    local tmp_file="${SCRIPT_DIR}/xmmzz.sh.tmp"
+    local tmp_file="/tmp/${SCRIPT_NAME}.tmp"
+    curl -sSfL "$target_url" -o "$tmp_file"
     
-    curl -sSfL "$download_url" -o "$tmp_file"
-    
-    if [ $? -eq 0 ] && [ -s "$tmp_file" ]; then
-        if head -n 1 "$tmp_file" | grep -q "#!/bin/bash"; then
-            mv "$tmp_file" "${SCRIPT_DIR}/xmmzz.sh"
-            chmod +x ${SCRIPT_DIR}/xmmzz.sh
-            echo -e "${GREEN}🎉 脚本升级成功！正在重新载入面板...${PLAIN}"
-            sleep 1.5
-            exec bash ${SCRIPT_DIR}/xmmzz.sh
-        else
-            echo -e "${RED}❌ 错误：下载的文件内容不合法，可能遭遇 GFW 拦截或链接错误，已撤销升级。${PLAIN}"
-            rm -f "$tmp_file"
-        fi
+    if [ $? -eq 0 ] && grep -q "#!/bin/bash" "$tmp_file"; then
+        mv "$tmp_file" "${SCRIPT_DIR}/${SCRIPT_NAME}"
+        chmod +x "${SCRIPT_DIR}/${SCRIPT_NAME}"
+        echo -e "${GREEN}[+] 升级成功！正在重新载入面板...${PLAIN}"
+        sleep 1.5
+        exec bash "${SCRIPT_DIR}/${SCRIPT_NAME}"
     else
-        echo -e "${RED}❌ 错误：网络连接失败，无法下载最新脚本，请检查中转机能否连接 GitHub。${PLAIN}"
+        echo -e "${RED}[-] 下载失败或文件效验错误，已撤销。${PLAIN}"
         rm -f "$tmp_file"
     fi
-    
-    echo -e "\n请按回车键返回主菜单..."
+    echo -e "\n按回车键返回..."
     read -r
 }
 
 # ==========================================
-# 主菜单循环 (完美扩展至 7 个选项)
+# 主流程启动
 # ==========================================
+init_env
+
 while true; do
     clear
     echo "======================================================"
-    echo -e "        ${GREEN}极简中转转发管理面板 (TCP+UDP)${PLAIN}"
-    echo -e "        ${YELLOW}兼容 Debian / Ubuntu / Alpine / CentOS${PLAIN}"
+    echo -e "      ${GREEN}极简网络中转管理面板${PLAIN} ${CYAN}(socat版) v1.1.0${PLAIN}"
+    echo -e "      ${YELLOW}跨平台支持: Debian/Ubuntu/Alpine/CentOS${PLAIN}"
     echo "======================================================"
-    echo "  1. 安装必要依赖 (首次使用请先安装)"
-    echo "  2. 追加新中转配置 (保留原有规则)"
-    echo "  3. 重置并全新配置 (清除全部旧规则)"
-    echo -e "  4. ${GREEN}手动修改现有中转配置 (通过 Nano 文本直改)${PLAIN}"
-    echo "  5. 配置 Cloudflare DDNS 动态 IP 同步"
-    echo "  6. 查看 DDNS 运行状态与排错日志"
-    echo "  7. 一键升级本控制台脚本"
-    echo "  0. 退出脚本"
+    echo -e "  ${GREEN}1.${PLAIN} 安装必要依赖 (首次使用必须安装)"
+    echo -e "  ${GREEN}2.${PLAIN} 追加新中转配置 (保留原有规则)"
+    echo -e "  ${GREEN}3.${PLAIN} 重置并全新配置 (清除本脚本的所有旧规则)"
+    echo -e "  ${GREEN}4.${PLAIN} 手动修改现有中转配置 (Nano 热更新)"
+    echo -e "  ${GREEN}5.${PLAIN} 配置 Cloudflare DDNS 动态 IP 同步"
+    echo -e "  ${GREEN}6.${PLAIN} 查看 DDNS 运行状态与日志"
+    echo -e "  ${GREEN}7.${PLAIN} 从 GitHub 一键更新面板代码"
+    echo -e "  ${GREEN}0.${PLAIN} 退出"
     echo "======================================================"
-    echo -n "请输入选项 [0-7]: "
-    read -r choice
+    read -p "请输入选项 [0-7]: " choice
 
     case "$choice" in
         1) install_deps ;;
@@ -491,7 +400,7 @@ while true; do
         5) setup_ddns ;;
         6) view_logs ;;
         7) update_script ;;
-        0) echo -e "${GREEN}感谢使用，已退出！${PLAIN}"; exit 0 ;;
-        *) echo -e "${RED}输入错误，请输入 0 到 7 之间的数字${PLAIN}"; sleep 1.5 ;;
+        0) echo -e "${GREEN}[+] 感谢使用，已退出！${PLAIN}"; exit 0 ;;
+        *) echo -e "${RED}[-] 输入错误，请输入 0-7 之间的数字。${PLAIN}"; sleep 1.5 ;;
     esac
 done
