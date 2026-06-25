@@ -1,0 +1,158 @@
+#!/bin/bash
+
+# =========================================================================
+#  Project:   Linux Node Mega LogRotate & Deep Cleaner (Enterprise Edition)
+#  Function:  通用全发行版：顽固大日志秒级安全切割、每小时强控挂载、永不撑爆磁盘
+#  Platform:  CentOS / RHEL / Debian / Ubuntu / Alpine / Rocky / Alma
+#  Target:    适配 V2bX / v2bx 后端及全系统通用网络节点
+# =========================================================================
+
+# 字体颜色定义
+red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
+
+# 检查 root 权限
+[[ $EUID -ne 0 ]] && echo -e "${red}Error:${plain} 必须使用 root 用户或 sudo 运行此脚本！\n" && exit 1
+
+echo -e "${yellow}====================================================${plain}"
+echo -e "${cyan}   开始运行 [系统级大日志彻底闪击清理 & 终极强控守护]   ${plain}"
+echo -e "${yellow}====================================================${plain}"
+
+# -------------------------------------------------------------------------
+# 1. 基础依赖检查与补齐 (Logrotate & Cron 必须存在)
+# -------------------------------------------------------------------------
+echo -e "${yellow}[1/6] 正在检查和安装日志轮转与定时任务组件...${plain}"
+if ! command -v logrotate &>/dev/null; then
+    if command -v apt-get &>/dev/null; then
+        apt-get update -y -q >/dev/null 2>&1
+        apt-get install -y logrotate cron >/dev/null 2>&1
+    elif command -v yum &>/dev/null; then
+        yum install -y logrotate crontabs >/dev/null 2>&1
+    elif command -v apk &>/dev/null; then
+        apk add --no-cache logrotate logrotate-doc cronie >/dev/null 2>&1
+    fi
+fi
+echo -e "${green}[+] 核心组件准备就绪${plain}"
+
+# -------------------------------------------------------------------------
+# 2. 闪击清理包管理器历史缓存
+# -------------------------------------------------------------------------
+echo -e "${yellow}[2/6] 正在强制压榨释放包管理器积压缓存...${plain}"
+if command -v apt-get >/dev/null 2>&1; then
+    apt-get autoclean -y >/dev/null 2>&1 && apt-get clean -y >/dev/null 2>&1
+elif command -v yum >/dev/null 2>&1; then
+    yum clean all >/dev/null 2>&1
+elif command -v apk >/dev/null 2>&1; then
+    apk cache clean >/dev/null 2>&1
+fi
+echo -e "${green}[+] 缓存清理完成${plain}"
+
+# -------------------------------------------------------------------------
+# 3. Systemd 内建 Journal 日志硬性拦截 (50M 熔断)
+# -------------------------------------------------------------------------
+if command -v journalctl >/dev/null 2>&1; then
+    echo -e "${yellow}[3/6] 检测到 Systemd，正在对 journald 内建系统日志施加 50M 熔断锁...${plain}"
+    if [ -f "/etc/systemd/journald.conf" ]; then
+        # 彻底清理并重写配置，防止多余配置冗余
+        sed -i '/^SystemMaxUse=/d' /etc/systemd/journald.conf
+        sed -i '/^#SystemMaxUse=/d' /etc/systemd/journald.conf
+        echo "SystemMaxUse=50M" >> /etc/systemd/journald.conf
+        
+        # 重启 journald 守护进程使其生效
+        systemctl restart systemd-journald >/dev/null 2>&1
+    fi
+    # 强制将当前已经存在的历史超大 journal 日志立刻裁剪到 30M 以内
+    journalctl --vacuum-size=30M >/dev/null 2>&1
+    echo -e "${green}[+] Systemd 核心日志空间已成功锁死在安全范围${plain}"
+else
+    echo -e "${cyan}[3/6] 非 Systemd 环境，自动略过 journal 调优${plain}"
+fi
+
+# -------------------------------------------------------------------------
+# 4. 写入独家高密 logrotate 规则 (10M 单文件硬锁 + copytruncate 全透明不中断)
+# -------------------------------------------------------------------------
+echo -e "${yellow}[4/6] 正在向系统常驻 logrotate.d 注入高精度切割拦截配置...${plain}"
+mkdir -p /etc/logrotate.d 2>/dev/null
+
+# 终极黑科技：copytruncate 能在不重启 V2bX/Xray 等业务的情况下，秒级清空原日志，绝不丢流量
+cat << 'EOF' > /etc/logrotate.d/v2bx_anti_explode
+/var/log/syslog
+/var/log/daemon.log
+/var/log/v2bx_err.log
+/var/log/v2bx_out.log
+/var/log/v2bx.log
+/var/log/V2bX_err.log
+/var/log/V2bX_out.log
+/var/log/V2bX.log
+/var/log/messages
+/var/log/secure
+/var/log/auth.log
+{
+    size 10M
+    rotate 1
+    missingok
+    notifempty
+    copytruncate
+    compress
+    nodelaycompress
+}
+EOF
+echo -e "${green}[+] 常驻拦截配置（支持大小写服务名）已牢固写入${plain}"
+
+# -------------------------------------------------------------------------
+# 5. 构建【每小时高频强控】钩子 (杜绝传统 1 天才检查一次的弊端)
+# -------------------------------------------------------------------------
+echo -e "${yellow}[5/6] 正在激活每小时高频巡检强控钩子...${plain}"
+
+# 标准 Linux 定时任务支持 (Ubuntu/Debian/CentOS)
+if [ -d "/etc/cron.hourly" ]; then
+    cat << 'EOF' > /etc/cron.hourly/v2bx_logrotate_hourly
+#!/bin/sh
+/usr/sbin/logrotate /etc/logrotate.d/v2bx_anti_explode >/dev/null 2>&1
+EOF
+    chmod +x /etc/cron.hourly/v2bx_logrotate_hourly
+fi
+
+# 针对 Alpine 极其特殊的 crontabs 进行保底双修挂载
+if [ -f /etc/alpine-release ] || command -v apk &>/dev/null; then
+    if command -v rc-service &>/dev/null && command -v crond &>/dev/null; then
+        rc-service crond start >/dev/null 2>&1
+        rc-update add crond default >/dev/null 2>&1
+    fi
+    if [ -f "/etc/crontabs/root" ]; then
+        sed -i '/v2bx_anti_explode/d' /etc/crontabs/root 2>/dev/null
+        echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/v2bx_anti_explode >/dev/null 2>&1" >> /etc/crontabs/root
+    fi
+fi
+echo -e "${green}[+] 守护引擎挂载完毕，系统进入小时级高密高防爆状态${plain}"
+
+# -------------------------------------------------------------------------
+# 6. 首次雷霆突发执行 (将当前已经撑爆的文件立刻掐断释放)
+# -------------------------------------------------------------------------
+echo -e "${yellow}[6/6] 正在启动首次闪击，强制瘦身历史积压空间...${plain}"
+# 强制让 logrotate 立刻执行一次
+/usr/sbin/logrotate -f /etc/logrotate.d/v2bx_anti_explode >/dev/null 2>&1
+
+# 针对一些顽固未命中的大日志文件，遍历并执行真·原地清空 (true > filename)
+find /var/log -type f \( -name "*.log" -o -name "*err" -o -name "*messages" \) 2>/dev/null | while read -r log_file; do
+    if [ -f "$log_file" ]; then
+        local f_size
+        f_size=$(wc -c < "$log_file" 2>/dev/null || echo 0)
+        # 如果文件大小超过 15MB 且由于某种原因漏网，直接秒清
+        if [ "$f_size" -gt 15728640 ]; then
+            true > "$log_file" 2>/dev/null
+        fi
+    fi
+done
+
+# 清理各种可能残留的系统级临时缓存
+rm -rf /tmp/* /var/tmp/* 2>/dev/null
+
+echo -e "\n${green}====================================================${plain}"
+echo -e "${green}   ✅ 终极防爆日志控制模块彻底完成部署！${plain}"
+echo -e "${yellow}   配置效果：单日志文件硬性锁死 10M，超时自动压缩丢弃。${plain}"
+echo -e "${yellow}   高频防护：全天 24 小时每整点强制复查轮转，永不爆盘！${plain}"
+echo -e "${green}====================================================${plain}\n"
+
+# 打印当前磁盘空间看板供用户确认
+echo -e "${cyan}当前主磁盘空间空闲看板：${plain}"
+df -h /
