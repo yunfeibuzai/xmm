@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="4.3.4-LogRotatePro"
+sh_ver="4.3.5-LogRotatePro"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
@@ -394,94 +394,23 @@ open_ports() {
 
 run_clean_script() { echo -e "${yellow}警告：此操作可能导致 I/O 拥堵。${plain}"; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}缓存强制下发完毕${plain}" ; }
 
-# 🌟 终极重构版选项 18：全系统通用、每小时高频强控、拒绝死锁防爆版
+# 🌟 优化后的选项 18：调用 GitHub 云端通用日志净化高防爆强控引擎
 run_deep_log_clean() {
-    echo -e "${yellow}=== 开始系统级日志深度清理与 Logrotate 2.0 终极强控 ===${plain}"
+    echo -e "${cyan}正在拉取并呼叫 GitHub 独立日志防爆强控引擎...${plain}"
+    local remote_clean_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bXclean"
+    local proxy_clean_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bXclean"
     
-    # 1. 强制清理包管理器缓存
-    echo -e "${cyan}[+] 正在清理系统包管理器缓存...${plain}"
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get autoclean -y >/dev/null 2>&1 && apt-get clean -y >/dev/null 2>&1
-    elif command -v yum >/dev/null 2>&1; then
-        yum clean all >/dev/null 2>&1
-    elif command -v apk >/dev/null 2>&1; then
-        apk cache clean >/dev/null 2>&1
-    fi
-
-    # 2. 针对 Systemd 系统：限制 systemd-journald 自身日志为 50M 上限
-    if command -v journalctl >/dev/null 2>&1; then
-        echo -e "${cyan}[+] 正在配置 /etc/systemd/journald.conf 限制内建日志上限为 50M...${plain}"
-        if [ -f "/etc/systemd/journald.conf" ]; then
-            sed -i 's/#SystemMaxUse=/SystemMaxUse=50M/g' /etc/systemd/journald.conf
-            sed -i 's/SystemMaxUse=.*/SystemMaxUse=50M/g' /etc/systemd/journald.conf
-            systemctl restart systemd-journald >/dev/null 2>&1
-        fi
-        echo -e "${cyan}[+] 正在裁剪当前内建历史日志...${plain}"
-        journalctl --vacuum-size=30M >/dev/null 2>&1
-    fi
-
-    # 3. 🛡️ 注入核心熔断黑科技：配置全局 logrotate 规则
-    if [ -d "/etc/logrotate.d" ]; then
-        echo -e "${cyan}[+] 正在写入 logrotate 核心熔断规则 (锁定 10M + 强制原地清空)...${plain}"
-        cat << 'EOF' > /etc/logrotate.d/v2bx_anti_explode
-/var/log/syslog
-/var/log/daemon.log
-/var/log/v2bx_err.log
-/var/log/v2bx_out.log
-/var/log/messages
-{
-    size 10M
-    rotate 1
-    missingok
-    notifempty
-    copytruncate
-    compress
-    nodelaycompress
-}
-EOF
-    fi
-
-    # 4. 🕦 挂载【每小时高频强控】钩子
-    echo -e "${cyan}[+] 正在构建全局每小时日志高频强控引擎...${plain}"
+    wget -O /tmp/V2bXclean "$proxy_clean_url" --timeout=12 2>/dev/null || \
+    wget -O /tmp/V2bXclean "$remote_clean_url" --timeout=12 2>/dev/null || \
+    curl -sL "$remote_clean_url" -o /tmp/V2bXclean
     
-    if [ -d "/etc/cron.hourly" ]; then
-        cat << 'EOF' > /etc/cron.hourly/v2bx_logrotate_hourly
-#!/bin/sh
-/usr/sbin/logrotate /etc/logrotate.d/v2bx_anti_explode >/dev/null 2>&1
-EOF
-        chmod +x /etc/cron.hourly/v2bx_logrotate_hourly
+    if [[ -f /tmp/V2bXclean && -s /tmp/V2bXclean ]]; then
+        chmod +x /tmp/V2bXclean
+        bash /tmp/V2bXclean
+        rm -f /tmp/V2bXclean
+    else
+        echo -e "${red}错误：无法连接到云端仓库，拉取日志模块失败！${plain}"
     fi
-
-    if command -v apk &>/dev/null; then
-        if command -v rc-service &>/dev/null && command -v crond &>/dev/null; then
-            rc-service crond start >/dev/null 2>&1
-            rc-update add crond default >/dev/null 2>&1
-        fi
-        if [ -f "/etc/crontabs/root" ]; then
-            sed -i '/v2bx_anti_explode/d' /etc/crontabs/root 2>/dev/null
-            echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/v2bx_anti_explode >/dev/null 2>&1" >> /etc/crontabs/root
-        fi
-    fi
-
-    # 5. 🚀 强制首次突发执行
-    echo -e "${cyan}[+] 正在强制触发首次轮转，释放积压死锁空间...${plain}"
-    /usr/sbin/logrotate -f /etc/logrotate.d/v2bx_anti_explode >/dev/null 2>&1
-    
-    find /var/log -type f \( -name "*.log" -o -name "*err" -o -name "*messages" \) 2>/dev/null | while read -r log_file; do
-        if [ -f "$log_file" ]; then
-            local f_size
-            f_size=$(wc -c < "$log_file" 2>/dev/null || echo 0)
-            if [ "$f_size" -gt 15728640 ]; then
-                true > "$log_file" 2>/dev/null
-            fi
-        fi
-    done
-
-    # 6. 清理临时缓存
-    rm -rf /tmp/* /var/tmp/* 2>/dev/null
-
-    echo -e "${green}=== ✅ 终极防爆优化配置彻底完成！单文件硬锁 10M，每小时高频强控，永不撑爆！===${plain}"
-    df -h /
 }
 
 process_run() {
@@ -492,7 +421,10 @@ process_run() {
     3) 
         manage_service stop
         manage_service disable
-        rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service /etc/init.d/V2bX /var/log/v2bx_err.log /etc/logrotate.d/v2bx_anti_explode
+        # 物理深度卸载：连同老配置与新云端文件的定时钩子一同摧毁
+        rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service /etc/init.d/V2bX \
+               /var/log/v2bx*.log /var/log/V2bX*.log /var/log/v2bx*.err /var/log/V2bX*.err \
+               /etc/logrotate.d/v2bx_anti_explode /etc/logrotate.d/v2bx_all /etc/cron.hourly/v2bx_cleaner
         if command -v systemctl &>/dev/null; then systemctl daemon-reload; fi
         echo "卸载完成" 
         ;;
