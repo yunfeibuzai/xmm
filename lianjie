@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # =========================================================================
-#  Project:   Linux Linux Mega-Concurrency TCP Optimizer
-#  Function:  一键解锁百万级并发文件描述符，极限调优内核网络缓冲区与队列
-#  Platform:  CentOS / Debian / Ubuntu / Alpine (Systemd & OpenRC)
-#  Author:    Maimai / GitHub Community
+#  Project:   Linux Mega-Concurrency TCP Optimizer (Enterprise Edition)
+#  Function:  全自动自适应解锁百万级并发，深度调优内核网络、缓冲区与 BBR 加速
+#  Platform:  CentOS / RHEL / Debian / Ubuntu / Alpine / Rocky / Alma
+#  Arch:      Systemd & OpenRC / 兼容 KVM、XEN、LXC、OpenVZ 虚拟化
 # =========================================================================
 
 # 字体颜色定义
@@ -14,13 +14,30 @@ red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\03
 [[ $EUID -ne 0 ]] && echo -e "${red}Error:${plain} 必须使用 root 用户或 sudo 运行此脚本！\n" && exit 1
 
 echo -e "${yellow}====================================================${plain}"
-echo -e "${cyan}      开始注入 [百万级上限] 极端高并发网络内核优化       ${plain}"
+echo -e "${cyan}    开始注入 [百万级上限 + BBR加速] 极端高并发内核优化    ${plain}"
 echo -e "${yellow}====================================================${plain}"
+
+# -------------------------------------------------------------------------
+# 0. 环境与虚拟化架构识别 (防止容器环境刷屏报错)
+# -------------------------------------------------------------------------
+IS_CONTAINER=false
+if [ -f /proc/1/environ ] && grep -qa container= /proc/1/environ; then
+    IS_CONTAINER=true
+elif command -v systemd-detect-virt &>/dev/null && systemd-detect-virt -c &>/dev/null; then
+    IS_CONTAINER=true
+fi
+
+if [ "$IS_CONTAINER" = true ]; then
+    echo -e "${yellow}[i] 检测到当前环境为容器 (LXC/Docker/OpenVZ)，将自动跳过受限内核参数${plain}"
+fi
+
+# 预先尝试加载连接跟踪模块（防止 sysctl 找不到参数报错）
+modprobe nf_conntrack 2>/dev/null
 
 # -------------------------------------------------------------------------
 # 1. 放行全局端口 (网络净化)
 # -------------------------------------------------------------------------
-echo -e "${yellow}[1/5] 正在配置防火墙，放行所有网络端口...${plain}"
+echo -e "${yellow}[1/6] 正在配置防火墙，放行所有网络端口...${plain}"
 if command -v iptables &>/dev/null; then
     iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F 2>/dev/null
     echo -e "${green}[+] Iptables 规则已清空并设置为全局放行${plain}"
@@ -31,7 +48,7 @@ fi
 # -------------------------------------------------------------------------
 # 2. 解锁系统最大文件打开数 (ulimit) 到 1,048,576
 # -------------------------------------------------------------------------
-echo -e "${yellow}[2/5] 正在提升系统最大文件打开数 (ulimit) 至百万级...${plain}"
+echo -e "${yellow}[2/6] 正在提升系统最大文件打开数 (ulimit) 至百万级...${plain}"
 ulimit -n 1048576 2>/dev/null
 
 if [ -d "/etc/security" ]; then
@@ -47,20 +64,25 @@ LIMITS
 fi
 
 # -------------------------------------------------------------------------
-# 3. 解锁 Systemd 全局默认进程限制 (适用于主流现代 Linux 发行版)
+# 3. 规范化解锁 Systemd 全局默认进程限制 (使用 drop-in 目录，防止更新被覆盖)
 # -------------------------------------------------------------------------
 if [ -d "/etc/systemd" ]; then
-    echo -e "${yellow}[3/5] 检测到 Systemd 环境，正在提升默认服务运行限制...${plain}"
-    [ -f "/etc/systemd/system.conf" ] && sed -i 's/^#\?DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576/' /etc/systemd/system.conf 2>/dev/null
-    [ -f "/etc/systemd/user.conf" ] && sed -i 's/^#\?DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576/' /etc/systemd/user.conf 2>/dev/null
+    echo -e "${yellow}[3/6] 检测到 Systemd 环境，正在规范化注入服务限制...${plain}"
+    
+    mkdir -p /etc/systemd/system.conf.d /etc/systemd/user.conf.d 2>/dev/null
+    
+    # 写入独立配置文件，比直接修改主文件更符合现代 Linux 运维规范
+    echo -e "[Manager]\nDefaultLimitNOFILE=1048576" > /etc/systemd/system.conf.d/99-limits.conf
+    echo -e "[Manager]\nDefaultLimitNOFILE=1048576" > /etc/systemd/user.conf.d/99-limits.conf
+    
     systemctl daemon-reload >/dev/null 2>&1
-    echo -e "${green}[+] Systemd 默认服务配置已拉升并重载${plain}"
+    echo -e "${green}[+] Systemd 配置目录已注入独立限制文件并重载${plain}"
 fi
 
 # -------------------------------------------------------------------------
 # 4. 固化到 Shell 环境变量 (保证每次登录终端都保持百万级限制)
 # -------------------------------------------------------------------------
-echo -e "${yellow}[4/5] 正在将限制写入 Shell 环境变量...${plain}"
+echo -e "${yellow}[4/6] 正在将限制写入 Shell 环境变量...${plain}"
 for file in /etc/profile /root/.profile /root/.bashrc; do
     if [ -f "$file" ]; then
         sed -i '/ulimit -n/d' "$file" 2>/dev/null
@@ -80,11 +102,18 @@ fi
 # -------------------------------------------------------------------------
 # 5. 激进式内核网络参数调优 (扩充并发队列与缓冲区)
 # -------------------------------------------------------------------------
-echo -e "${yellow}[5/5] 正在向内核注入高级 TCP 吞吐与抗并发参数...${plain}"
+echo -e "${yellow}[5/6] 正在向内核注入高级 TCP 吞吐与抗并发参数...${plain}"
 SYSCTL_CONF="/etc/sysctl.conf"
 [ -d "/etc/sysctl.d" ] && SYSCTL_CONF="/etc/sysctl.d/99-super-network.conf"
 
+# 清理可能冲突的旧自定义配置
+rm -f /etc/sysctl.d/99-super-network.conf 2>/dev/null
+
 cat << 'SYS' > "$SYSCTL_CONF"
+# 开源核心调优：必须先解锁内核级别的总线最大文件描述符上限
+fs.file-max = 2097152
+fs.nr_open = 1048576
+
 # 极大化本地可用端口范围，防止高并发下端口耗尽
 net.ipv4.ip_local_port_range = 1024 65535
 
@@ -114,13 +143,35 @@ net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_fastopen = 3
 SYS
 
-# 使内核参数立即生效
-if [ -f /etc/alpine-release ] || command -v apk &>/dev/null; then
-    # Alpine / LXC 强制锁定高并发稳定的 Cubic 算法
-    echo "net.ipv4.tcp_congestion_control = cubic" >> "$SYSCTL_CONF"
+# -------------------------------------------------------------------------
+# 6. 智能网络拥塞控制算法选择 (BBR 黄金加速)
+# -------------------------------------------------------------------------
+echo -e "${yellow}[6/6] 正在智能匹配最强 TCP 拥塞控制算法...${plain}"
+if [ "$IS_CONTAINER" = true ]; then
+    # 容器环境通常无法修改拥塞控制算法，强制使用系统默认，防止中断
+    echo "# 容器环境保留默认拥塞控制" >> "$SYSCTL_CONF"
+else
+    # 检查内核是否支持 BBR
+    if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "bbr"; then
+        cat << 'BBR' >> "$SYSCTL_CONF"
+# 激活 Google BBR 拥塞控制算法加速吞吐
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+BBR
+        echo -e "${green}[+] 检测到内核支持，已注入 BBR 加速 + FQ 队列挂载${plain}"
+    else
+        echo "net.ipv4.tcp_congestion_control = cubic" >> "$SYSCTL_CONF"
+        echo -e "${cyan}[i] 内核较老或特殊环境，已降级锁定 Cubic 高并发算法${plain}"
+    fi
 fi
 
-sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1
+# 统一应用内核参数（兼容旧版 sysctl 与现代多目录 sysctl）
+if [ -d "/etc/sysctl.d" ]; then
+    sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1
+else
+    sysctl -p >/dev/null 2>&1
+fi
+
 echo -e "${green}[+] 内核网络参数已成功应用到当前系统${plain}"
 
 # -------------------------------------------------------------------------
@@ -128,7 +179,7 @@ echo -e "${green}[+] 内核网络参数已成功应用到当前系统${plain}"
 # -------------------------------------------------------------------------
 echo -e "\n${green}====================================================${plain}"
 echo -e "${green}   ✅ 【百万级高并发】超级永久网络优化彻底完成！      ${plain}"
-echo -e "${green}====================================================${plain}"
+echo -v "${green}====================================================${plain}"
 echo -e "${yellow}💡 提示：由于当前会话的文件描述符限制已在后台修改，${plain}"
 echo -e "${yellow}   请断开当前的 SSH 终端并重新连接，即可完全刷新生效。${plain}"
 echo -e "${yellow}   重新连接后可输入 'ulimit -n' 验证，数值应为 1048576。${plain}\n"
