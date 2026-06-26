@@ -1,367 +1,69 @@
 #!/bin/bash
 # ====================================================
-# 项目名称: 极简中转转发管理面板 (基于 socat)
-# 项目版本: v1.1.0
-# 支持环境: Debian / Ubuntu / Alpine / CentOS / RHEL
+# 项目名称: 极简网络中转管理面板 (主控模块)
+# 项目版本: v2.0.0 (模块化重构)
 # ====================================================
 
-# --- 全局配置区 ---
 GITHUB_REPO_URL="https://raw.githubusercontent.com/yunfeibuzai/xmm/main"
-SCRIPT_NAME="xmmzz"
-# --------------------------------------
-
-# 内部常量
 SCRIPT_DIR="/root/relay_scripts"
-DDNS_LOG="/var/log/xmm_ddns.log"
 
-# 颜色定义
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-PLAIN='\033[0m'
+# 更新为对应的模块文件名
+RELAY_MODULE="${SCRIPT_DIR}/xmmrelay"
+DDNS_MODULE="${SCRIPT_DIR}/xmmddns"
 
-# ==========================================
-# 0. 环境初始化与面板注入
-# ==========================================
+GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; PLAIN='\033[0m'
+
+# 0. 环境与模块初始化
 init_env() {
-    # 临时提升当前会话的最大文件句柄数 (防止高并发报错)
     ulimit -n 65535 2>/dev/null
-
-    if [ ! -f "/usr/local/bin/xmm" ] && [ ! -f "/usr/bin/xmm" ]; then
-        echo -e "${CYAN}[*] 正在为您进行首次初始化设置...${PLAIN}"
-        mkdir -p "$SCRIPT_DIR"
-        cp "$0" "${SCRIPT_DIR}/${SCRIPT_NAME}" 2>/dev/null
-        chmod +x "${SCRIPT_DIR}/${SCRIPT_NAME}"
-        if [ -d "/usr/local/bin" ]; then
-            ln -sf "${SCRIPT_DIR}/${SCRIPT_NAME}" /usr/local/bin/xmm
-        else
-            ln -sf "${SCRIPT_DIR}/${SCRIPT_NAME}" /usr/bin/xmm
-        fi
-        echo -e "${GREEN}[+] 快捷控制台面板已成功注入！${PLAIN}"
-        echo -e "${GREEN}[+] 以后在任意目录下输入快捷键：${YELLOW}xmm${GREEN} 即可唤醒此面板。${PLAIN}"
-        sleep 2
-    fi
-}
-
-# ==========================================
-# 功能 1：安装必要依赖
-# ==========================================
-install_deps() {
-    echo -e "\n${CYAN}[*] 开始检测并安装所需依赖 (socat / cron / curl / nano / 网络组件)...${PLAIN}"
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y >/dev/null 2>&1
-        apt-get install -y socat cron curl grep iproute2 net-tools nano >/dev/null 2>&1
-        echo -e "${GREEN}[+] 依赖安装完成 (Debian/Ubuntu 环境)${PLAIN}"
-    elif command -v apk >/dev/null 2>&1; then
-        apk update >/dev/null 2>&1
-        apk add socat bash cronie curl grep iproute2 net-tools nano >/dev/null 2>&1
-        rc-update add cronie default >/dev/null 2>&1 && rc-service cronie start >/dev/null 2>&1
-        echo -e "${GREEN}[+] 依赖安装完成 (Alpine 环境)${PLAIN}"
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y socat crontabs curl grep iproute net-tools nano >/dev/null 2>&1
-        echo -e "${GREEN}[+] 依赖安装完成 (CentOS/RHEL 环境)${PLAIN}"
-    else
-        echo -e "${RED}[-] 未找到支持的包管理器，请手动安装必要组件。${PLAIN}"
-    fi
-    
-    echo -e "\n按回车键返回主菜单..."
-    read -r
-}
-
-# ==========================================
-# 核心中转配置逻辑 (内部公用函数)
-# ==========================================
-_execute_relay_setup() {
-    if ! command -v socat >/dev/null 2>&1; then
-        echo -e "${RED}[-] 警告：未检测到 socat，请先在主菜单选择 1 安装依赖！${PLAIN}"
-        sleep 2
-        return
-    fi
-
-    echo -e "\n${YELLOW}[1/4] 请输入监听端口 (当前中转服务器开放、用于连接的端口):${PLAIN}"
-    read -r local_port
-
-    if ss -tuln 2>/dev/null | grep -qE ":${local_port}\b" || netstat -tuln 2>/dev/null | grep -qE ":${local_port}\b"; then
-        echo -e "\n${RED}[-] 端口 ${local_port} 已被占用，请换一个！${PLAIN}"
-        echo -e "提示: 如果这是你刚添加的端口，说明转发已在运行。\n"
-        sleep 2
-        return
-    fi
-
-    echo -e "\n${YELLOW}[2/4] 请输入落地服务器的转发类型 (输入 4 代表 IPv4, 6 代表 IPv6):${PLAIN}"
-    read -r ip_type
-
-    echo -e "\n${YELLOW}[3/4] 请输入落地服务器的 IP 地址 (输入 V6 时可带括号也可不带):${PLAIN}"
-    read -r remote_ip
-
-    echo -e "\n${YELLOW}[4/4] 请输入落地服务器的端口 (实际的服务端口):${PLAIN}"
-    read -r remote_port
-
-    remote_ip=$(echo "$remote_ip" | tr -d '[]')
-
-    if [ "$ip_type" == "4" ]; then
-        TARGET_TCP="TCP4:${remote_ip}:${remote_port}"
-        TARGET_UDP="UDP4:${remote_ip}:${remote_port}"
-    elif [ "$ip_type" == "6" ]; then
-        TARGET_TCP="TCP6:[${remote_ip}]:${remote_port}"
-        TARGET_UDP="UDP6:[${remote_ip}]:${remote_port}"
-    else
-        echo -e "${RED}[-] 输入错误：转发类型只能输入 4 或 6。${PLAIN}"
-        sleep 2
-        return
-    fi
-
     mkdir -p "$SCRIPT_DIR"
-    SCRIPT_FILE="${SCRIPT_DIR}/relay_${local_port}.sh"
 
-    # 生成带并发优化限制的转发脚本
-    cat << EOF > "$SCRIPT_FILE"
-#!/bin/bash
-ulimit -n 65535 2>/dev/null
-nohup socat TCP-LISTEN:${local_port},reuseaddr,fork ${TARGET_TCP} >/dev/null 2>&1 &
-nohup socat UDP-LISTEN:${local_port},reuseaddr,fork ${TARGET_UDP} >/dev/null 2>&1 &
-EOF
-
-    chmod +x "$SCRIPT_FILE"
-    bash "$SCRIPT_FILE"
-
-    if command -v crontab >/dev/null 2>&1; then
-        if ! crontab -l 2>/dev/null | grep -q "$SCRIPT_FILE"; then
-            (crontab -l 2>/dev/null; echo "@reboot bash $SCRIPT_FILE") | crontab -
-        fi
-    fi
-
-    echo "======================================================"
-    echo -e "${GREEN}[+] 转发配置完成并已在后台运行！${PLAIN}"
-    echo "中转监听端口: ${local_port} (支持 TCP/UDP)"
-    echo "落地目标地址: ${remote_ip}:${remote_port}"
-    echo "自启状态: 已加入 crontab (@reboot)"
-    echo "======================================================"
-}
-
-# ==========================================
-# 功能 2-4：中转管理规则
-# ==========================================
-add_relay_append() {
-    echo -e "\n${CYAN}--- 模式：追加新中转配置 (现有转发保持不受影响) ---${PLAIN}"
-    _execute_relay_setup
-    echo -e "\n按回车键返回主菜单..."
-    read -r
-}
-
-reset_and_setup_relay() {
-    echo -e "\n${RED}⚠️ 警告：此操作将终止当前由本脚本管理的所有中转进程并清除历史脚本！${PLAIN}"
-    echo -n "是否确定继续？(y/n): "
-    read -r confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        echo -e "${YELLOW}已取消重置操作。${PLAIN}"
-        sleep 1
-        return
-    fi
-
-    echo -e "\n${YELLOW}[1/3] 正在停止相关的 socat 转发进程...${PLAIN}"
-    # 安全清理：只杀脚本目录中注册过的端口，防误杀
-    for f in "$SCRIPT_DIR"/relay_*.sh; do
-        if [ -f "$f" ]; then
-            port=$(basename "$f" | sed 's/relay_//g' | sed 's/\.sh//g')
-            ps -ef | grep "socat" | grep "LISTEN:${port}," | grep -v "grep" | awk '{print $2}' | xargs kill -9 2>/dev/null
-        fi
-    done
-    sleep 1
-
-    echo -e "${YELLOW}[2/3] 正在清理旧的中转脚本文件...${PLAIN}"
-    rm -f "${SCRIPT_DIR}"/relay_*.sh
-
-    echo -e "${YELLOW}[3/3] 正在从 crontab 中剥离旧项...${PLAIN}"
-    if command -v crontab >/dev/null 2>&1; then
-        crontab -l 2>/dev/null | grep -v "relay_" | crontab - 2>/dev/null
-    fi
-
-    echo -e "${GREEN}[+] 清理完毕！下面开始引导全新配置。${PLAIN}"
-    echo "------------------------------------------------------"
-    _execute_relay_setup
-    echo -e "\n按回车键返回主菜单..."
-    read -r
-}
-
-edit_relay_by_nano() {
-    echo -e "\n${CYAN}--- 模式：手动修改现有配置 (Nano 编辑器) ---${PLAIN}"
-    if ! command -v nano >/dev/null 2>&1; then
-        echo -e "${YELLOW}提示: 未检测到 nano，请先在主菜单选择 1 安装依赖！${PLAIN}"
-        sleep 2
-        return
-    fi
-
-    local files=($(find "$SCRIPT_DIR" -type f -name "relay_*.sh" 2>/dev/null))
-    if [ ${#files[@]} -eq 0 ]; then
-        echo -e "${RED}[-] 系统当前没有任何中转配置记录，无法修改！${PLAIN}"
-        sleep 2
-        return
-    fi
-
-    echo -e "${GREEN}检测到以下正在运行或保存的规则：${PLAIN}"
-    local ports=()
-    local index=1
-    for f in "${files[@]}"; do
-        local port=$(basename "$f" | sed 's/relay_//g' | sed 's/\.sh//g')
-        ports+=("$port")
-        echo -e "  [${index}] 监听端口：${YELLOW}${port}${PLAIN}"
-        index=$((index+1))
-    done
-
-    echo -e "\n请输入需要编辑的规则序号 (例如 1):"
-    read -r choice_idx
-
-    if ! [[ "$choice_idx" =~ ^[0-9]+$ ]] || [ "$choice_idx" -lt 1 ] || [ "$choice_idx" -ge "$index" ]; then
-        echo -e "${RED}[-] 序号输入不合法。${PLAIN}"
+    # 面板命令注入
+    if [ ! -f "/usr/local/bin/xmm" ]; then
+        cp "$0" /usr/local/bin/xmm 2>/dev/null || cp "$0" /usr/bin/xmm
+        chmod +x /usr/local/bin/xmm 2>/dev/null || chmod +x /usr/bin/xmm
+        echo -e "${GREEN}[+] 快捷控制台面板已注入！输入快捷键：${YELLOW}xmm${GREEN} 即可唤醒。${PLAIN}"
         sleep 1.5
-        return
     fi
 
-    local selected_port="${ports[$((choice_idx-1))]}"
-    local selected_file="${SCRIPT_DIR}/relay_${selected_port}.sh"
-
-    echo -e "\n${YELLOW}提示：修改完毕后按 Ctrl+O 保存，回车确认，Ctrl+X 退出。${PLAIN}"
-    echo "按任意键打开编辑器..."
-    read -n 1 -s
-
-    nano "$selected_file"
-
-    echo -e "\n${CYAN}[*] 正在执行配置热更新...${PLAIN}"
-    ps -ef | grep "socat" | grep "LISTEN:${selected_port}," | grep -v "grep" | awk '{print $2}' | xargs kill -9 2>/dev/null
-    sleep 0.5
-    bash "$selected_file"
-    
-    echo -e "${GREEN}[+] 端口 ${selected_port} 已热重启生效！${PLAIN}"
-    echo -e "\n按回车键返回主菜单..."
-    read -r
-}
-
-# ==========================================
-# 功能 5-6：Cloudflare DDNS 同步
-# ==========================================
-setup_ddns() {
-    echo -e "\n${CYAN}--- 配置 Cloudflare DDNS 动态 IP ---${PLAIN}"
-    if ! command -v curl >/dev/null 2>&1; then
-        echo -e "${RED}[-] 未检测到 curl，请先安装依赖！${PLAIN}"
-        sleep 2
-        return
+    # 动态拉取子模块 (如果不存在，则从你的 GitHub 仓库拉取)
+    if [ ! -f "$RELAY_MODULE" ]; then
+        curl -sSfL "${GITHUB_REPO_URL}/xmmrelay" -o "$RELAY_MODULE" && chmod +x "$RELAY_MODULE"
     fi
-
-    read -p "[1/4] 请输入在 CF 解析的完整域名 (例: relay.xmm.com): " ddns_domain
-    read -p "[2/4] 解析类型 (4=A记录/IPv4, 6=AAAA记录/IPv6): " ddns_type
-    read -p "[3/4] 请输入 Cloudflare API Token: " cf_token
-    read -p "[4/4] 请输入 Cloudflare Zone ID: " cf_zone_id
-
-    RECORD_TYPE=$([ "$ddns_type" == "4" ] && echo "A" || echo "AAAA")
-    DDNS_SCRIPT="${SCRIPT_DIR}/cf_ddns.sh"
-
-    cat << 'EOF' > "$DDNS_SCRIPT"
-#!/bin/bash
-DOMAIN="MY_DOMAIN"
-IP_TYPE="MY_IP_TYPE"
-CF_TOKEN="MY_CF_TOKEN"
-ZONE_ID="MY_ZONE_ID"
-RECORD_TYPE="MY_RECORD_TYPE"
-LOG_FILE="MY_LOG_FILE"
-
-write_log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-    tail -n 30 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+    if [ ! -f "$DDNS_MODULE" ]; then
+        curl -sSfL "${GITHUB_REPO_URL}/xmmddns" -o "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
+    fi
 }
 
-CURRENT_IP=$([ "$IP_TYPE" == "4" ] && curl -s4 https://api.ipify.org || curl -s6 https://api64.ipify.org)
+# 模块调用包装器
+call_relay() {
+    [ -f "$RELAY_MODULE" ] && bash "$RELAY_MODULE" "$1" || echo -e "${RED}[-] 中转模块缺失，请检查网络或执行更新！${PLAIN}"
+}
 
-if [ -z "$CURRENT_IP" ]; then
-    write_log "❌ 错误: 网络断开或无法获取公网 IP"
-    exit 1
-fi
+call_ddns() {
+    [ -f "$DDNS_MODULE" ] && bash "$DDNS_MODULE" "$1" || echo -e "${RED}[-] DDNS模块缺失，请检查网络或执行更新！${PLAIN}"
+}
 
-RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=${RECORD_TYPE}&name=${DOMAIN}" \
-    -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json")
+# 一键更新功能 (适配你的新文件名)
+update_all_scripts() {
+    echo -e "\n${CYAN}[*] 正在从 GitHub 同步所有模块代码...${PLAIN}"
+    # 假设你的主控脚本在仓库里叫 xmmzz，如果叫别的请自行修改下面这行
+    curl -sSfL "${GITHUB_REPO_URL}/xmmzz" -o /tmp/xmmzz.tmp
+    curl -sSfL "${GITHUB_REPO_URL}/xmmrelay" -o /tmp/xmmrelay.tmp
+    curl -sSfL "${GITHUB_REPO_URL}/xmmddns" -o /tmp/xmmddns.tmp
 
-if echo "$RECORD_INFO" | grep -q '"success":false'; then
-    write_log "❌ 错误: API 请求被拒，请检查 Token 权限和 Zone ID"
-    exit 1
-fi
-
-RECORD_ID=$(echo "$RECORD_INFO" | grep -oP '(?<="id":")[^"]*' | head -n1)
-OLD_IP=$(echo "$RECORD_INFO" | grep -oP '(?<="content":")[^"]*' | head -n1)
-
-if [ -z "$RECORD_ID" ]; then
-    RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
-        -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" \
-        --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
-    echo "$RESULT" | grep -q '"success":true' && write_log "✅ 新建域名解析 -> $CURRENT_IP" || write_log "❌ 域名新建失败"
-else
-    if [ "$CURRENT_IP" != "$OLD_IP" ]; then
-        RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${RECORD_ID}" \
-            -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" \
-            --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
-        echo "$RESULT" | grep -q '"success":true' && write_log "✅ 动态 IP 已更新 -> $CURRENT_IP" || write_log "❌ 动态 IP 更新失败"
+    # 效验下载是否成功
+    if grep -q "#!/bin/bash" /tmp/xmmzz.tmp; then
+        mv /tmp/xmmzz.tmp /usr/local/bin/xmm && chmod +x /usr/local/bin/xmm
+        mv /tmp/xmmrelay.tmp "$RELAY_MODULE" && chmod +x "$RELAY_MODULE"
+        mv /tmp/xmmddns.tmp "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
+        echo -e "${GREEN}[+] 所有模块升级成功！正在重新载入...${PLAIN}"
+        sleep 1; exec bash /usr/local/bin/xmm
     else
-        write_log "ℹ️ IP 未改变 ($CURRENT_IP)，无需同步"
+        echo -e "${RED}[-] 下载失败，可能遭遇网络波动，请稍后再试。${PLAIN}"
+        rm -f /tmp/xmmzz.tmp /tmp/xmmrelay.tmp /tmp/xmmddns.tmp
     fi
-fi
-EOF
-
-    # 替换变量
-    sed -i "s|MY_DOMAIN|${ddns_domain}|g; s|MY_IP_TYPE|${ddns_type}|g; s|MY_CF_TOKEN|${cf_token}|g; s|MY_ZONE_ID|${cf_zone_id}|g; s|MY_RECORD_TYPE|${RECORD_TYPE}|g; s|MY_LOG_FILE|${DDNS_LOG}|g" "$DDNS_SCRIPT"
-    chmod +x "$DDNS_SCRIPT"
-    
-    echo -e "\n${YELLOW}[*] 尝试首次同步测试...${PLAIN}"
-    bash "$DDNS_SCRIPT"
-    
-    if tail -n 1 "$DDNS_LOG" | grep -qE "✅|ℹ️"; then
-        echo -e "${GREEN}[+] Cloudflare DDNS 配置成功！${PLAIN}"
-        if command -v crontab >/dev/null 2>&1; then
-            (crontab -l 2>/dev/null | grep -v "$DDNS_SCRIPT"; echo "*/5 * * * * bash $DDNS_SCRIPT >/dev/null 2>&1") | crontab -
-        fi
-    else
-        echo -e "${RED}[-] 测试失败！请返回主菜单选 6 查看日志。DDNS 任务未开启。${PLAIN}"
-        rm -f "$DDNS_SCRIPT"
-    fi
-    echo -e "\n按回车键返回..."
-    read -r
-}
-
-view_logs() {
-    echo -e "\n${CYAN}=== DDNS 运行日志 ===${PLAIN}"
-    [ -f "$DDNS_LOG" ] && cat "$DDNS_LOG" || echo -e "${RED}暂无日志记录。${PLAIN}"
-    echo -e "${CYAN}=====================${PLAIN}"
-    echo -e "\n按回车键返回..."
-    read -r
-}
-
-# ==========================================
-# 功能 7：一键在线升级
-# ==========================================
-update_script() {
-    echo -e "\n${CYAN}[*] 开始检查并在线升级脚本...${PLAIN}"
-    if ! command -v curl >/dev/null 2>&1; then
-        echo -e "${RED}[-] 错误：未检测到 curl！${PLAIN}"
-        sleep 2; return
-    fi
-
-    local target_url="${GITHUB_REPO_URL}/${SCRIPT_NAME}"
-    local tmp_file="/tmp/${SCRIPT_NAME}.tmp"
-    
-    echo -e "${YELLOW}[*] 正在从 GitHub 仓库获取最新代码...${PLAIN}"
-    curl -sSfL "$target_url" -o "$tmp_file"
-    
-    if [ $? -eq 0 ] && grep -q "#!/bin/bash" "$tmp_file"; then
-        mv "$tmp_file" "${SCRIPT_DIR}/${SCRIPT_NAME}"
-        chmod +x "${SCRIPT_DIR}/${SCRIPT_NAME}"
-        echo -e "${GREEN}[+] 升级成功！正在重新载入面板...${PLAIN}"
-        sleep 1.5
-        exec bash "${SCRIPT_DIR}/${SCRIPT_NAME}"
-    else
-        echo -e "${RED}[-] 下载失败或文件效验错误，可能遭遇网络波动，已撤销升级。${PLAIN}"
-        rm -f "$tmp_file"
-    fi
-    echo -e "\n按回车键返回..."
-    read -r
+    echo -e "\n按回车键返回..." && read -r
 }
 
 # ==========================================
@@ -372,29 +74,30 @@ init_env
 while true; do
     clear
     echo "======================================================"
-    echo -e "      ${GREEN}极简网络中转管理面板${PLAIN} ${CYAN}(socat版) v1.1.0${PLAIN}"
-    echo -e "      ${YELLOW}跨平台支持: Debian/Ubuntu/Alpine/CentOS${PLAIN}"
+    echo -e "    ${GREEN}极简网络中转管理面板${PLAIN} ${CYAN}(模块化核心) v2.0.0${PLAIN}"
     echo "======================================================"
-    echo -e "  ${GREEN}1.${PLAIN} 安装必要依赖 (首次使用必须安装)"
-    echo -e "  ${GREEN}2.${PLAIN} 追加新中转配置 (保留原有规则)"
-    echo -e "  ${GREEN}3.${PLAIN} 重置并全新配置 (清除本脚本的所有旧规则)"
-    echo -e "  ${GREEN}4.${PLAIN} 手动修改现有中转配置 (Nano 热更新)"
-    echo -e "  ${GREEN}5.${PLAIN} 配置 Cloudflare DDNS 动态 IP 同步"
-    echo -e "  ${GREEN}6.${PLAIN} 查看 DDNS 运行状态与日志"
-    echo -e "  ${GREEN}7.${PLAIN} 从 GitHub 一键更新面板代码"
+    echo -e "  ${GREEN}1.${PLAIN} 安装中转依赖 (Realm/Socat)"
+    echo -e "  ${GREEN}2.${PLAIN} 追加新中转配置"
+    echo -e "  ${GREEN}3.${PLAIN} 重置并全新配置 (清理旧规则)"
+    echo -e "  ${GREEN}4.${PLAIN} 手动修改中转配置 (热重启)"
+    echo "------------------------------------------------------"
+    echo -e "  ${GREEN}5.${PLAIN} 配置 Cloudflare DDNS 同步"
+    echo -e "  ${GREEN}6.${PLAIN} 查看 DDNS 运行日志"
+    echo "------------------------------------------------------"
+    echo -e "  ${GREEN}7.${PLAIN} 一键更新面板与所有模块"
     echo -e "  ${GREEN}0.${PLAIN} 退出"
     echo "======================================================"
     read -p "请输入选项 [0-7]: " choice
 
     case "$choice" in
-        1) install_deps ;;
-        2) add_relay_append ;;
-        3) reset_and_setup_relay ;;
-        4) edit_relay_by_nano ;;
-        5) setup_ddns ;;
-        6) view_logs ;;
-        7) update_script ;;
-        0) echo -e "${GREEN}[+] 感谢使用，已退出！${PLAIN}"; exit 0 ;;
-        *) echo -e "${RED}[-] 输入错误，请输入 0-7 之间的数字。${PLAIN}"; sleep 1.5 ;;
+        1) call_relay install_deps ;;
+        2) call_relay add_relay_append ;;
+        3) call_relay reset_and_setup_relay ;;
+        4) call_relay edit_relay_by_nano ;;
+        5) call_ddns setup_ddns ;;
+        6) call_ddns view_logs ;;
+        7) update_all_scripts ;;
+        0) echo -e "${GREEN}[+] 退出面板！${PLAIN}"; exit 0 ;;
+        *) echo -e "${RED}[-] 输入错误。${PLAIN}"; sleep 1 ;;
     esac
 done
