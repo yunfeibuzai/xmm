@@ -1,0 +1,80 @@
+#!/bin/bash
+# ====================================================
+# 模块名称: Cloudflare DDNS 子系统
+# ====================================================
+
+SCRIPT_DIR="/root/relay_scripts"
+DDNS_LOG="/var/log/xmm_ddns.log"
+
+GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; PLAIN='\033[0m'
+
+setup_ddns() {
+    echo -e "\n${CYAN}--- 配置 Cloudflare DDNS ---${PLAIN}"
+    read -p "[1/4] CF 解析域名 (例: relay.xmm.com): " ddns_domain
+    read -p "[2/4] 解析类型 (4=IPv4, 6=IPv6): " ddns_type
+    read -p "[3/4] CF API Token: " cf_token
+    read -p "[4/4] CF Zone ID: " cf_zone_id
+
+    RECORD_TYPE=$([ "$ddns_type" == "4" ] && echo "A" || echo "AAAA")
+    DDNS_SCRIPT="${SCRIPT_DIR}/cf_ddns.sh"
+
+    cat << 'EOF' > "$DDNS_SCRIPT"
+#!/bin/bash
+DOMAIN="MY_DOMAIN"
+IP_TYPE="MY_IP_TYPE"
+CF_TOKEN="MY_CF_TOKEN"
+ZONE_ID="MY_ZONE_ID"
+RECORD_TYPE="MY_RECORD_TYPE"
+LOG_FILE="MY_LOG_FILE"
+
+write_log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    tail -n 30 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+}
+
+CURRENT_IP=$([ "$IP_TYPE" == "4" ] && curl -s4 https://api.ipify.org || curl -s6 https://api64.ipify.org)
+[ -z "$CURRENT_IP" ] && { write_log "❌ 获取IP失败"; exit 1; }
+
+RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=${RECORD_TYPE}&name=${DOMAIN}" -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json")
+RECORD_ID=$(echo "$RECORD_INFO" | grep -oP '(?<="id":")[^"]*' | head -n1)
+OLD_IP=$(echo "$RECORD_INFO" | grep -oP '(?<="content":")[^"]*' | head -n1)
+
+if [ -z "$RECORD_ID" ]; then
+    RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
+    echo "$RESULT" | grep -q '"success":true' && write_log "✅ 新建解析 -> $CURRENT_IP" || write_log "❌ 新建失败"
+else
+    if [ "$CURRENT_IP" != "$OLD_IP" ]; then
+        RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${RECORD_ID}" -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
+        echo "$RESULT" | grep -q '"success":true' && write_log "✅ 更新 IP -> $CURRENT_IP" || write_log "❌ 更新失败"
+    else
+        write_log "ℹ️ IP 未改变 ($CURRENT_IP)"
+    fi
+fi
+EOF
+
+    sed -i "s|MY_DOMAIN|${ddns_domain}|g; s|MY_IP_TYPE|${ddns_type}|g; s|MY_CF_TOKEN|${cf_token}|g; s|MY_ZONE_ID|${cf_zone_id}|g; s|MY_RECORD_TYPE|${RECORD_TYPE}|g; s|MY_LOG_FILE|${DDNS_LOG}|g" "$DDNS_SCRIPT"
+    chmod +x "$DDNS_SCRIPT"
+    
+    echo -e "${YELLOW}[*] 尝试首次同步...${PLAIN}"
+    bash "$DDNS_SCRIPT"
+    
+    if tail -n 1 "$DDNS_LOG" | grep -qE "✅|ℹ️"; then
+        echo -e "${GREEN}[+] DDNS 配置成功！已加入定时任务。${PLAIN}"
+        (crontab -l 2>/dev/null | grep -v "$DDNS_SCRIPT"; echo "*/5 * * * * bash $DDNS_SCRIPT >/dev/null 2>&1") | crontab -
+    else
+        echo -e "${RED}[-] 测试失败，请检查参数配置。${PLAIN}"
+    fi
+    echo -e "\n按回车键返回..." && read -r
+}
+
+view_logs() {
+    echo -e "\n${CYAN}=== DDNS 日志 ===${PLAIN}"
+    [ -f "$DDNS_LOG" ] && cat "$DDNS_LOG" || echo -e "${RED}暂无记录。${PLAIN}"
+    echo -e "${CYAN}=================${PLAIN}"
+    echo -e "\n按回车键返回..." && read -r
+}
+
+# 接收主控传入的指令并执行对应的函数
+if [ -n "$1" ]; then
+    "$1"
+fi
