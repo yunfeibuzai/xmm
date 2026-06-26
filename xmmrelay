@@ -1,6 +1,6 @@
 #!/bin/bash
 # ====================================================
-# 模块名称: 中转管理子系统 (Realm + Socat 双引擎)
+# 模块名称: 中转管理子系统 (Realm + Socat 双引擎 兼容版)
 # ====================================================
 
 SCRIPT_DIR="/root/relay_scripts"
@@ -21,6 +21,7 @@ install_deps() {
 
     echo -e "${YELLOW}[*] 正在拉取 Realm 核心...${PLAIN}"
     if [ ! -f "$REALM_BIN" ]; then
+        # 换用通用稳定版 release
         wget -qO /tmp/realm.tar.gz "https://github.com/zhboner/realm/releases/latest/download/realm-x86_64-unknown-linux-gnu.tar.gz"
         tar -xf /tmp/realm.tar.gz -C /usr/local/bin/ && chmod +x "$REALM_BIN"
         rm -f /tmp/realm.tar.gz
@@ -47,22 +48,49 @@ _execute_relay_setup() {
     remote_ip=$(echo "$remote_ip" | tr -d '[]')
     mkdir -p "$SCRIPT_DIR"
 
+    # 检测本地是否为纯 IPv6 容器环境
+    LOCAL_BIND="0.0.0.0:${local_port}"
+    if [ ! -f /proc/net/if_inet6 ] || [ -z "$(ip -4 addr show 2>/dev/null | grep inet)" ]; then
+        # 纯 IPv6 环境，监听绑定更改为 [::]
+        LOCAL_BIND="[::]:${local_port}"
+    fi
+
     if [ "$engine_choice" == "1" ]; then
         REALM_IP=$([ "$ip_type" == "6" ] && echo "[${remote_ip}]" || echo "${remote_ip}")
         CONFIG_FILE="${SCRIPT_DIR}/realm_${local_port}.json"
         cat << EOF > "$CONFIG_FILE"
-{ "log": { "level": "warn" }, "network": { "no_tcp": false, "use_udp": true }, "endpoints": [ { "listen": "0.0.0.0:${local_port}", "remote": "${REALM_IP}:${remote_port}" } ] }
+{
+  "log": { "level": "warn" },
+  "network": { "no_tcp": false, "use_udp": true, "fast_open": false },
+  "endpoints": [
+    {
+      "listen": "${LOCAL_BIND}",
+      "remote": "${REALM_IP}:${remote_port}"
+    }
+  ]
+}
 EOF
-        nohup "$REALM_BIN" -c "$CONFIG_FILE" >/dev/null 2>&1 &
-        CRON_CMD="nohup $REALM_BIN -c $CONFIG_FILE >/dev/null 2>&1 &"
+        # 针对 LXD 容器使用带环境变量的兼容启动法
+        nohup env RUST_BACKTRACE=1 "$REALM_BIN" -c "$CONFIG_FILE" >/dev/null 2>&1 &
+        CRON_CMD="nohup env RUST_BACKTRACE=1 $REALM_BIN -c $CONFIG_FILE >/dev/null 2>&1 &"
     else
         SCRIPT_FILE="${SCRIPT_DIR}/relay_${local_port}.sh"
         if [ "$ip_type" == "4" ]; then TARGET_TCP="TCP4:${remote_ip}:${remote_port}"; TARGET_UDP="UDP4:${remote_ip}:${remote_port}"; else TARGET_TCP="TCP6:[${remote_ip}]:${remote_port}"; TARGET_UDP="UDP6:[${remote_ip}]:${remote_port}"; fi
+        
+        # 针对纯 IPv6 容器的 Socat 监听优化
+        if [[ "$LOCAL_BIND" == *"[::]"* ]]; then
+            SOCAT_LISTEN_TCP="TCP6-LISTEN:${local_port},reuseaddr,fork"
+            SOCAT_LISTEN_UDP="UDP6-LISTEN:${local_port},reuseaddr,fork"
+        else
+            SOCAT_LISTEN_TCP="TCP4-LISTEN:${local_port},reuseaddr,fork"
+            SOCAT_LISTEN_UDP="UDP4-LISTEN:${local_port},reuseaddr,fork"
+        fi
+
         cat << EOF > "$SCRIPT_FILE"
 #!/bin/bash
 ulimit -n 65535 2>/dev/null
-nohup socat TCP-LISTEN:${local_port},reuseaddr,fork,nodelay,keepalive,rcvbuf=65536,sndbuf=65536,connect-timeout=10 ${TARGET_TCP} >/dev/null 2>&1 &
-nohup socat UDP-LISTEN:${local_port},reuseaddr,fork,rcvbuf=65536,sndbuf=65536 ${TARGET_UDP} >/dev/null 2>&1 &
+nohup socat ${SOCAT_LISTEN_TCP},nodelay,keepalive ${TARGET_TCP} >/dev/null 2>&1 &
+nohup socat ${SOCAT_LISTEN_UDP} ${TARGET_UDP} >/dev/null 2>&1 &
 EOF
         chmod +x "$SCRIPT_FILE" && bash "$SCRIPT_FILE"
         CRON_CMD="bash $SCRIPT_FILE"
@@ -112,13 +140,12 @@ edit_relay_by_nano() {
     if [[ "$selected_file" == *.sh ]]; then
         ps -ef | grep "socat" | grep "LISTEN:${selected_port}," | awk '{print $2}' | xargs kill -9 2>/dev/null; bash "$selected_file"
     else
-        ps -ef | grep "realm" | grep "${selected_port}" | awk '{print $2}' | xargs kill -9 2>/dev/null; nohup "$REALM_BIN" -c "$selected_file" >/dev/null 2>&1 &
+        ps -ef | grep "realm" | grep "${selected_port}" | awk '{print $2}' | xargs kill -9 2>/dev/null; nohup env RUST_BACKTRACE=1 "$REALM_BIN" -c "$selected_file" >/dev/null 2>&1 &
     fi
     echo -e "${GREEN}[+] 热重启生效！${PLAIN}"
     echo -e "\n按回车键返回..." && read -r
 }
 
-# 接收主控传入的指令并执行对应的函数
 if [ -n "$1" ]; then
     "$1"
 fi
