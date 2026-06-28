@@ -4,7 +4,7 @@
 #  Repository:  https://github.com/your-username/linux-tcp-optimizer
 #  Project:     Linux Mega-Concurrency TCP Optimizer (C10M Edition)
 #  Description: 突破 Linux 默认内核限制，全自动自适应解锁千万级并发 (C10M)。
-#               完美兼容 LXC/OpenVZ/Docker 容器环境，智能识别只读内核与母鸡限制。
+#               动态探测极限：KVM 强制解锁千万，LXC/容器 智能榨干母鸡极限。
 #  License:     MIT
 # =========================================================================
 
@@ -52,35 +52,46 @@ if [ "$IS_CONTAINER" = false ]; then
     modprobe tcp_bbr 2>/dev/null
 fi
 
-# --- [ 3. 强行尝试扩容内核总线铁闸 ] ---
+# --- [ 3. 动态探测并榨干极限 (核心逻辑升级) ] ---
 TARGET_FILES="10485760"
 MAX_SYS_FILES="65535000"
 MAX_CONNTRACK="10485760"
 
-# 在检测 ulimit 之前，必须先一步将内核全局描述符上限推高
-if [ "$IS_CONTAINER" = false ]; then
-    sysctl -w fs.file-max=${MAX_SYS_FILES} >/dev/null 2>&1
-    sysctl -w fs.nr_open=${TARGET_FILES} >/dev/null 2>&1
-fi
+msg_info "正在向系统底层施压，尝试推高全局总线铁闸..."
 
-# --- [ 4. 动态探测并发上限 (修复硬锁判定逻辑) ] ---
-# 显式分开设置硬限制(-H)与软限制(-S)，防止部分系统 Shell 产生逻辑截断
-if ulimit -Hn ${TARGET_FILES} 2>/dev/null && ulimit -Sn ${TARGET_FILES} 2>/dev/null; then
-    msg_succ "成功突破单进程千万级上限: ${TARGET_FILES}"
+# 无差别尝试提额：KVM 会生效，LXC/Docker 会静默忽略
+sysctl -w fs.file-max=${MAX_SYS_FILES} >/dev/null 2>&1
+sysctl -w fs.nr_open=${TARGET_FILES} >/dev/null 2>&1
+
+# 读取系统当下*真正的*物理天花板
+KERNEL_MAX=$(cat /proc/sys/fs/nr_open 2>/dev/null || echo "1048576")
+
+if [ "$KERNEL_MAX" -lt "$TARGET_FILES" ]; then
+    # 如果天花板依然低于千万级，说明这是被母鸡锁死的 LXC 容器
+    TARGET_FILES="$KERNEL_MAX"
+    msg_warn "检测到共享内核(LXC/母鸡)物理硬锁，已自动自适应，尝试推至母鸡允许的极限: ${TARGET_FILES}"
 else
-    # 只有显式设置硬限制失败，才证明真正遭遇了外部不可抗力（如受限的 LXC 母鸡）
-    ACTUAL_MAX=$(ulimit -Hn 2>/dev/null)
-    if [ -n "$ACTUAL_MAX" ] && [ "$ACTUAL_MAX" != "unlimited" ]; then
-        TARGET_FILES="$ACTUAL_MAX"
-        msg_warn "检测到环境进程硬锁！最大文件描述符自动自适应降级至: ${TARGET_FILES}"
-        # 降级后同步更新当前会话限制
-        ulimit -Hn ${TARGET_FILES} 2>/dev/null
-        ulimit -Sn ${TARGET_FILES} 2>/dev/null
-    fi
+    msg_succ "底层硬锁已解开，通道已拓宽至千万级上限: ${TARGET_FILES}"
 fi
 
-# --- [ 5. 解锁系统与服务并发上限 ] ---
-msg_info "正在固化 ulimit 与 Systemd 进程限制..."
+# 开始真实设置 ulimit
+if ulimit -Hn ${TARGET_FILES} 2>/dev/null && ulimit -Sn ${TARGET_FILES} 2>/dev/null; then
+    if [ "$TARGET_FILES" -ge "10485760" ]; then
+        msg_succ "✅ 千万级 (C10M) 单进程并发上限解锁成功！"
+    else
+        msg_succ "✅ 已成功榨干当前母鸡环境允许的最高极限并发！"
+    fi
+else
+    # 终极防爆防线：如果上述设置依然被某些奇葩策略拦截，获取真正的上限
+    ACTUAL_MAX=$(ulimit -Hn 2>/dev/null)
+    TARGET_FILES="$ACTUAL_MAX"
+    ulimit -Hn ${TARGET_FILES} 2>/dev/null
+    ulimit -Sn ${TARGET_FILES} 2>/dev/null
+    msg_warn "触发终极兼容防线，最大文件描述符安全降级至: ${TARGET_FILES}"
+fi
+
+# --- [ 4. 解锁系统与服务并发上限 ] ---
+msg_info "正在固化 ulimit 与 Systemd 守护进程限制..."
 
 if [ -d "/etc/security" ]; then
     mkdir -p /etc/security/limits.d
@@ -105,7 +116,7 @@ else
     grep -q "ulimit -n" /etc/profile || echo "ulimit -n ${TARGET_FILES} 2>/dev/null" >> /etc/profile
 fi
 
-# --- [ 6. 激进内核网络调优 ] ---
+# --- [ 5. 激进内核网络调优 ] ---
 msg_info "正在注入内核网络参数..."
 SYSCTL_CONF="/etc/sysctl.d/99-c10m-network.conf"
 mkdir -p /etc/sysctl.d 2>/dev/null
@@ -138,7 +149,7 @@ inject_sysctl "net.ipv4.tcp_wmem" "4096 65536 67108864"
 inject_sysctl "net.ipv4.tcp_window_scaling" "1"
 inject_sysctl "net.ipv4.tcp_fastopen" "3"
 
-# --- [ 7. 智能 BBR 拥塞控制自适应 ] ---
+# --- [ 6. 智能 BBR 拥塞控制自适应 ] ---
 msg_info "正在探测最优 TCP 拥塞控制算法..."
 
 AVAILABLE_CC=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
@@ -161,9 +172,9 @@ fi
 sysctl --system >/dev/null 2>&1
 msg_succ "自适应网络调优参数已注入完成。"
 
-# --- [ 8. 结束提示 ] ---
+# --- [ 7. 结束提示 ] ---
 echo -e "\n${GREEN}=====================================================================${PLAIN}"
-echo -e "${GREEN}   ✅ 【C10M 千万级并发】极致网络底层优化已彻底完成！      ${PLAIN}"
+echo -e "${GREEN}   ✅ 【极致高并发】网络底层核心优化已彻底完成！      ${PLAIN}"
 echo -e "${GREEN}=====================================================================${PLAIN}"
 echo -e "${YELLOW} 💡 环境验证指南：${PLAIN}"
 echo -e "${CYAN} 1. 请务必【断开当前 SSH 并重新连接】以刷新会话缓存。${PLAIN}"
