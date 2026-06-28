@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="4.3.5-LogRotatePro"
+sh_ver="4.3.6-LogRotatePro"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
@@ -150,8 +150,8 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
   ${green}10.${plain} 取消开机自启动
 --------------------------------------------
 ${magenta}[🌟 核心战力配置向导群]${plain}
-  ${green}11.${plain} 🌟 纯净向导式配置创建逻辑
-  ${green}12.${plain} 📁 深度配置：一键生成外置高级组件
+  ${green}11.${plain} 🌟 纯净向导式配置创建逻辑 (全新覆盖)
+  ${green}12.${plain} 📁 在原有配置上继续添加配置 (xmm3 增量追加)
   ${green}13.${plain} 生成 X25519 密钥 (Reality 必备)
   ${green}14.${plain} 升级本维护脚本
 --------------------------------------------
@@ -185,10 +185,28 @@ make_full_config() {
     fi
 }
 
+# 🌟 选项 12：精准对接您的 xmm3 增量追加脚本
+append_existing_config() {
+    echo -e "${cyan}正在拉取追加配置向导引擎 (xmm3)...${plain}"
+    local remote_append_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm3"
+    local proxy_append_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm3"
+    
+    wget -O /tmp/v2bx_append "$proxy_append_url" --timeout=10 2>/dev/null || \
+    wget -O /tmp/v2bx_append "$remote_append_url" --timeout=10 2>/dev/null || \
+    curl -sL "$remote_append_url" -o /tmp/v2bx_append
+    
+    if [[ -f /tmp/v2bx_append && -s /tmp/v2bx_append ]]; then
+        chmod +x /tmp/v2bx_append
+        bash /tmp/v2bx_append
+        rm -f /tmp/v2bx_append
+    else
+        echo -e "${red}错误：无法连接到您的云端 xmm3 存储地址！${plain}"
+    fi
+}
+
 self_install_core() {
     echo -e "${yellow}正在准备部署麦卖云后端核心组件...${plain}"
     
-    # 交互式选择资源护卫限额策略
     echo -e "\n${cyan}====== 🛡️ 资源护卫限制策略选择 ======${plain}"
     echo -e "  ${green}1.${plain} 原生态无锁版 (满血狂飙，适合高配小鸡或大流量节点)"
     echo -e "  ${green}2.${plain} 标准防爆锁 (128M 内存锁 + 40% CPU 压制，推荐普通小鸡)"
@@ -213,7 +231,6 @@ self_install_core() {
         [[ -z "$cpu_limit" ]] && cpu_limit=40
     fi
 
-    # 物理清除旧托管与僵尸进程
     manage_service stop
     manage_service disable
     killall -9 V2bX >/dev/null 2>&1
@@ -290,7 +307,6 @@ self_install_core() {
         sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json 2>/dev/null
     fi
 
-    # 🌟 核心修改：维持全透明 standard 输出（确保可以查看报错），拒绝盲人运维
     if [ -d /etc/systemd/system ]; then
         cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
@@ -367,15 +383,9 @@ EOF
     fi
 }
 
-make_advanced_modules() {
-    echo -e "\n${yellow}========== 进阶：高级外部功能矩阵配置生成器 ==========${plain}"
-    echo -e "${green}[成功] 模块组装完成！${plain}"
-}
-
 install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
 update_shell() { curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0; }
 
-# 🌟 关键修改：直接链接运行你在 GitHub 的独立百万连接脚本
 open_ports() { 
     echo -e "${cyan}正在拉取并运行 GitHub 独立高并发连接数解锁模块...${plain}"
     local remote_link_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/lianjie"
@@ -394,7 +404,6 @@ open_ports() {
 
 run_clean_script() { echo -e "${yellow}警告：此操作可能导致 I/O 拥堵。${plain}"; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}缓存强制下发完毕${plain}" ; }
 
-# 🌟 优化后的选项 18：调用 GitHub 云端通用日志净化高防爆强控引擎
 run_deep_log_clean() {
     echo -e "${cyan}正在拉取并呼叫 GitHub 独立日志防爆强控引擎...${plain}"
     local remote_clean_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bXclean"
@@ -421,7 +430,6 @@ process_run() {
     3) 
         manage_service stop
         manage_service disable
-        # 物理深度卸载：连同老配置与新云端文件的定时钩子一同摧毁
         rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service /etc/init.d/V2bX \
                /var/log/v2bx*.log /var/log/V2bX*.log /var/log/v2bx*.err /var/log/V2bX*.err \
                /etc/logrotate.d/v2bx_anti_explode /etc/logrotate.d/v2bx_all /etc/cron.hourly/v2bx_cleaner
@@ -436,7 +444,7 @@ process_run() {
     9) manage_service enable ;; 
     10) manage_service disable ;; 
     11) make_full_config ;; 
-    12) make_advanced_modules ;; 
+    12) append_existing_config ;;  # 🌟 成功指向您在 GitHub 建立的 xmm3 增量追加模块
     13) /usr/local/V2bX/V2bX x25519 ;;
     14) update_shell ;; 
     15) install_bbr ;; 
