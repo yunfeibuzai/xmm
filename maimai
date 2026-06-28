@@ -213,7 +213,7 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
 --------------------------------------------
 ${magenta}[🌟 核心战力配置向导群]${plain}
   ${green}11.${plain} 🌟 纯净向导式配置创建逻辑 (全新覆盖)
-  ${green}12.${plain} 📁 在原有配置上继续添加配置 (xmm3 增量追加)
+  ${green}12.${plain} 📁 在原有配置新增配置
   ${green}13.${plain} 生成 X25519 密钥 (Reality 必备)
   ${green}14.${plain} 升级本维护脚本
 --------------------------------------------
@@ -223,8 +223,9 @@ ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}17.${plain} 【危险】强制释放系统缓存 (不建议频繁使用)
   ${green}18.${plain} 彻底清空各种顽固大日志 + 开启全局日志轮转硬控 (推荐)
   ${green}19.${plain} 查看小鸡全套硬件看板
-  ${green}20.${plain} 🔍 查看 CF 隧道实时日志 (排查超时) 
-  ${green}21.${plain} 彻底退出脚本
+  ${green}20.${plain} 将现有cdn节点改为cf隧道
+  ${green}21.${plain} 🔍 查看隧道日志 (排查超时) 
+  ${green}22.${plain} 彻底退出脚本
 --------------------------------------------
 EOF
 )
@@ -249,7 +250,7 @@ make_full_config() {
 }
 
 append_existing_config() {
-    echo -e "${cyan}正在拉取追加配置向导引擎 (xmm3)...${plain}"
+    echo -e "${cyan}正在拉取追加配置向导引擎...${plain}"
     local remote_append_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm3"
     local proxy_append_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm3"
     
@@ -484,8 +485,26 @@ run_deep_log_clean() {
     fi
 }
 
+convert_to_cf_tunnel() {
+    echo -e "${cyan}正在拉取并运行 CF 隧道转换模块...${plain}"
+    local remote_cf_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cf"
+    local proxy_cf_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cf"
+    
+    wget -O /tmp/v2bx_cf "$proxy_cf_url" --timeout=12 2>/dev/null || \
+    wget -O /tmp/v2bx_cf "$remote_cf_url" --timeout=12 2>/dev/null || \
+    curl -sL "$remote_cf_url" -o /tmp/v2bx_cf
+    
+    if [[ -f /tmp/v2bx_cf && -s /tmp/v2bx_cf ]]; then
+        chmod +x /tmp/v2bx_cf
+        bash /tmp/v2bx_cf
+        rm -f /tmp/v2bx_cf
+    else
+        echo -e "${red}错误：无法连接到云端仓库拉取 CF 隧道模块！${plain}"
+    fi
+}
+
 process_run() {
-    local num; read -rp "请输入选择 [0-21]: " num
+    local num; read -rp "请输入选择 [0-22]: " num
     case "$num" in
     0) nano /etc/V2bX/config.json && manage_service restart ;; 
     1|2) self_install_core ;; 
@@ -514,8 +533,9 @@ process_run() {
     17) run_clean_script ;; 
     18) run_deep_log_clean ;;
     19) uptime && free -m && df -h ;; 
-    20) view_cf_tunnel_logs ;; # 🌟 新增的看隧道日志功能
-    21) exit 0 ;; 
+    20) convert_to_cf_tunnel ;;
+    21) view_cf_tunnel_logs ;; 
+    22) exit 0 ;; 
     *) echo -e "${red}未知序号${plain}" ;;
     esac
 }
