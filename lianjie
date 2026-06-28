@@ -1,209 +1,174 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # =========================================================================
-#  Project:   Linux Mega-Concurrency TCP Optimizer (Enterprise Edition)
-#  Function:  全自动自适应解锁百万级并发，深度调优内核网络、缓冲区与 智能架构BBR识别
-#  Platform:  CentOS / RHEL / Debian / Ubuntu / Alpine / Rocky / Alma
-#  Arch:      Systemd & OpenRC / 智能识别 KVM 自定义BBR与非KVM环境自适应
+#  Repository:  https://github.com/your-username/linux-tcp-optimizer
+#  Project:     Linux Mega-Concurrency TCP Optimizer (C10M Edition)
+#  Description: 突破 Linux 默认内核限制，全自动自适应解锁千万级并发 (C10M)。
+#               完美兼容 LXC/OpenVZ/Docker 容器环境，智能识别只读内核与母鸡限制。
+#  License:     MIT
 # =========================================================================
 
-# 字体颜色定义
-red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
+# --- [ 1. 基础设置与 UI 组件 ] ---
+RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; PLAIN='\033[0m'
 
-# 检查 root 权限
-[[ $EUID -ne 0 ]] && echo -e "${red}Error:${plain} 必须使用 root 用户或 sudo 运行此脚本！\n" && exit 1
+msg_info() { echo -e "${CYAN}[INFO] $1${PLAIN}"; }
+msg_succ() { echo -e "${GREEN}[ OK ] $1${PLAIN}"; }
+msg_warn() { echo -e "${YELLOW}[WARN] $1${PLAIN}"; }
+msg_err()  { echo -e "${RED}[ERR ] $1${PLAIN}"; }
 
-echo -e "${yellow}====================================================${plain}"
-echo -e "${cyan}    开始注入 [百万级上限 + BBR自适应] 极端高并发内核优化   ${plain}"
-echo -e "${yellow}====================================================${plain}"
+if [[ $EUID -ne 0 ]]; then
+    msg_err "必须使用 root 用户或 sudo 运行此脚本！\n"
+    exit 1
+fi
 
-# -------------------------------------------------------------------------
-# 0. 环境与虚拟化架构识别 (智能精准判定)
-# -------------------------------------------------------------------------
+clear
+echo -e "${YELLOW}=====================================================================${PLAIN}"
+echo -e "${CYAN}      🚀 Linux TCP C10M Optimizer - 千万级极端高并发内核注入      ${PLAIN}"
+echo -e "${YELLOW}=====================================================================${PLAIN}"
+
+# --- [ 2. 环境与架构智能检测 (LXC 精准判定) ] ---
 IS_CONTAINER=false
 VIRT_TYPE="unknown"
 
+# 探测容器特征
 if [ -f /proc/1/environ ] && grep -qa container= /proc/1/environ; then
-    IS_CONTAINER=true
-    VIRT_TYPE="container"
+    IS_CONTAINER=true; VIRT_TYPE="container"
 elif command -v systemd-detect-virt &>/dev/null; then
     VIRT_TYPE=$(systemd-detect-virt 2>/dev/null)
-    if [ "$VIRT_TYPE" = "lxc" ] || [ "$VIRT_TYPE" = "openvz" ] || [ "$VIRT_TYPE" = "docker" ]; then
-        IS_CONTAINER=true
-    fi
+    [[ "$VIRT_TYPE" =~ (lxc|openvz|docker|wsl) ]] && IS_CONTAINER=true
 fi
 
-# 如果 systemd-detect-virt 没查出来，尝试通过 dmesg 或 openvz 特征二次核对
-if [ "$VIRT_TYPE" = "unknown" ]; then
+# 兜底检测
+if [ "$VIRT_TYPE" = "unknown" ] || [ -z "$VIRT_TYPE" ]; then
     if [ -d /proc/vz ]; then
-        IS_CONTAINER=true
-        VIRT_TYPE="openvz"
+        IS_CONTAINER=true; VIRT_TYPE="openvz"
     elif grep -iq "kvm" /proc/cpuinfo 2>/dev/null || dmesg 2>/dev/null | grep -iq "kvm"; then
         VIRT_TYPE="kvm"
     fi
 fi
 
-# 预先尝试加载连接跟踪模块
-modprobe nf_conntrack 2>/dev/null
+msg_info "底层架构扫描完成: [${VIRT_TYPE^^}] | 容器沙盒环境: ${IS_CONTAINER}"
 
-# -------------------------------------------------------------------------
-# 1. 放行全局端口 (网络净化)
-# -------------------------------------------------------------------------
-echo -e "${yellow}[1/6] 正在配置防火墙，放行所有网络端口...${plain}"
-if command -v iptables &>/dev/null; then
-    iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -F 2>/dev/null
-    echo -e "${green}[+] Iptables 规则已清空并设置为全局放行${plain}"
-else
-    echo -e "${cyan}[i] 未检测到 iptables，略过此步${plain}"
+# 仅在非容器环境下尝试加载内核模块 (容器无权加载模块)
+if [ "$IS_CONTAINER" = false ]; then
+    modprobe nf_conntrack 2>/dev/null
+    modprobe tcp_bbr 2>/dev/null
 fi
 
-# -------------------------------------------------------------------------
-# 2. 解锁系统最大文件打开数 (ulimit) 到 1,048,576
-# -------------------------------------------------------------------------
-echo -e "${yellow}[2/6] 正在提升系统最大文件打开数 (ulimit) 至百万级...${plain}"
-ulimit -n 1048576 2>/dev/null
+# --- [ 3. 动态探测并发上限 (防 LXC 报错机制) ] ---
+TARGET_FILES="10485760"
+MAX_SYS_FILES="65535000"
+MAX_CONNTRACK="10485760"
+
+if ! ulimit -n ${TARGET_FILES} 2>/dev/null; then
+    # 如果设置失败，说明被 LXC 母鸡硬锁限制，获取当前允许的绝对最大值
+    ACTUAL_MAX=$(ulimit -Hn 2>/dev/null)
+    if [ -n "$ACTUAL_MAX" ] && [ "$ACTUAL_MAX" != "unlimited" ]; then
+        TARGET_FILES="$ACTUAL_MAX"
+        msg_warn "检测到 LXC/母鸡 进程硬锁！最大文件描述符自动自适应降级至: ${TARGET_FILES}"
+    fi
+else
+    msg_succ "成功突破单进程千万级上限: ${TARGET_FILES}"
+fi
+
+# --- [ 4. 解锁系统与服务并发上限 ] ---
+msg_info "正在固化 ulimit 与 Systemd 进程限制..."
 
 if [ -d "/etc/security" ]; then
-    sed -i '/nofile/d' /etc/security/limits.conf 2>/dev/null
-    cat << 'LIMITS' >> /etc/security/limits.conf
-* soft nofile 1048576
-* hard nofile 1048576
-root soft nofile 1048576
-root hard nofile 1048576
-LIMITS
-    echo -e "${green}[+] /etc/security/limits.conf 静态配置已固化${plain}"
+    mkdir -p /etc/security/limits.d
+    cat << EOF > /etc/security/limits.d/99-megaconcurrency.conf
+* soft nofile ${TARGET_FILES}
+* hard nofile ${TARGET_FILES}
+root soft nofile ${TARGET_FILES}
+root hard nofile ${TARGET_FILES}
+EOF
 fi
 
-# -------------------------------------------------------------------------
-# 3. 规范化解锁 Systemd 全局默认进程限制 (使用 drop-in 目录)
-# -------------------------------------------------------------------------
-if [ -d "/etc/systemd" ]; then
-    echo -e "${yellow}[3/6] 检测到 Systemd 环境，正在规范化注入服务限制...${plain}"
-    mkdir -p /etc/systemd/system.conf.d /etc/systemd/user.conf.d 2>/dev/null
-    
-    echo -e "[Manager]\nDefaultLimitNOFILE=1048576" > /etc/systemd/system.conf.d/99-limits.conf
-    echo -e "[Manager]\nDefaultLimitNOFILE=1048576" > /etc/systemd/user.conf.d/99-limits.conf
-    
+if [ -d "/etc/systemd" ] && command -v systemctl &>/dev/null; then
+    mkdir -p /etc/systemd/system.conf.d /etc/systemd/user.conf.d
+    echo -e "[Manager]\nDefaultLimitNOFILE=${TARGET_FILES}:${TARGET_FILES}" > /etc/systemd/system.conf.d/99-limits.conf
+    echo -e "[Manager]\nDefaultLimitNOFILE=${TARGET_FILES}:${TARGET_FILES}" > /etc/systemd/user.conf.d/99-limits.conf
     systemctl daemon-reload >/dev/null 2>&1
-    echo -e "${green}[+] Systemd 配置目录已注入独立限制文件并重载${plain}"
 fi
 
-# -------------------------------------------------------------------------
-# 4. 固化到 Shell 环境变量
-# -------------------------------------------------------------------------
-echo -e "${yellow}[4/6] 正在将限制写入 Shell 环境变量...${plain}"
-for file in /etc/profile /root/.profile /root/.bashrc; do
-    if [ -f "$file" ]; then
-        sed -i '/ulimit -n/d' "$file" 2>/dev/null
-        echo "ulimit -n 1048576" >> "$file"
-    fi
-done
-
-if [ -f /etc/alpine-release ] || command -v apk &>/dev/null; then
-    if [ -d "/etc/conf.d" ] && [ -f "/etc/rc.conf" ]; then
-        sed -i '/rc_ulimit/d' /etc/rc.conf 2>/dev/null
-        echo 'rc_ulimit="-n 1048576"' >> /etc/rc.conf 2>/dev/null
-    fi
-    echo -e "${cyan}[+] Alpine/LXC 环境已额外解除 OpenRC 进程锁${plain}"
+if [ -d "/etc/profile.d" ]; then
+    echo "ulimit -n ${TARGET_FILES} 2>/dev/null" > /etc/profile.d/99-megaconcurrency.sh
+else
+    grep -q "ulimit -n" /etc/profile || echo "ulimit -n ${TARGET_FILES} 2>/dev/null" >> /etc/profile
 fi
 
-# -------------------------------------------------------------------------
-# 5. 激进式内核网络参数调优 (扩充并发队列与缓冲区)
-# -------------------------------------------------------------------------
-echo -e "${yellow}[5/6] 正在向内核注入高级 TCP 吞吐与抗并发参数...${plain}"
-SYSCTL_CONF="/etc/sysctl.conf"
-[ -d "/etc/sysctl.d" ] && SYSCTL_CONF="/etc/sysctl.d/99-super-network.conf"
+# --- [ 5. 激进内核网络调优 (LXC 读写分离过滤) ] ---
+msg_info "正在注入内核网络参数 (自适应过滤只读选项)..."
+SYSCTL_CONF="/etc/sysctl.d/99-c10m-network.conf"
+mkdir -p /etc/sysctl.d 2>/dev/null
+> "$SYSCTL_CONF" # 清空/创建配置文件
 
-rm -f /etc/sysctl.d/99-super-network.conf 2>/dev/null
+# 定义参数注入函数，带有容错检测
+inject_sysctl() {
+    local key="$1"
+    local value="$2"
+    # 尝试在当前环境试运行写入 (过滤只读报错)
+    if sysctl -w "${key}=${value}" >/dev/null 2>&1; then
+        echo "${key} = ${value}" >> "$SYSCTL_CONF"
+    fi
+}
 
-cat << 'SYS' > "$SYSCTL_CONF"
-# 开源核心调优：必须先解锁内核级别的总线最大文件描述符上限
-fs.file-max = 2097152
-fs.nr_open = 1048576
+# --- 注入系统级参数 (容器下大概率被过滤，静默处理) ---
+inject_sysctl "fs.file-max" "${MAX_SYS_FILES}"
+inject_sysctl "fs.nr_open" "${TARGET_FILES}"
 
-# 极大化本地可用端口范围，防止高并发下端口耗尽
-net.ipv4.ip_local_port_range = 1024 65535
+# --- 注入网络并发与缓冲区参数 ---
+inject_sysctl "net.ipv4.ip_local_port_range" "1024 65535"
+inject_sysctl "net.core.somaxconn" "1048576"
+inject_sysctl "net.ipv4.tcp_max_syn_backlog" "1048576"
+inject_sysctl "net.ipv4.tcp_max_tw_buckets" "2097152"
+inject_sysctl "net.core.netdev_max_backlog" "1048576"
 
-# 极大化高并发连接队列与半连接队列大小 (防止请求被直接拒绝)
-net.core.somaxconn = 262144
-net.ipv4.tcp_max_syn_backlog = 262144
-net.ipv4.tcp_max_tw_buckets = 524288
+inject_sysctl "net.ipv4.tcp_tw_reuse" "1"
+inject_sysctl "net.ipv4.tcp_fin_timeout" "15"
+inject_sysctl "net.ipv4.tcp_syncookies" "1"
 
-# 开启快速回收与 TCP 端口复用
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 15
+inject_sysctl "net.netfilter.nf_conntrack_max" "${MAX_CONNTRACK}"
+inject_sysctl "net.nf_conntrack_max" "${MAX_CONNTRACK}"
 
-# 极大化网络连接跟踪表上限
-net.netfilter.nf_conntrack_max = 2097152
-net.nf_conntrack_max = 2097152
+inject_sysctl "net.core.rmem_max" "67108864"
+inject_sysctl "net.core.wmem_max" "67108864"
+inject_sysctl "net.ipv4.tcp_rmem" "4096 87380 67108864"
+inject_sysctl "net.ipv4.tcp_wmem" "4096 65536 67108864"
+inject_sysctl "net.ipv4.tcp_window_scaling" "1"
+inject_sysctl "net.ipv4.tcp_fastopen" "3"
 
-# 极端高带宽/高并发内核缓冲区调优 (最大支持到 32MB 动态缓冲区)
-net.core.rmem_max = 33554432
-net.core.wmem_max = 33554432
-net.ipv4.tcp_rmem = 4096 87380 33554432
-net.ipv4.tcp_wmem = 4096 65536 33554432
+# --- [ 6. 智能 BBR 拥塞控制自适应 (LXC 透传检测) ] ---
+msg_info "正在探测最优 TCP 拥塞控制算法..."
 
-# 启用 TCP 窗口缩放
-net.ipv4.tcp_window_scaling = 1
-
-# 开启 TCP Fast Open
-net.ipv4.tcp_fastopen = 3
-SYS
-
-# -------------------------------------------------------------------------
-# 6. 核心优化：智能拥塞控制算法自适应策略 (根据你的要求量身定制)
-# -------------------------------------------------------------------------
-echo -e "${yellow}[6/6] 正在智能匹配最强 TCP 拥塞控制算法...${plain}"
-
-# 提取当前系统正在生效的算法，判定用户是否魔改过
+# 探测当前内核支持的算法
+AVAILABLE_CC=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
 CURRENT_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
 
-if [ "$VIRT_TYPE" = "kvm" ] || [ "$VIRT_TYPE" = "bhyve" ]; then
-    echo -e "${green}[+] 识别到当前为标准核心 KVM 架构${plain}"
-    
-    # 检查用户当前是否已经在使用某种 BBR (包含原版、plus、魔改等)
+if echo "$AVAILABLE_CC" | grep -qi "bbr"; then
+    msg_succ "检测到内核支持 BBR (母鸡已开启透传)，正在激活..."
+    inject_sysctl "net.core.default_qdisc" "fq"
+    inject_sysctl "net.ipv4.tcp_congestion_control" "bbr"
+else
+    # 针对已魔改 BBR (如 bbr_plus) 的检测
     if echo "$CURRENT_CC" | grep -qi "bbr"; then
-        echo -e "${green}[+] 检测到用户已预设自定义 BBR 变体算法 [${CURRENT_CC}]，脚本将自动保留不作覆盖调换！${plain}"
-        echo "net.ipv4.tcp_congestion_control = ${CURRENT_CC}" >> "$SYSCTL_CONF"
-        # 挂载高性能公平队列
-        if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then
-            echo "net.core.default_qdisc = fq" >> "$SYSCTL_CONF"
-        fi
+         msg_succ "检测到运行中的自定义 BBR 变体: [${CURRENT_CC}]"
+         inject_sysctl "net.ipv4.tcp_congestion_control" "${CURRENT_CC}"
     else
-        # 如果是 KVM 但用户没装 BBR，我们帮他开启官方原生标准 BBR
-        if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "bbr"; then
-            cat << 'BBR' >> "$SYSCTL_CONF"
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-BBR
-            echo -e "${green}[+] 检测到内核支持，已帮此 KVM 节点激活官方原生 BBR 加速 + FQ 队列${plain}"
-        else
-            echo "net.ipv4.tcp_congestion_control = cubic" >> "$SYSCTL_CONF"
-            echo -e "${cyan}[i] 该 KVM 内核较老且不支持 BBR，自动降级为 Cubic 算法${plain}"
-        fi
+         msg_warn "当前环境不支持 BBR，已自适应锁定为 Cubic 稳定算法。"
+         inject_sysctl "net.ipv4.tcp_congestion_control" "cubic"
     fi
-else
-    # 非 KVM 架构 (如 LXC、OpenVZ、Container 或者已识别为非KVM的未知架构)
-    echo -e "${yellow}[i] 当前虚拟化架构为: [${VIRT_TYPE}] (非KVM或受限容器环境)${plain}"
-    echo -e "${cyan}[+] 遵照防爆安全规则，强制降级并默认锁定最稳定的 Cubic 高并发抗丢包算法${plain}"
-    echo "net.ipv4.tcp_congestion_control = cubic" >> "$SYSCTL_CONF"
 fi
 
-# 统一动态生效
-if [ -d "/etc/sysctl.d" ]; then
-    sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCONF" >/dev/null 2>&1
-else
-    sysctl -p >/dev/null 2>&1
-fi
+# 最终持久化应用
+sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1
+msg_succ "自适应网络调优参数已注入完成。"
 
-echo -e "${green}[+] 内核网络参数已成功应用到当前系统${plain}"
-
-# -------------------------------------------------------------------------
-# 结束提示 (修复了原先多余的 \033 和 -v 传帮漏洞)
-# -------------------------------------------------------------------------
-echo -e "\n${green}====================================================${plain}"
-echo -e "${green}   ✅ 【百万级高并发】超级永久网络优化彻底完成！      ${plain}"
-echo -e "${green}====================================================${plain}"
-echo -e "${yellow}💡 提示：由于当前会话的文件描述符限制已在后台修改，${plain}"
-echo -e "${yellow}   请断开当前的 SSH 终端并重新连接，即可完全刷新生效。${plain}"
-echo -e "${yellow}   重新连接后可输入 'ulimit -n' 验证，数值应为 1048576。${plain}\n"
+# --- [ 7. 结束提示 ] ---
+echo -e "\n${GREEN}=====================================================================${PLAIN}"
+echo -e "${GREEN}   ✅ 【C10M 千万级并发】极致网络底层优化已彻底完成！      ${PLAIN}"
+echo -e "${GREEN}=====================================================================${PLAIN}"
+echo -e "${YELLOW} 💡 环境验证指南：${PLAIN}"
+echo -e "${CYAN} 1. 请务必【断开当前 SSH 并重新连接】以刷新缓存。${PLAIN}"
+echo -e "${CYAN} 2. 重新连接后，输入命令 ${YELLOW}ulimit -n${CYAN} 进行验证。${PLAIN}"
+echo -e "${CYAN} 3. 当前系统已根据 [${VIRT_TYPE^^}] 架构自动过滤了无权写入的只读参数。${PLAIN}\n"
