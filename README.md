@@ -27,8 +27,3 @@
 ### 选项 A：使用 wget 安装（推荐）
 ```bash
 wget -N [https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai](https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai) && bash maimai
-
-选项 B：使用 curl 安装
-
-bash <(curl -fsSL [https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai](https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai))
-
