@@ -52,27 +52,31 @@ if [ "$IS_CONTAINER" = false ]; then
     modprobe tcp_bbr 2>/dev/null
 fi
 
-# --- [ 3. 强行尝试扩容内核总线铁闸 (修复核心) ] ---
+# --- [ 3. 强行尝试扩容内核总线铁闸 ] ---
 TARGET_FILES="10485760"
 MAX_SYS_FILES="65535000"
 MAX_CONNTRACK="10485760"
 
-# 在检测 ulimit 之前，必须先尝试把内核的硬顶推高
+# 在检测 ulimit 之前，必须先一步将内核全局描述符上限推高
 if [ "$IS_CONTAINER" = false ]; then
     sysctl -w fs.file-max=${MAX_SYS_FILES} >/dev/null 2>&1
     sysctl -w fs.nr_open=${TARGET_FILES} >/dev/null 2>&1
 fi
 
-# --- [ 4. 动态探测并发上限 ] ---
-if ! ulimit -n ${TARGET_FILES} 2>/dev/null; then
-    # 如果推高了内核还是设置失败，说明确实存在外部虚拟化硬锁（如 LXC 母鸡限制）
+# --- [ 4. 动态探测并发上限 (修复硬锁判定逻辑) ] ---
+# 显式分开设置硬限制(-H)与软限制(-S)，防止部分系统 Shell 产生逻辑截断
+if ulimit -Hn ${TARGET_FILES} 2>/dev/null && ulimit -Sn ${TARGET_FILES} 2>/dev/null; then
+    msg_succ "成功突破单进程千万级上限: ${TARGET_FILES}"
+else
+    # 只有显式设置硬限制失败，才证明真正遭遇了外部不可抗力（如受限的 LXC 母鸡）
     ACTUAL_MAX=$(ulimit -Hn 2>/dev/null)
     if [ -n "$ACTUAL_MAX" ] && [ "$ACTUAL_MAX" != "unlimited" ]; then
         TARGET_FILES="$ACTUAL_MAX"
         msg_warn "检测到环境进程硬锁！最大文件描述符自动自适应降级至: ${TARGET_FILES}"
+        # 降级后同步更新当前会话限制
+        ulimit -Hn ${TARGET_FILES} 2>/dev/null
+        ulimit -Sn ${TARGET_FILES} 2>/dev/null
     fi
-else
-    msg_succ "成功突破单进程千万级上限: ${TARGET_FILES}"
 fi
 
 # --- [ 5. 解锁系统与服务并发上限 ] ---
@@ -101,7 +105,7 @@ else
     grep -q "ulimit -n" /etc/profile || echo "ulimit -n ${TARGET_FILES} 2>/dev/null" >> /etc/profile
 fi
 
-# --- [ 6. 激进内核网络调优 (自适应静默过滤) ] ---
+# --- [ 6. 激进内核网络调优 ] ---
 msg_info "正在注入内核网络参数..."
 SYSCTL_CONF="/etc/sysctl.d/99-c10m-network.conf"
 mkdir -p /etc/sysctl.d 2>/dev/null
