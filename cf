@@ -1,0 +1,49 @@
+#!/bin/bash
+# 模块：部署 CF 隧道
+red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
+
+echo -e "${cyan}====== 🛠️ Cloudflare Argo Tunnel 部署向导 ======${plain}"
+if ! command -v cloudflared &> /dev/null; then
+    wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+    chmod +x /usr/local/bin/cloudflared
+fi
+
+if [ ! -f ~/.cloudflared/cert.pem ]; then cloudflared tunnel login; fi
+
+read -rp "输入隧道名称 (如 node1): " tunnel_name
+cloudflared tunnel create "$tunnel_name"
+tunnel_id=$(cloudflared tunnel list | grep -w "$tunnel_name" | awk '{print $1}')
+
+read -rp "绑定 CF 域名: " cf_domain
+cloudflared tunnel route dns "$tunnel_name" "$cf_domain"
+
+read -rp "本地端口 (默认 20026): " local_port
+local_port=${local_port:-20026}
+read -rp "是否开启 TLS? (y/n, 默认 n): " use_tls
+
+proto="http"
+[[ "$use_tls" =~ [yY] ]] && proto="https"
+
+mkdir -p /etc/cloudflared
+config_path="/etc/cloudflared/${tunnel_name}.yml"
+
+cat <<EOF > "$config_path"
+tunnel: $tunnel_id
+credentials-file: /root/.cloudflared/${tunnel_id}.json
+ingress:
+  - hostname: $cf_domain
+    service: ${proto}://localhost:${local_port}
+EOF
+
+if [[ "$proto" == "https" ]]; then
+    cat <<EOF >> "$config_path"
+    originRequest:
+      originServerName: $cf_domain
+      noTLSVerify: true
+EOF
+fi
+echo "  - service: http_status:404" >> "$config_path"
+
+# 注册服务 (省略具体 systemd 逻辑，同你主脚本)
+systemctl restart "cf-${tunnel_name}"
+echo -e "${green}✅ 隧道 ${tunnel_name} 部署完成！${plain}"
