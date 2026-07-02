@@ -1,25 +1,43 @@
 #!/bin/bash
-# 模块：部署 CF 隧道
+# 模块：部署 CF 隧道 (针对既有 VLESS+TLS 节点优化版)
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
 
 echo -e "${cyan}====== 🛠️ Cloudflare Argo Tunnel 部署向导 ======${plain}"
+
+# 1. 架构自适应（防止如果是 ARM 架构 VPS 报错，如果是 AMD64 会自动下载 amd64）
 if ! command -v cloudflared &> /dev/null; then
-    wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64) cf_arch="amd64" ;;
+        aarch64|arm64) cf_arch="arm64" ;;
+        *) echo -e "${red}不支持的架构: $arch${plain}"; exit 1 ;;
+    esac
+    wget -qO /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"
     chmod +x /usr/local/bin/cloudflared
 fi
 
 if [ ! -f ~/.cloudflared/cert.pem ]; then cloudflared tunnel login; fi
 
 read -rp "输入隧道名称 (如 node1): " tunnel_name
-cloudflared tunnel create "$tunnel_name"
-tunnel_id=$(cloudflared tunnel list | grep -w "$tunnel_name" | awk '{print $1}')
+
+# 2. 幂等性优化：如果隧道已存在，直接获取 ID，不报重复创建的错误
+tunnel_id=$(cloudflared tunnel list 2>/dev/null | awk -v name="$tunnel_name" '$2 == name {print $1}')
+if [ -z "$tunnel_id" ]; then
+    cloudflared tunnel create "$tunnel_name"
+    tunnel_id=$(cloudflared tunnel list | grep -w "$tunnel_name" | awk '{print $1}')
+else
+    echo -e "${green}检测到同名隧道已存在，直接复用 ID: ${tunnel_id}${plain}"
+fi
 
 read -rp "绑定 CF 域名: " cf_domain
 cloudflared tunnel route dns "$tunnel_name" "$cf_domain"
 
 read -rp "本地端口 (默认 20026): " local_port
 local_port=${local_port:-20026}
-read -rp "是否开启 TLS? (y/n, 默认 n): " use_tls
+
+# 3. 协议逻辑：既然你已经是 VLESS TLS 节点，这里强制或默认走 HTTPS 转发
+read -rp "是否开启 TLS? (y/n, 默认 y - 你的原有节点是TLS则必须选y): " use_tls
+use_tls=${use_tls:-y}
 
 proto="http"
 [[ "$use_tls" =~ [yY] ]] && proto="https"
@@ -27,6 +45,7 @@ proto="http"
 mkdir -p /etc/cloudflared
 config_path="/etc/cloudflared/${tunnel_name}.yml"
 
+# 4. 修复 YAML 写入：所有内容靠左置顶，规避 Bash 缩进带来的 YAML 格式崩溃风险
 cat <<EOF > "$config_path"
 tunnel: $tunnel_id
 credentials-file: /root/.cloudflared/${tunnel_id}.json
@@ -36,14 +55,38 @@ ingress:
 EOF
 
 if [[ "$proto" == "https" ]]; then
-    cat <<EOF >> "$config_path"
+# 注意：这里的 originRequest 必须和上面 service 的靠左严格对齐
+cat <<EOF >> "$config_path"
     originRequest:
       originServerName: $cf_domain
       noTLSVerify: true
 EOF
 fi
+
 echo "  - service: http_status:404" >> "$config_path"
 
-# 注册服务 (省略具体 systemd 逻辑，同你主脚本)
+# 5. 补全 Systemd 逻辑并注入核心速度优化参数 (--protocol http2)
+cat <<EOF > "/etc/systemd/system/cf-${tunnel_name}.service"
+[Unit]
+Description=Cloudflare Argo Tunnel (${tunnel_name})
+After=network.target
+
+[Service]
+Type=simple
+User=root
+# 🌟 关键提速改动：强制指定 --protocol http2，彻底解决 VLESS TLS 走默认 QUIC 被限速变慢的问题
+ExecStart=/usr/local/bin/cloudflared tunnel --protocol http2 --config ${config_path} run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable "cf-${tunnel_name}" >/dev/null 2>&1
 systemctl restart "cf-${tunnel_name}"
+
 echo -e "${green}✅ 隧道 ${tunnel_name} 部署完成！${plain}"
+echo -e "💡 记得在机场面板中把连接地址（Server）改为优选域名：${cyan}xmmcf.130209.xyz${plain}"
+echo -e "💡 节点的 Host / SNI 填入你刚才绑定的域名：${cyan}${cf_domain}${plain}"
