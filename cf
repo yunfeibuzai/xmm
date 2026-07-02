@@ -1,10 +1,17 @@
 #!/bin/bash
-# 模块：部署 CF 隧道 (针对既有 VLESS+TLS 节点优化版)
+# 模块：部署 CF 隧道 (针对既有 VLESS+TLS 节点优化版 - 完美兼容 Systemd 与 Alpine OpenRC)
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
 
 echo -e "${cyan}====== 🛠️ Cloudflare Argo Tunnel 部署向导 ======${plain}"
 
-# 1. 架构自适应（防止如果是 ARM 架构 VPS 报错，如果是 AMD64 会自动下载 amd64）
+# 0. Alpine 环境依赖预检 (针对 Alpine 极度精简环境的专项补全)
+if [ -f /etc/alpine-release ]; then
+    echo -e "${yellow}检测到 Alpine Linux，正在静默安装必备依赖组件...${plain}"
+    # 补齐 ca-certificates (让 wget 支持 HTTPS), gawk (增强文本处理能力), libc6-compat (提供基础二进制兼容)
+    apk add --no-cache wget ca-certificates gawk libc6-compat >/dev/null 2>&1
+fi
+
+# 1. 架构自适应
 if ! command -v cloudflared &> /dev/null; then
     arch=$(uname -m)
     case "$arch" in
@@ -20,7 +27,7 @@ if [ ! -f ~/.cloudflared/cert.pem ]; then cloudflared tunnel login; fi
 
 read -rp "输入隧道名称 (如 node1): " tunnel_name
 
-# 2. 幂等性优化：如果隧道已存在，直接获取 ID，不报重复创建的错误
+# 2. 幂等性优化
 tunnel_id=$(cloudflared tunnel list 2>/dev/null | awk -v name="$tunnel_name" '$2 == name {print $1}')
 if [ -z "$tunnel_id" ]; then
     cloudflared tunnel create "$tunnel_name"
@@ -35,7 +42,7 @@ cloudflared tunnel route dns "$tunnel_name" "$cf_domain"
 read -rp "本地端口 (默认 20026): " local_port
 local_port=${local_port:-20026}
 
-# 3. 协议逻辑：既然你已经是 VLESS TLS 节点，这里强制或默认走 HTTPS 转发
+# 3. 协议逻辑
 read -rp "是否开启 TLS? (y/n, 默认 y - 你的原有节点是TLS则必须选y): " use_tls
 use_tls=${use_tls:-y}
 
@@ -45,7 +52,7 @@ proto="http"
 mkdir -p /etc/cloudflared
 config_path="/etc/cloudflared/${tunnel_name}.yml"
 
-# 4. 修复 YAML 写入：所有内容靠左置顶，规避 Bash 缩进带来的 YAML 格式崩溃风险
+# 4. 修复原脚本 YAML 写入：强制靠左置顶，规避 Bash 缩进导致的 .yml 语法错误
 cat <<EOF > "$config_path"
 tunnel: $tunnel_id
 credentials-file: /root/.cloudflared/${tunnel_id}.json
@@ -55,18 +62,20 @@ ingress:
 EOF
 
 if [[ "$proto" == "https" ]]; then
-# 注意：这里的 originRequest 必须和上面 service 的靠左严格对齐
+# 🌟 修正点：originRequest 靠左严格对齐，确保 YAML 格式绝对标准
 cat <<EOF >> "$config_path"
-    originRequest:
-      originServerName: $cf_domain
-      noTLSVerify: true
+originRequest:
+  originServerName: $cf_domain
+  noTLSVerify: true
 EOF
 fi
 
 echo "  - service: http_status:404" >> "$config_path"
 
-# 5. 补全 Systemd 逻辑并注入核心速度优化参数 (--protocol http2)
-cat <<EOF > "/etc/systemd/system/cf-${tunnel_name}.service"
+# 5. 守护进程服务注册 (根据当前系统环境，动态选择 Systemd 或 OpenRC 框架)
+if [ -d /run/systemd/system ] || command -v systemctl &> /dev/null; then
+    echo -e "${yellow}检测到标准 Linux 环境，正在注册 Systemd 服务...${plain}"
+    cat <<EOF > "/etc/systemd/system/cf-${tunnel_name}.service"
 [Unit]
 Description=Cloudflare Argo Tunnel (${tunnel_name})
 After=network.target
@@ -74,7 +83,6 @@ After=network.target
 [Service]
 Type=simple
 User=root
-# 🌟 关键提速改动：强制指定 --protocol http2，彻底解决 VLESS TLS 走默认 QUIC 被限速变慢的问题
 ExecStart=/usr/local/bin/cloudflared tunnel --protocol http2 --config ${config_path} run
 Restart=on-failure
 RestartSec=5
@@ -82,10 +90,37 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+    systemctl daemon-reload
+    systemctl enable "cf-${tunnel_name}" >/dev/null 2>&1
+    systemctl restart "cf-${tunnel_name}"
 
-systemctl daemon-reload
-systemctl enable "cf-${tunnel_name}" >/dev/null 2>&1
-systemctl restart "cf-${tunnel_name}"
+elif [ -f /etc/alpine-release ] || command -v rc-service &> /dev/null; then
+    echo -e "${yellow}检测到 Alpine 环境，正在注册 OpenRC 服务...${plain}"
+    cat <<EOF > "/etc/init.d/cf-${tunnel_name}"
+#!/sbin/openrc-run
+
+description="Cloudflare Argo Tunnel (${tunnel_name})"
+
+command="/usr/local/bin/cloudflared"
+command_args="tunnel --protocol http2 --config ${config_path} run"
+command_background="yes"
+pidfile="/run/cf-${tunnel_name}.pid"
+output_log="/var/log/cf-${tunnel_name}.log"
+error_log="/var/log/cf-${tunnel_name}.log"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+    chmod +x "/etc/init.d/cf-${tunnel_name}"
+    rc-update add "cf-${tunnel_name}" default >/dev/null 2>&1
+    rc-service "cf-${tunnel_name}" restart
+else
+    # 兜底方案：如果两种守护系统都没找到，直接通过 nohup 挂载后台运行
+    echo -e "${red}⚠️ 未检测到标准守护进程系统，尝试通过 nohup 挂后台运行...${plain}"
+    nohup /usr/local/bin/cloudflared tunnel --protocol http2 --config ${config_path} run >/dev/null 2>&1 &
+fi
 
 echo -e "${green}✅ 隧道 ${tunnel_name} 部署完成！${plain}"
 echo -e "💡 记得在机场面板中把连接地址（Server）改为优选域名：${cyan}xmmcf.130209.xyz${plain}"
