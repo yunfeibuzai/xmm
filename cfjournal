@@ -1,0 +1,88 @@
+#!/bin/bash
+# =================================================================
+# 麦卖云 Cloudflare Argo Tunnel 独立日志诊断引擎 (修复版)
+# 支持 Systemd (Ubuntu/Debian/CentOS) 与 OpenRC (Alpine) 双模自适应
+# =================================================================
+
+# 1. 初始化标准控制台颜色变量（确保脱离主脚本后颜色不失效）
+red='\033[31m'; green='\033[32m'; yellow='\033[33m'
+magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
+
+# 权限预检
+[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
+
+# 2. 核心日志诊断引擎函数
+view_cf_tunnel_logs() {
+    echo -e "\n${cyan}====== 🔍 CF 隧道日志诊断 ======${plain}"
+    local tunnels=()
+    
+    # 动态抓取 Systemd 环境下的独立隧道
+    if command -v systemctl &>/dev/null; then
+        for f in /etc/systemd/system/cf-*.service; do
+            [[ -f "$f" ]] || continue
+            local name
+            name=$(basename "$f" | sed 's/^cf-//;s/\.service$//')
+            tunnels+=("$name")
+        done
+    # 动态抓取 OpenRC 环境下的独立隧道
+    elif command -v rc-service &>/dev/null; then
+        for f in /etc/init.d/cf-*; do
+            [[ -f "$f" ]] || continue
+            local name
+            name=$(basename "$f" | sed 's/^cf-//')
+            tunnels+=("$name")
+        done
+    fi
+
+    # 判空保护
+    if [[ ${#tunnels[@]} -eq 0 ]]; then
+        echo -e "${yellow}未检测到当前机器存在任何独立部署的 CF 隧道！${plain}"
+        return
+    fi
+
+    # 打印隧道列表
+    echo -e "${green}检测到当前机器存在以下独立隧道：${plain}"
+    local i=1
+    for t in "${tunnels[@]}"; do
+        echo -e "  ${green}${i}.${plain} 隧道名称: ${cyan}${t}${plain}"
+        ((i++))
+    done
+
+    # 读取交互输入
+    read -rp "请输入要查看日志的隧道序号 [1-${#tunnels[@]}]: " sel
+    if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#tunnels[@]} )); then
+        echo -e "${red}无效输入！${plain}"
+        return
+    fi
+
+    local target="${tunnels[$((sel-1))]}"
+    echo -e "\n${yellow}正在获取隧道 [${target}] 的最近 50 条日志...${plain}"
+    echo -e "${magenta}------------------------------------------------------${plain}"
+
+    # 3. 动态识别环境并提取日志（已修复 Alpine 匹配规则）
+    if command -v systemctl &>/dev/null; then
+        # Systemd 环境直接读取 journal 日志
+        journalctl -u "cf-${target}" -n 50 --no-pager
+    elif command -v rc-service &>/dev/null; then
+        # Alpine OpenRC 环境多路径兼容性匹配
+        if [[ -f "/var/log/cf-${target}.log" ]]; then
+            # 🌟 优先匹配最新优化的极简纯净版日志名
+            tail -n 50 "/var/log/cf-${target}.log"
+        elif [[ -f "/var/log/cf-${target}_err.log" ]]; then
+            tail -n 50 "/var/log/cf-${target}_err.log"
+        elif [[ -f "/var/log/cf-${target}_out.log" ]]; then
+            tail -n 50 "/var/log/cf-${target}_out.log"
+        else
+            echo -e "${yellow}暂无该隧道的日志文件记录。${plain}"
+        fi
+    fi
+    echo -e "${magenta}------------------------------------------------------${plain}"
+    
+    # 排错干货提示
+    echo -e "${yellow}💡 【排错提示】${plain}"
+    echo -e "1. 若看到 ${red}Failed to serve quic connection${plain}，通常是被墙或网络质量差，建议将隧道协议改为 http2。"
+    echo -e "2. 若看到 ${red}connection refused${plain}，说明小鸡上的后端核心（如 V2bX）没运行，或端口没对齐（隧道指了 20026 但配置里写了别的端口）。"
+}
+
+# 执行诊断
+view_cf_tunnel_logs
