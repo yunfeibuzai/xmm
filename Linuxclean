@@ -1,0 +1,68 @@
+#!/bin/bash
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;36m'
+PLAIN='\033[0m'
+
+# 权限检查
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}错误：请以 root 用户运行此脚本！${plain}"
+  exit 1
+fi
+
+clear
+echo -e "${GREEN}=================================================${PLAIN}"
+echo -e "${GREEN}      Linux 系统级物理内存与 Swap 深度净化引擎    ${PLAIN}"
+echo -e "${GREEN}=================================================${PLAIN}"
+
+# 1. 净化前的数据抓取
+MEM_BEFORE=$(free -m | awk '/^Mem:/{print $3}')
+CACHE_BEFORE=$(free -m | awk '/^Mem:/{print $6}')
+SWAP_BEFORE=$(free -m | awk '/^Swap:/{print $3}')
+
+echo -e "${BLUE}[1/4] 当前系统资源快照：${PLAIN}"
+echo -e "      -> 物理内存已用: ${YELLOW}${MEM_BEFORE} MB${PLAIN}"
+echo -e "      -> 系统页面缓存: ${YELLOW}${CACHE_BEFORE} MB${PLAIN}"
+echo -e "      -> Swap 交换已用: ${YELLOW}${SWAP_BEFORE} MB${PLAIN}"
+echo "-------------------------------------------------"
+
+# 2. 物理内存 Cache 净化
+echo -e "${YELLOW}[2/4] 正在将内存脏数据同步到磁盘并释页面缓存...${PLAIN}"
+# 先同步，防止数据丢失；再释放 pagecache、dentries 和 inodes
+sync && sleep 1
+echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+echo -e "${GREEN}      物理内存 Buff/Cache 净化完毕。${PLAIN}"
+
+# 3. 智能 Swap 净化 (核心优化点：不重复，且极具实用价值)
+echo -e "${YELLOW}[3/4] 正在检测并优化 Swap 交换分区...${PLAIN}"
+if [ -n "$SWAP_BEFORE" ] && [ "$SWAP_BEFORE" -gt 0 ]; then
+    MEM_AVAILABLE=$(free -m | awk '/^Mem:/{print $7}')
+    # 安全锁：只有当剩余物理内存大于 Swap 已用内存时，才触发回刷，防止 OOM
+    if [ "$MEM_AVAILABLE" -gt "$SWAP_BEFORE" ]; then
+        echo -e "${BLUE}      检测到 Swap 存在积压数据，正在安全回刷至物理内存...${PLAIN}"
+        swapoff -a && swapon -a
+        echo -e "${GREEN}      Swap 垃圾碎片深度净化完毕。${PLAIN}"
+    else
+        echo -e "${RED}      剩余物理内存不足，跳过 Swap 回刷以确保系统稳定。${PLAIN}"
+    fi
+else
+    echo -e "${GREEN}      Swap 分区很干净，无需额外回刷。${PLAIN}"
+fi
+
+# 4. 净化后的效果看板
+MEM_AFTER=$(free -m | awk '/^Mem:/{print $3}')
+CACHE_AFTER=$(free -m | awk '/^Mem:/{print $6}')
+SWAP_AFTER=$(free -m | awk '/^Swap:/{print $3}')
+
+# 计算战果
+MEM_SAVED=$((MEM_BEFORE - MEM_AFTER))
+CACHE_SAVED=$((CACHE_BEFORE - CACHE_AFTER))
+
+echo "-------------------------------------------------"
+echo -e "${GREEN}[4/4] 净化任务圆满完成！战果统计：${PLAIN}"
+echo -e "      -> 物理内存腾出: ${GREEN}${MEM_SAVED} MB${PLAIN} (当前已用: ${MEM_AFTER} MB)"
+echo -e "      -> 页面缓存释放: ${GREEN}${CACHE_SAVED} MB${PLAIN} (当前残留: ${CACHE_AFTER} MB)"
+echo -e "      -> 最终 Swap 占用: ${GREEN}${SWAP_AFTER} MB${PLAIN}"
+echo -e "${GREEN}=================================================${PLAIN}"
