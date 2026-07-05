@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="4.3.9-Modular"
+sh_ver="4.3.8-Modular"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
@@ -98,7 +98,7 @@ manage_service() {
 
 show_status() {
     local core_status="${red}未安装${plain}"
-    local guard_status="${yellow}原生态纯净版 (未限制资源)${plain}"
+    local guard_status="${yellow}未开启 (原生态无锁)${plain}"
 
     if [[ -f /usr/local/V2bX/V2bX && -s /usr/local/V2bX/V2bX ]]; then
         if command -v systemctl &>/dev/null; then
@@ -107,8 +107,8 @@ show_status() {
             else
                 core_status="${yellow}已停止${plain}"
             fi
-            if grep -q "MemoryMax" /etc/systemd/system/V2bX.service 2>/dev/null || grep -q "GOMEMLIMIT" /etc/systemd/system/V2bX.service 2>/dev/null || grep -q "CPUQuota" /etc/systemd/system/V2bX.service 2>/dev/null; then
-                guard_status="${green}资源护卫限制已激活${plain}"
+            if grep -q "MemoryMax" /etc/systemd/system/V2bX.service 2>/dev/null || grep -q "GOMEMLIMIT" /etc/systemd/system/V2bX.service 2>/dev/null; then
+                guard_status="${green}内核级防爆已开启${plain}"
             fi
         elif command -v rc-service &>/dev/null; then
             local rc_out
@@ -121,15 +121,15 @@ show_status() {
                 core_status="${yellow}已停止${plain}"
             fi
             if grep -q "GOMEMLIMIT" /etc/init.d/V2bX 2>/dev/null; then
-                guard_status="${green}护卫限制已激活${plain}"
+                guard_status="${green}内核级防爆已开启${plain}"
             fi
         fi
     fi
 
-    echo -e "V2bX 状态: $core_status | 护卫状态: $guard_status"
+    echo -e "V2bX 状态: $core_status | 资源护卫: $guard_status"
 }
 
-# 🌟 CF 隧道日志动态拉取模块
+# 🌟 CF 隧道日志动态拉取模块 (已更新为动态请求云端 cfjournal)
 view_cf_tunnel_logs() {
     echo -e "${cyan}正在拉取并运行 CF 隧道日志诊断模块...${plain}"
     local remote_log_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cfjournal"
@@ -157,7 +157,7 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
 --- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---
   ${green}0.${plain} 快捷修改主配置 (config.json)
 --------------------------------------------
-  ${green}1.${plain} 安装 V2bX (轻量去脂原生态版)
+  ${green}1.${plain} 安装 V2bX (轻量去脂自适应版)
   ${green}2.${plain} 更新 V2bX 核心
   ${green}3.${plain} 卸载 V2bX
   ${green}4.${plain} 启动 V2bX 服务
@@ -177,9 +177,9 @@ ${magenta}[🌟 核心战力配置向导群]${plain}
 ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}15.${plain} 豪华版 BBR 加速控制台
   ${green}16.${plain} 放行全局端口+自适应链接数
-  ${green}17.${plain} 【危险】强制释放系统缓存 (不建议频繁使用)
+  ${green}17.${plain} Linux 系统级内存与 Swap 深度净化
   ${green}18.${plain} 彻底清空各种顽固大日志 + 开启全局日志轮转硬控 (推荐)
-  ${green}19.${plain} V2bX 资源护卫独立模块 (内存调优/限制CPU)
+  ${green}19.${plain} 提升内存回收
   ${green}20.${plain} 将现有cdn节点改为cf隧道
   ${green}21.${plain} 🔍 查看隧道日志 (排查超时) 
   ${green}22.${plain} 彻底退出脚本
@@ -225,7 +225,31 @@ append_existing_config() {
 }
 
 self_install_core() {
-    echo -e "${yellow}正在准备部署麦卖云后端核心组件 (纯净版)...${plain}"
+    echo -e "${yellow}正在准备部署麦卖云后端核心组件...${plain}"
+    
+    echo -e "\n${cyan}====== 🛡️ 资源护卫限制策略选择 ======${plain}"
+    echo -e "  ${green}1.${plain} 原生态无锁版 (满血狂飙，适合高配小鸡或大流量节点)"
+    echo -e "  ${green}2.${plain} 标准防爆锁 (128M 内存锁 + 40% CPU 压制，推荐普通小鸡)"
+    echo -e "  ${green}3.${plain} 极致低配锁 (40M 内存锁 + 20% CPU 压制，适合极限清贫的 NAT 鸡)"
+    echo -e "  ${green}4.${plain} 自定义限额 (手动指定你想给的内存 and CPU 上限)"
+    read -rp "请选择限额策略 [1-4] (默认 1): " limit_opt < /dev/tty
+    [[ -z "$limit_opt" ]] && limit_opt=1
+
+    local mem_limit=""
+    local cpu_limit=""
+    
+    if [ "$limit_opt" -eq 2 ]; then
+        mem_limit=128
+        cpu_limit=40
+    elif [ "$limit_opt" -eq 3 ]; then
+        mem_limit=40
+        cpu_limit=20
+    elif [ "$limit_opt" -eq 4 ]; then
+        read -rp "请输入允许核心使用的内存硬性上限 (单位 MiB, 例如 256): " mem_limit < /dev/tty
+        read -rp "请输入允许核心使用的最大 CPU 使用率 (单位 %, 例如 60): " cpu_limit < /dev/tty
+        [[ -z "$mem_limit" ]] && mem_limit=128
+        [[ -z "$cpu_limit" ]] && cpu_limit=40
+    fi
 
     manage_service stop
     manage_service disable
@@ -303,11 +327,10 @@ self_install_core() {
         sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json 2>/dev/null
     fi
 
-    # 生成原生态无锁版本的 Systemd / OpenRC
     if [ -d /etc/systemd/system ]; then
         cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
-Description=V2bX Service - Native Pure
+Description=V2bX Service - Adaptive Managed
 After=network.target
 
 [Service]
@@ -316,25 +339,53 @@ Restart=always
 RestartSec=10
 User=root
 LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
 EOF
 
+        if [ "$limit_opt" -ne 1 ]; then
+            local high_mark=$((mem_limit * 8 / 10))
+            cat << EOF >> /etc/systemd/system/V2bX.service
+Environment="GOMEMLIMIT=${mem_limit}MiB"
+Environment="GOGC=80"
+CPUQuota=${cpu_limit}%
+Nice=19
+MemoryHigh=${high_mark}M
+MemoryMax=${mem_limit}M
+MemorySwapMax=0
+OOMScoreAdjust=-100
+EOF
+        fi
+
+        echo -e "[Install]\nWantedBy=multi-user.target" >> /etc/systemd/system/V2bX.service
         systemctl daemon-reload
         manage_service enable
         
     elif [ -d /etc/init.d ]; then
         cat << EOF > /etc/init.d/V2bX
 #!/sbin/openrc-run
-description="V2bX Alpine Native Service"
+description="V2bX Alpine Service"
+EOF
 
+        if [ "$limit_opt" -ne 1 ]; then
+            cat << EOF >> /etc/init.d/V2bX
+export GOMEMLIMIT=${mem_limit}MiB
+export GOGC=80
+EOF
+        fi
+
+        cat << EOF >> /etc/init.d/V2bX
 command="/usr/local/V2bX/V2bX"
 command_args="server -c /etc/V2bX/config.json"
 command_background=true
 pidfile="/var/run/V2bX.pid"
 output_log="/var/log/v2bx_out.log"
 error_log="/var/log/v2bx_err.log"
+EOF
+
+        if [ "$limit_opt" -ne 1 ]; then
+            echo 'start_stop_daemon_args="--nicelevel 19"' >> /etc/init.d/V2bX
+        fi
+
+        cat << EOF >> /etc/init.d/V2bX
 
 depend() {
     need net
@@ -371,7 +422,24 @@ open_ports() {
     fi
 }
 
-run_clean_script() { echo -e "${yellow}警告：此操作可能导致 I/O 拥堵。${plain}"; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; echo -e "${green}缓存强制下发完毕${plain}" ; }
+# 🌟 已重构：调用云端 Linuxclean 系统净化模块
+run_clean_script() {
+    echo -e "${cyan}正在拉取并运行 Linux 系统级深度净化引擎...${plain}"
+    local remote_clean_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/Linuxclean"
+    local proxy_clean_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/Linuxclean"
+    
+    wget -O /tmp/Linuxclean "$proxy_clean_url" --timeout=12 2>/dev/null || \
+    wget -O /tmp/Linuxclean "$remote_clean_url" --timeout=12 2>/dev/null || \
+    curl -sL "$remote_clean_url" -o /tmp/Linuxclean
+    
+    if [[ -f /tmp/Linuxclean && -s /tmp/Linuxclean ]]; then
+        chmod +x /tmp/Linuxclean
+        bash /tmp/Linuxclean
+        rm -f /tmp/Linuxclean
+    else
+        echo -e "${red}错误：无法连接到云端仓库，拉取系统净化模块失败！${plain}"
+    fi
+}
 
 run_deep_log_clean() {
     echo -e "${cyan}正在拉取并呼叫 GitHub 独立日志防爆强控引擎...${plain}"
@@ -391,9 +459,9 @@ run_deep_log_clean() {
     fi
 }
 
-# 🌟 新增：独立资源护卫调度引擎
+# 🌟 新增：提升内存回收动态拉取模块
 optimize_memory_recovery() {
-    echo -e "${cyan}正在拉取并运行 V2bX 资源护卫调度引擎...${plain}"
+    echo -e "${cyan}正在拉取并运行内存回收优化模块...${plain}"
     local remote_mem_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/memory"
     local proxy_mem_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/memory"
     
@@ -406,7 +474,7 @@ optimize_memory_recovery() {
         bash /tmp/v2bx_mem
         rm -f /tmp/v2bx_mem
     else
-        echo -e "${red}错误：无法连接到云端仓库拉取独立限制模块！${plain}"
+        echo -e "${red}错误：无法连接到云端仓库拉取内存回收模块！${plain}"
     fi
 }
 
