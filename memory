@@ -86,7 +86,7 @@ case "$Choice" in
             TOTAL_MEM=$(cat /proc/meminfo | grep MemTotal | awk '{print $2}')
             TOTAL_MEM=$((TOTAL_MEM / 1024))
         fi
-        # 针对多用户高并发，将默认安全线从 70% 提高到 80%，留足连接缓冲区
+        # 🌟 针对多用户高并发，将默认安全线从 70% 提高到 80%，留足连接缓冲区
         LIMIT_MEM=$((TOTAL_MEM * 80 / 100))
         
         echo -e "\n当前服务器总内存: ${BLUE}${TOTAL_MEM} MB${PLAIN}"
@@ -97,7 +97,7 @@ case "$Choice" in
         
         clean_mem_limits
         if [ "$INIT_TYPE" = "systemd" ]; then
-            # 只注入 GOMEMLIMIT 水位线防守，移除 GOGC=50，让 Go 保持最高效率、防高负载时 CPU 暴涨
+            # 🌟 只注入 GOMEMLIMIT 水位线防守，移除 GOGC=50，让 Go 保持最高效率、防高负载时 CPU 暴涨
             sed -i "/\[Service\]/a Environment=\"GOMEMLIMIT=${USER_LIMIT}MiB\"" "$SERVICE_FILE"
         else
             sed -i "/description=/a export GOMEMLIMIT=${USER_LIMIT}MiB" "$SERVICE_FILE"
@@ -137,7 +137,7 @@ case "$Choice" in
         
         echo -e "\n${YELLOW}提示：限制 CPU 可有效防止机场大流量导致小鸡 CPU 长期 100% 被主机商封禁。${PLAIN}"
         read -p "请输入允许 V2bX 使用的最大 CPU 占用比 (例如填 40 代表 40%): " CPU_LIMIT < /dev/tty
-        if ! [[ "$CPU_LIMIT" =~ ^[0-9]+$ ]]; then echo -e "${RED}输入错误！${PLAIN}" ; exit 1; fi
+        if ! [[ "$CPU_LIMIT" =~ ^[0-9]+$ ]]; then echo -e "${RED}输入错误！${PLAIN}"; exit 1; fi
         
         clean_cpu_limits
         sed -i "/\[Service\]/a CPUQuota=${CPU_LIMIT}%" "$SERVICE_FILE"
