@@ -176,10 +176,10 @@ ${magenta}[🌟 核心战力配置向导群]${plain}
 --------------------------------------------
 ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}15.${plain} 豪华版 BBR 加速控制台
-  ${green}16.${plain} 放行全局端口 + 百万级并发连接数永久解锁 (引入外部核心)
+  ${green}16.${plain} 放行全局端口+自适应链接数
   ${green}17.${plain} 【危险】强制释放系统缓存 (不建议频繁使用)
   ${green}18.${plain} 彻底清空各种顽固大日志 + 开启全局日志轮转硬控 (推荐)
-  ${green}19.${plain} 查看小鸡全套硬件看板
+  ${green}19.${plain} 提升内存回收
   ${green}20.${plain} 将现有cdn节点改为cf隧道
   ${green}21.${plain} 🔍 查看隧道日志 (排查超时) 
   ${green}22.${plain} 彻底退出脚本
@@ -232,7 +232,7 @@ self_install_core() {
     echo -e "  ${green}2.${plain} 标准防爆锁 (128M 内存锁 + 40% CPU 压制，推荐普通小鸡)"
     echo -e "  ${green}3.${plain} 极致低配锁 (40M 内存锁 + 20% CPU 压制，适合极限清贫的 NAT 鸡)"
     echo -e "  ${green}4.${plain} 自定义限额 (手动指定你想给的内存和 CPU 上限)"
-    read -rp "请选择限额策略 [1-4] (默认 1): " limit_opt
+    read -rp "请选择限额策略 [1-4] (默认 1): " limit_opt < /dev/tty
     [[ -z "$limit_opt" ]] && limit_opt=1
 
     local mem_limit=""
@@ -245,8 +245,8 @@ self_install_core() {
         mem_limit=40
         cpu_limit=20
     elif [ "$limit_opt" -eq 4 ]; then
-        read -rp "请输入允许核心使用的内存硬性上限 (单位 MiB, 例如 256): " mem_limit
-        read -rp "请输入允许核心使用的最大 CPU 使用率 (单位 %, 例如 60): " cpu_limit
+        read -rp "请输入允许核心使用的内存硬性上限 (单位 MiB, 例如 256): " mem_limit < /dev/tty
+        read -rp "请输入允许核心使用的最大 CPU 使用率 (单位 %, 例如 60): " cpu_limit < /dev/tty
         [[ -z "$mem_limit" ]] && mem_limit=128
         [[ -z "$cpu_limit" ]] && cpu_limit=40
     fi
@@ -316,7 +316,7 @@ self_install_core() {
     rm -f /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
 
     if [ ! -f /etc/V2bX/config.json ]; then
-        read -rp "未检测到配置文件，是否立即生成？(y/n) " ask_gen_config
+        read -rp "未检测到配置文件，是否立即生成？(y/n) " ask_gen_config < /dev/tty
         if [[ "$ask_gen_config" == "y" || "$ask_gen_config" == "Y" ]]; then
             make_full_config
         fi
@@ -442,6 +442,25 @@ run_deep_log_clean() {
     fi
 }
 
+# 🌟 新增：提升内存回收动态拉取模块
+optimize_memory_recovery() {
+    echo -e "${cyan}正在拉取并运行内存回收优化模块...${plain}"
+    local remote_mem_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/memory"
+    local proxy_mem_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/memory"
+    
+    wget -O /tmp/v2bx_mem "$proxy_mem_url" --timeout=12 2>/dev/null || \
+    wget -O /tmp/v2bx_mem "$remote_mem_url" --timeout=12 2>/dev/null || \
+    curl -sL "$remote_mem_url" -o /tmp/v2bx_mem
+    
+    if [[ -f /tmp/v2bx_mem && -s /tmp/v2bx_mem ]]; then
+        chmod +x /tmp/v2bx_mem
+        bash /tmp/v2bx_mem
+        rm -f /tmp/v2bx_mem
+    else
+        echo -e "${red}错误：无法连接到云端仓库拉取内存回收模块！${plain}"
+    fi
+}
+
 convert_to_cf_tunnel() {
     echo -e "${cyan}正在拉取并运行 CF 隧道转换模块...${plain}"
     local remote_cf_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cf"
@@ -461,7 +480,7 @@ convert_to_cf_tunnel() {
 }
 
 process_run() {
-    local num; read -rp "请输入选择 [0-22]: " num
+    local num; read -rp "请输入选择 [0-22]: " num < /dev/tty
     case "$num" in
     0) nano /etc/V2bX/config.json && manage_service restart ;; 
     1|2) self_install_core ;; 
@@ -489,7 +508,7 @@ process_run() {
     16) open_ports ;; 
     17) run_clean_script ;; 
     18) run_deep_log_clean ;;
-    19) uptime && free -m && df -h ;; 
+    19) optimize_memory_recovery ;; 
     20) convert_to_cf_tunnel ;;
     21) view_cf_tunnel_logs ;; 
     22) exit 0 ;; 
@@ -497,4 +516,4 @@ process_run() {
     esac
 }
 
-while true; do show_menu; process_run; echo ""; read -rp "按回车键返回主菜单..." ; done
+while true; do show_menu; process_run; echo ""; read -rp "按回车键返回主菜单..." < /dev/tty; done
