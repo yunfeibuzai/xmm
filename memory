@@ -13,13 +13,18 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 自动检测 V2bX 服务文件（兼容大小写）
+# 自动检测 V2bX 服务环境 (支持 Systemd 与 OpenRC)
+INIT_TYPE="systemd"
 if [ -f "/etc/systemd/system/V2bX.service" ]; then
   SERVICE_FILE="/etc/systemd/system/V2bX.service"
   SERVICE_NAME="V2bX"
 elif [ -f "/etc/systemd/system/v2bx.service" ]; then
   SERVICE_FILE="/etc/systemd/system/v2bx.service"
   SERVICE_NAME="v2bx"
+elif [ -f "/etc/init.d/V2bX" ]; then
+  INIT_TYPE="openrc"
+  SERVICE_FILE="/etc/init.d/V2bX"
+  SERVICE_NAME="V2bX"
 else
   echo -e "${RED}错误：未找到 V2bX 服务文件，请确认该节点已正确安装。${PLAIN}"
   exit 1
@@ -27,77 +32,132 @@ fi
 
 clear
 echo -e "${GREEN}=================================================${PLAIN}"
-echo -e "${GREEN}          V2bX 内存回收机制一键优化脚本          ${PLAIN}"
+echo -e "${GREEN}       V2bX 资源护卫与内存调度引擎 (独立版)      ${PLAIN}"
 echo -e "${GREEN}=================================================${PLAIN}"
-echo -e " 1. 开启/更新 内存硬性回收优化"
-echo -e " 2. 还原 默认内存管理机制"
-echo -e " 3. 退出脚本"
+echo -e " 1. 🟢 软性优化内存 (提升底层回收率，无系统硬性限制)"
+echo -e " 2. 🟡 硬性限制内存 (防 OOM 崩溃，设定 V2bX 物理上限)"
+echo -e " 3. 🟠 硬性限制 CPU (防 CPU 占用过高导致主机被封)"
+echo -e " 4. ⚪ 还原默认配置 (解绑满血狂飙，清除所有限制)"
+echo -e " 0. 退出脚本"
 echo -e "${GREEN}=================================================${PLAIN}"
-# 显式指定从当前控制台 TTY 读取输入，防止 curl 管道运行时 read 失效
-read -p "请选择操作 [1-3]: " Choice < /dev/tty
+read -p "请选择操作 [0-4]: " Choice < /dev/tty
+
+# 精细化清理逻辑（防止内存和 CPU 设置互相覆盖）
+clean_mem_limits() {
+    if [ "$INIT_TYPE" = "systemd" ]; then
+        sed -i '/Environment="*GOGC/d; /Environment="*GOMEMLIMIT/d' "$SERVICE_FILE"
+        sed -i '/Environment=GOGC/d; /Environment=GOMEMLIMIT/d' "$SERVICE_FILE"
+        sed -i '/MemoryMax=/d; /MemoryHigh=/d; /MemorySwapMax=/d; /OOMScoreAdjust=/d' "$SERVICE_FILE"
+    else
+        sed -i '/export GOGC=/d; /export GOMEMLIMIT=/d' "$SERVICE_FILE"
+    fi
+}
+
+clean_cpu_limits() {
+    if [ "$INIT_TYPE" = "systemd" ]; then
+        sed -i '/CPUQuota=/d; /Nice=/d' "$SERVICE_FILE"
+    else
+        sed -i '/start_stop_daemon_args=/d' "$SERVICE_FILE"
+    fi
+}
+
+# 重启服务模块
+restart_service() {
+    echo -e "${YELLOW}\n正在重载配置并重启 ${SERVICE_NAME} 服务...${PLAIN}"
+    if [ "$INIT_TYPE" = "systemd" ]; then
+        systemctl daemon-reload
+        systemctl restart "$SERVICE_NAME"
+        sleep 1.5
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            echo -e "${GREEN}配置已成功生效！${PLAIN}"
+        else
+            echo -e "${RED}警告：服务重启失败，请运行 journalctl -u ${SERVICE_NAME} -n 20 查看原因。${PLAIN}"
+        fi
+    else
+        rc-service "$SERVICE_NAME" restart
+        echo -e "${GREEN}配置已成功生效！${PLAIN}"
+    fi
+}
 
 case "$Choice" in
   1)
-    # 获取系统总内存 (MB) 并计算推荐值 (70%)
     TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
     if [ -z "$TOTAL_MEM" ] || [ "$TOTAL_MEM" -eq 0 ]; then
         TOTAL_MEM=$(cat /proc/meminfo | grep MemTotal | awk '{print $2}')
         TOTAL_MEM=$((TOTAL_MEM / 1024))
     fi
     LIMIT_MEM=$((TOTAL_MEM * 70 / 100))
-
-    echo -e "\n当前服务器总内存: ${BLUE}${TOTAL_MEM} MB${PLAIN}"
-    echo -e "推荐内存释放线 (70%): ${BLUE}${LIMIT_MEM} MiB${PLAIN}"
-    echo "-------------------------------------------------"
-    read -p "请输入限制内存大小 (单位 MiB, 直接回车使用推荐值 ${LIMIT_MEM}MiB): " USER_LIMIT < /dev/tty
-
-    [ -z "$USER_LIMIT" ] && USER_LIMIT=$LIMIT_MEM
-
-    if ! [[ "$USER_LIMIT" =~ ^[0-9]+$ ]]; then
-      echo -e "${RED}错误：请输入纯数字！${PLAIN}"
-      exit 1
-    fi
-
-    echo -e "\n${YELLOW}正在清理旧的内存控制参数...${PLAIN}"
-    sed -i '/Environment=GOGC=/d' "$SERVICE_FILE"
-    sed -i '/Environment=GOMEMLIMIT=/d' "$SERVICE_FILE"
-
-    echo -e "${YELLOW}正在注入新的 Go 运行时内存回收环境变量...${PLAIN}"
-    sed -i "/\[Service\]/a Environment=GOMEMLIMIT=${USER_LIMIT}MiB" "$SERVICE_FILE"
-    sed -i "/\[Service\]/a Environment=GOGC=50" "$SERVICE_FILE"
-
-    echo -e "${YELLOW}正在重载 Systemd 并重启 ${SERVICE_NAME} 服务...${PLAIN}"
-    systemctl daemon-reload
-    systemctl restart "$SERVICE_NAME"
-
-    sleep 1.5
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-      echo "-------------------------------------------------"
-      echo -e "${GREEN}恭喜，内存回收优化成功配置并生效！${PLAIN}"
-      echo -e "当前强制回收阈值 (GOGC): ${BLUE}50${PLAIN}"
-      echo -e "当前硬性内存上限 (GOMEMLIMIT): ${BLUE}${USER_LIMIT}MiB${PLAIN}"
-      echo -e "提示: 当节点内存触及该上限时，底层 Go 将激进释放闲置物理内存。"
-    else
-      echo -e "${RED}警告：${SERVICE_NAME} 服务重启失败！${PLAIN}"
-      echo -e "请运行 ${BLUE}journalctl -u ${SERVICE_NAME} -n 20${PLAIN} 查看错误日志。"
-    fi
-    ;;
-
-  2)
-    echo -e "\n${YELLOW}正在移除内存回收限制参数...${PLAIN}"
-    sed -i '/Environment=GOGC=/d' "$SERVICE_FILE"
-    sed -i '/Environment=GOMEMLIMIT=/d' "$SERVICE_FILE"
-
-    echo -e "${YELLOW}正在重启 ${SERVICE_NAME} 服务恢复默认机制...${PLAIN}"
-    systemctl daemon-reload
-    systemctl restart "$SERVICE_NAME"
     
-    sleep 1
-    echo -e "${GREEN}成功！已恢复 V2bX 默认的懒惰内存释放机制。${PLAIN}"
-    ;;
+    echo -e "\n当前服务器总内存: ${BLUE}${TOTAL_MEM} MB${PLAIN}"
+    read -p "请输入软性回收触发线 (单位 MiB, 直接回车使用推荐值 ${LIMIT_MEM}): " USER_LIMIT < /dev/tty
+    [ -z "$USER_LIMIT" ] && USER_LIMIT=$LIMIT_MEM
+    if ! [[ "$USER_LIMIT" =~ ^[0-9]+$ ]]; then echo -e "${RED}输入错误！${PLAIN}"; exit 1; fi
 
-  *)
-    echo -e "\n已退出。"
+    clean_mem_limits
+    if [ "$INIT_TYPE" = "systemd" ]; then
+        sed -i "/\[Service\]/a Environment=\"GOMEMLIMIT=${USER_LIMIT}MiB\"" "$SERVICE_FILE"
+        sed -i "/\[Service\]/a Environment=\"GOGC=50\"" "$SERVICE_FILE"
+    else
+        sed -i "/description=/a export GOMEMLIMIT=${USER_LIMIT}MiB\nexport GOGC=50" "$SERVICE_FILE"
+    fi
+    echo -e "${GREEN}软性内存回收策略已注入。${PLAIN}"
+    restart_service
+    ;;
+    
+  2)
+    if [ "$INIT_TYPE" = "openrc" ]; then
+        echo -e "${RED}抱歉，OpenRC (Alpine 系统) 暂不支持内核级 MemoryMax 强限制，请使用选项 1 进行软限制。${PLAIN}"
+        exit 1
+    fi
+    
+    echo -e "\n${YELLOW}提示：硬限制会强制杀掉超出内存的连接，保证 VPS 不会失联。${PLAIN}"
+    read -p "请输入允许 V2bX 使用的最大内存上限 (单位 MiB, 例如 128): " HARD_LIMIT < /dev/tty
+    if ! [[ "$HARD_LIMIT" =~ ^[0-9]+$ ]]; then echo -e "${RED}输入错误！${PLAIN}"; exit 1; fi
+    HIGH_LIMIT=$((HARD_LIMIT * 8 / 10))
+    
+    clean_mem_limits
+    sed -i "/\[Service\]/a Environment=\"GOMEMLIMIT=${HARD_LIMIT}MiB\"" "$SERVICE_FILE"
+    sed -i "/\[Service\]/a Environment=\"GOGC=80\"" "$SERVICE_FILE"
+    sed -i "/\[Service\]/a MemoryMax=${HARD_LIMIT}M" "$SERVICE_FILE"
+    sed -i "/\[Service\]/a MemoryHigh=${HIGH_LIMIT}M" "$SERVICE_FILE"
+    sed -i "/\[Service\]/a MemorySwapMax=0" "$SERVICE_FILE"
+    sed -i "/\[Service\]/a OOMScoreAdjust=-100" "$SERVICE_FILE"
+    
+    echo -e "${GREEN}硬性内存防爆锁已注入。${PLAIN}"
+    restart_service
+    ;;
+    
+  3)
+    if [ "$INIT_TYPE" = "openrc" ]; then
+        echo -e "${RED}抱歉，OpenRC (Alpine 系统) 暂不支持内核级 CPUQuota 限制。${PLAIN}"
+        exit 1
+    fi
+    
+    echo -e "\n${YELLOW}提示：限制 CPU 可有效防止机场大流量导致小鸡 CPU 长期 100% 被主机商封禁。${PLAIN}"
+    read -p "请输入允许 V2bX 使用的最大 CPU 占用比 (例如填 40 代表 40%): " CPU_LIMIT < /dev/tty
+    if ! [[ "$CPU_LIMIT" =~ ^[0-9]+$ ]]; then echo -e "${RED}输入错误！${PLAIN}"; exit 1; fi
+    
+    clean_cpu_limits
+    sed -i "/\[Service\]/a CPUQuota=${CPU_LIMIT}%" "$SERVICE_FILE"
+    sed -i "/\[Service\]/a Nice=19" "$SERVICE_FILE"
+    
+    echo -e "${GREEN}CPU 压制锁已注入。${PLAIN}"
+    restart_service
+    ;;
+    
+  4)
+    clean_mem_limits
+    clean_cpu_limits
+    echo -e "${GREEN}已成功清除所有内存与 CPU 限制参数。${PLAIN}"
+    restart_service
+    ;;
+    
+  0)
     exit 0
+    ;;
+    
+  *)
+    echo -e "${RED}未知选项！${PLAIN}"
+    exit 1
     ;;
 esac
