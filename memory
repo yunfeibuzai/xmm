@@ -1,0 +1,103 @@
+#!/bin/bash
+
+# 终端颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;36m'
+PLAIN='\033[0m'
+
+# 权限检查
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}错误：请以 root 用户运行此脚本！${PLAIN}"
+  exit 1
+fi
+
+# 自动检测 V2bX 服务文件（兼容大小写）
+if [ -f "/etc/systemd/system/V2bX.service" ]; then
+  SERVICE_FILE="/etc/systemd/system/V2bX.service"
+  SERVICE_NAME="V2bX"
+elif [ -f "/etc/systemd/system/v2bx.service" ]; then
+  SERVICE_FILE="/etc/systemd/system/v2bx.service"
+  SERVICE_NAME="v2bx"
+else
+  echo -e "${RED}错误：未找到 V2bX 服务文件，请确认该节点已正确安装。${PLAIN}"
+  exit 1
+fi
+
+clear
+echo -e "${GREEN}=================================================${PLAIN}"
+echo -e "${GREEN}          V2bX 内存回收机制一键优化脚本          ${PLAIN}"
+echo -e "${GREEN}=================================================${PLAIN}"
+echo -e " 1. 开启/更新 内存硬性回收优化"
+echo -e " 2. 还原 默认内存管理机制"
+echo -e " 3. 退出脚本"
+echo -e "${GREEN}=================================================${PLAIN}"
+# 显式指定从当前控制台 TTY 读取输入，防止 curl 管道运行时 read 失效
+read -p "请选择操作 [1-3]: " Choice < /dev/tty
+
+case "$Choice" in
+  1)
+    # 获取系统总内存 (MB) 并计算推荐值 (70%)
+    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
+    if [ -z "$TOTAL_MEM" ] || [ "$TOTAL_MEM" -eq 0 ]; then
+        TOTAL_MEM=$(cat /proc/meminfo | grep MemTotal | awk '{print $2}')
+        TOTAL_MEM=$((TOTAL_MEM / 1024))
+    fi
+    LIMIT_MEM=$((TOTAL_MEM * 70 / 100))
+
+    echo -e "\n当前服务器总内存: ${BLUE}${TOTAL_MEM} MB${PLAIN}"
+    echo -e "推荐内存释放线 (70%): ${BLUE}${LIMIT_MEM} MiB${PLAIN}"
+    echo "-------------------------------------------------"
+    read -p "请输入限制内存大小 (单位 MiB, 直接回车使用推荐值 ${LIMIT_MEM}MiB): " USER_LIMIT < /dev/tty
+
+    [ -z "$USER_LIMIT" ] && USER_LIMIT=$LIMIT_MEM
+
+    if ! [[ "$USER_LIMIT" =~ ^[0-9]+$ ]]; then
+      echo -e "${RED}错误：请输入纯数字！${PLAIN}"
+      exit 1
+    fi
+
+    echo -e "\n${YELLOW}正在清理旧的内存控制参数...${PLAIN}"
+    sed -i '/Environment=GOGC=/d' "$SERVICE_FILE"
+    sed -i '/Environment=GOMEMLIMIT=/d' "$SERVICE_FILE"
+
+    echo -e "${YELLOW}正在注入新的 Go 运行时内存回收环境变量...${PLAIN}"
+    sed -i "/\[Service\]/a Environment=GOMEMLIMIT=${USER_LIMIT}MiB" "$SERVICE_FILE"
+    sed -i "/\[Service\]/a Environment=GOGC=50" "$SERVICE_FILE"
+
+    echo -e "${YELLOW}正在重载 Systemd 并重启 ${SERVICE_NAME} 服务...${PLAIN}"
+    systemctl daemon-reload
+    systemctl restart "$SERVICE_NAME"
+
+    sleep 1.5
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+      echo "-------------------------------------------------"
+      echo -e "${GREEN}恭喜，内存回收优化成功配置并生效！${PLAIN}"
+      echo -e "当前强制回收阈值 (GOGC): ${BLUE}50${PLAIN}"
+      echo -e "当前硬性内存上限 (GOMEMLIMIT): ${BLUE}${USER_LIMIT}MiB${PLAIN}"
+      echo -e "提示: 当节点内存触及该上限时，底层 Go 将激进释放闲置物理内存。"
+    else
+      echo -e "${RED}警告：${SERVICE_NAME} 服务重启失败！${PLAIN}"
+      echo -e "请运行 ${BLUE}journalctl -u ${SERVICE_NAME} -n 20${PLAIN} 查看错误日志。"
+    fi
+    ;;
+
+  2)
+    echo -e "\n${YELLOW}正在移除内存回收限制参数...${PLAIN}"
+    sed -i '/Environment=GOGC=/d' "$SERVICE_FILE"
+    sed -i '/Environment=GOMEMLIMIT=/d' "$SERVICE_FILE"
+
+    echo -e "${YELLOW}正在重启 ${SERVICE_NAME} 服务恢复默认机制...${PLAIN}"
+    systemctl daemon-reload
+    systemctl restart "$SERVICE_NAME"
+    
+    sleep 1
+    echo -e "${GREEN}成功！已恢复 V2bX 默认的懒惰内存释放机制。${PLAIN}"
+    ;;
+
+  *)
+    echo -e "\n已退出。"
+    exit 0
+    ;;
+esac
