@@ -1,10 +1,10 @@
 #!/bin/sh
 # =======================================================================
-# Komari Agent 智能专属工具箱 (GitHub 托管版)
+# Komari Agent 智能专属工具箱 (GitHub 极速优化版)
 # =======================================================================
 
-# ⚠️ 请将下方链接替换为你修改后在 GitHub 上的真实 Raw 链接
-GITHUB_URL="https://raw.githubusercontent.com/你的用户名/仓库名/分支名/tz.sh"
+# 已自动为你配置好你的 GitHub Raw 专属链接
+GITHUB_URL="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/tz"
 
 # 颜色定义
 GREEN='\033[0;32m'
@@ -12,31 +12,37 @@ YELLOW='\033[0;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# 菜单 1：原版全新安装/卸载逻辑
+# 菜单 1：原版全新安装/卸载逻辑（极致优化版）
 run_original_installer() {
     clear
     printf "${GREEN}=======================================================${NC}\n"
     printf "${GREEN}    Komari Agent 智能解析 & 纯净全卸载安装向导        ${NC}\n"
     printf "${GREEN}=======================================================${NC}\n"
 
-    # 引导用户输入官方命令
+    # 1. 引导用户输入官方命令
     printf "${YELLOW}👉 请去 Komari 主控后台复制完整的 Agent 安装命令，并粘贴在下方：${NC}\n"
     printf "输入命令后回车: "
     read -r RAW_CMD
 
-    # 智能全参数切片解析
-    ARGS_PART=$(echo "$RAW_CMD" | sed 's/.*-- //')
-    SERVER_URL=$(echo "$ARGS_PART" | grep -oE '\-e +[^ ]+' | awk '{print $2}')
-    SECRET_TOKEN=$(echo "$ARGS_PART" | grep -oE '\-t +[^ ]+' | awk '{print $2}')
+    # 2. 强鲁棒性参数切片解析（兼容各种奇葩复制格式）
+    SERVER_URL=$(echo "$RAW_CMD" | grep -oE '\-e +[^ ]+' | head -n1 | awk '{print $2}')
+    SECRET_TOKEN=$(echo "$RAW_CMD" | grep -oE '\-t +[^ ]+' | head -n1 | awk '{print $2}')
 
-    # 动态滤除 -e 和 -t 及其后面的参数值，完美保留其他所有长短参数
-    EXTRA_ARGS=$(echo "$ARGS_PART" | sed -E 's/\-e +[^ ]+//g' | sed -E 's/\-t +[^ ]+//g' | sed -E 's/ +/ /g')
+    # 分离附加参数
+    if echo "$RAW_CMD" | grep -q -- "-- "; then
+        ARGS_PART=$(echo "$RAW_CMD" | sed 's/.*-- //')
+    else
+        ARGS_PART="$RAW_CMD"
+    fi
+    EXTRA_ARGS=$(echo "$ARGS_PART" | sed -E 's/\-e +[^ ]+//g' | sed -E 's/\-t +[^ ]+//g' | sed -E 's/ +/ /g' | sed 's/^[ \t]*//;s/[ \t]*$//')
 
-    # 校验解析结果
+    # 3. 校验解析结果
     if [ -z "$SERVER_URL" ] || [ -z "$SECRET_TOKEN" ]; then
         printf "${RED}❌ [错误] 无法从你输入的命令中提取到 -e (主控地址) 或 -t (Token)！${NC}\n"
         printf "请检查是否复制完整。你输入的内容是:\n$RAW_CMD\n"
-        exit 1
+        printf "\n按任意键返回主菜单..."
+        read -r _
+        return
     fi
 
     printf "\n${GREEN}✔ 成功识别配置信息：${NC}\n"
@@ -49,7 +55,7 @@ run_original_installer() {
     # 4. 强力清场：彻底卸载并删除旧的 Komari 组件
     printf "${YELLOW}[1/4] 正在启动强力清场，彻底擦除旧版组件...${NC}\n"
 
-    # A. 彻底清理并卸载旧的 OpenRC (Alpine) 服务
+    # A. OpenRC (Alpine) 服务卸载
     if [ -f /etc/init.d/komari-agent ]; then
         printf "${YELLOW}   -> 正在卸载旧的 OpenRC 服务...${NC}\n"
         rc-service komari-agent stop >/dev/null 2>&1
@@ -58,7 +64,7 @@ run_original_installer() {
         rm -f /etc/init.d/komari-agent
     fi
 
-    # B. 彻底清理并卸载旧的 Systemd (Ubuntu/Debian) 服务
+    # B. Systemd (Ubuntu/Debian) 服务卸载
     if [ -f /etc/systemd/system/komari-agent.service ] || command -v systemctl >/dev/null 2>&1; then
         printf "${YELLOW}   -> 正在卸载旧的 Systemd 服务...${NC}\n"
         systemctl stop komari-agent >/dev/null 2>&1
@@ -67,16 +73,23 @@ run_original_installer() {
         systemctl daemon-reload >/dev/null 2>&1
     fi
 
-    # C. 暴力突击
-    printf "${YELLOW}   -> 正在猎杀残留孤儿进程...${NC}\n"
-    for pid in $(pidof komari-agent 2>/dev/null); do
-        kill -9 "$pid" >/dev/null 2>&1
-    done
+    # C. 多路交叉猎杀残留进程（防 pidof 缺失）
+    printf "${YELLOW}   -> 正在暴力清洗残留孤儿进程...${NC}\n"
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -9 komari-agent >/dev/null 2>&1
+    else
+        for pid in $(ps -ef 2>/dev/null | grep 'komari-agent' | grep -v grep | awk '{print $2}'); do
+            kill -9 "$pid" >/dev/null 2>&1
+        done
+        for pid in $(pidof komari-agent 2>/dev/null); do
+            kill -9 "$pid" >/dev/null 2>&1
+        done
+    fi
 
-    # D. 斩草除根
+    # D. 物理文件斩草除根
     rm -f "$BIN_PATH"
     rm -f /var/run/komari-agent.pid
-    printf "${GREEN}   ✔ 旧版本已完全人间蒸发，系统环境已纯净。${NC}\n"
+    printf "${GREEN}   ✔ 旧环境已完全人间蒸发，系统环境纯净。${NC}\n"
 
     # 5. 架构检测
     ARCH=$(uname -m)
@@ -84,12 +97,12 @@ run_original_installer() {
         x86_64) BIN_ARCH="amd64" ;;
         aarch64|arm64) BIN_ARCH="arm64" ;;
         i386|i686) BIN_ARCH="386" ;;
-        *) printf "${RED}未知的系统架构: $ARCH${NC}\n"; exit 1 ;;
+        *) printf "${RED}❌ 未知的系统架构: $ARCH${NC}\n"; printf "\n按任意键返回..."; read -r _; return ;;
     esac
 
     # 6. 下载全新二进制程序
     printf "${YELLOW}[2/4] 正在下载官方轻量化二进制程序...${NC}\n"
-    mkdir -p $(dirname "$BIN_PATH")
+    mkdir -p "$(dirname "$BIN_PATH")"
     DOWNLOAD_URL="https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${BIN_ARCH}"
 
     if command -v curl >/dev/null 2>&1; then
@@ -99,8 +112,8 @@ run_original_installer() {
     fi
 
     if [ ! -f "$BIN_PATH" ] || [ ! -s "$BIN_PATH" ]; then
-        printf "${RED}❌ 错误：文件下载失败，请检查小鸡的网络状态。${NC}\n"
-        exit 1
+        printf "${RED}❌ 错误：文件下载失败，请检查服务器网络状态。${NC}\n"
+        printf "\n按任意键返回..."; read -r _; return
     fi
     chmod +x "$BIN_PATH"
 
@@ -127,7 +140,7 @@ END_OPENRC
         rc-service komari-agent zap >/dev/null 2>&1
         rc-service komari-agent start >/dev/null 2>&1
 
-    # B. Systemd
+    # B. Systemd 环境
     elif command -v systemctl >/dev/null 2>&1; then
         printf "${GREEN}   配置全新 Systemd 守护系统 (Ubuntu/Debian/CentOS)${NC}\n"
         cat << END_SYSTEMD > /etc/systemd/system/komari-agent.service
@@ -150,6 +163,7 @@ END_SYSTEMD
         systemctl enable komari-agent >/dev/null 2>&1
         systemctl restart komari-agent >/dev/null 2>&1
     else
+        # 终极后台兜底
         nohup "$BIN_PATH" -e "$SERVER_URL" -t "$SECRET_TOKEN" $EXTRA_ARGS >/dev/null 2>&1 &
     fi
 
@@ -157,7 +171,8 @@ END_SYSTEMD
     printf "${YELLOW}[4/4] 正在对新服务进行单例运行锁体检...${NC}\n"
     sleep 2
 
-    PROCESS_COUNT=$(pidof komari-agent | wc -w)
+    PROCESS_COUNT=$(pidof komari-agent 2>/dev/null | wc -w)
+    [ "$PROCESS_COUNT" -eq 0 ] && PROCESS_COUNT=$(ps -ef 2>/dev/null | grep 'komari-agent' | grep -v grep | wc -l)
 
     printf "${GREEN}=======================================================${NC}\n"
     printf "${GREEN} 🎉 Komari Agent 纯净全新部署完毕！${NC}\n"
@@ -167,36 +182,55 @@ END_SYSTEMD
     
     printf "\n按任意键返回主菜单..."
     read -r _
-    show_menu
 }
 
-# 菜单 2：一键升级工具箱自身
+# 菜单 2：一键升级工具箱自身（带硬核安全防砖校验）
 upgrade_myself() {
     clear
     printf "${YELLOW}正在从 GitHub 检查并拉取最新工具箱脚本...${NC}\n"
     
     LOCAL_PATH="/usr/local/bin/tz"
-    TMP_FILE="/tmp/tz_update.sh"
+    TMP_FILE="/tmp/tz_update_safe.sh"
+    rm -f "$TMP_FILE"
     
-    # 下载到临时文件防挂
+    # 极速下载到临时文件
     if command -v curl >/dev/null 2>&1; then
         curl -sSL -k -o "$TMP_FILE" "$GITHUB_URL"
     else
         wget --no-check-certificate -O "$TMP_FILE" "$GITHUB_URL" >/dev/null 2>&1
     fi
     
+    # 【核心优化】严格的安全防破损体检
     if [ $? -eq 0 ] && [ -s "$TMP_FILE" ]; then
+        # 校验 1: 必须包含 Shell 解释头
+        if ! head -n 1 "$TMP_FILE" | grep -qE '^#!/bin/(sh|bash)'; then
+            printf "${RED}❌ 升级中断：检测到非法脚本头部，可能是 GitHub 404 页面或被墙拦截！${NC}\n"
+            rm -f "$TMP_FILE"
+            printf "\n按任意键返回主菜单..."
+            read -r _
+            return
+        fi
+        
+        # 校验 2: 使用 sh -n 进行基本的语法静态检查
+        if ! sh -n "$TMP_FILE" >/dev/null 2>&1; then
+            printf "${RED}❌ 升级中断：拉取的脚本存在语法错误，拒绝覆盖本地文件！${NC}\n"
+            rm -f "$TMP_FILE"
+            printf "\n按任意键返回主菜单..."
+            read -r _
+            return
+        fi
+
+        # 校验通过，安全替换
         mv "$TMP_FILE" "$LOCAL_PATH"
         chmod +x "$LOCAL_PATH"
         printf "${GREEN}✔ 脚本已成功一键升级到 GitHub 最新版本！${NC}\n"
-        printf "${GREEN}请重新输入 tz 即可启用新版功能。${NC}\n"
+        printf "${GREEN}请重新输入 tz 即可直接启用新版功能。${NC}\n"
         exit 0
     else
         rm -f "$TMP_FILE"
-        printf "${RED}❌ 升级失败！请检查服务器网络或检查 GITHUB_URL 是否正确。${NC}\n"
+        printf "${RED}❌ 升级失败！网络连接超时，请检查服务器连接 GitHub 的网络状态。${NC}\n"
         printf "\n按任意键返回主菜单..."
         read -r _
-        show_menu
     fi
 }
 
@@ -214,9 +248,9 @@ show_menu() {
     read -r CHOICE
 
     case "$CHOICE" in
-        1) run_original_installer ;;
+        1) run_original_installer; show_menu ;;
         2) upgrade_myself ;;
-        0) printf "\n老铁再见！\n"; exit 0 ;;
+        0) printf "\n退出成功，祝你用机愉快！\n"; exit 0 ;;
         *) printf "${RED}输入错误，请重新选择！${NC}\n"; sleep 1; show_menu ;;
     esac
 }
