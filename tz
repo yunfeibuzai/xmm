@@ -1,0 +1,225 @@
+#!/bin/sh
+# =======================================================================
+# Komari Agent 智能专属工具箱 (GitHub 托管版)
+# =======================================================================
+
+# ⚠️ 请将下方链接替换为你修改后在 GitHub 上的真实 Raw 链接
+GITHUB_URL="https://raw.githubusercontent.com/你的用户名/仓库名/分支名/tz.sh"
+
+# 颜色定义
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+# 菜单 1：原版全新安装/卸载逻辑
+run_original_installer() {
+    clear
+    printf "${GREEN}=======================================================${NC}\n"
+    printf "${GREEN}    Komari Agent 智能解析 & 纯净全卸载安装向导        ${NC}\n"
+    printf "${GREEN}=======================================================${NC}\n"
+
+    # 引导用户输入官方命令
+    printf "${YELLOW}👉 请去 Komari 主控后台复制完整的 Agent 安装命令，并粘贴在下方：${NC}\n"
+    printf "输入命令后回车: "
+    read -r RAW_CMD
+
+    # 智能全参数切片解析
+    ARGS_PART=$(echo "$RAW_CMD" | sed 's/.*-- //')
+    SERVER_URL=$(echo "$ARGS_PART" | grep -oE '\-e +[^ ]+' | awk '{print $2}')
+    SECRET_TOKEN=$(echo "$ARGS_PART" | grep -oE '\-t +[^ ]+' | awk '{print $2}')
+
+    # 动态滤除 -e 和 -t 及其后面的参数值，完美保留其他所有长短参数
+    EXTRA_ARGS=$(echo "$ARGS_PART" | sed -E 's/\-e +[^ ]+//g' | sed -E 's/\-t +[^ ]+//g' | sed -E 's/ +/ /g')
+
+    # 校验解析结果
+    if [ -z "$SERVER_URL" ] || [ -z "$SECRET_TOKEN" ]; then
+        printf "${RED}❌ [错误] 无法从你输入的命令中提取到 -e (主控地址) 或 -t (Token)！${NC}\n"
+        printf "请检查是否复制完整。你输入的内容是:\n$RAW_CMD\n"
+        exit 1
+    fi
+
+    printf "\n${GREEN}✔ 成功识别配置信息：${NC}\n"
+    printf " 🔗 主控地址: ${YELLOW}${SERVER_URL}${NC}\n"
+    printf " 🔑 节点密钥: ${YELLOW}${SECRET_TOKEN}${NC}\n"
+    printf " 🛡️ 附加参数: ${YELLOW}${EXTRA_ARGS:-无}${NC}\n\n"
+
+    BIN_PATH="/usr/local/bin/komari-agent"
+
+    # 4. 强力清场：彻底卸载并删除旧的 Komari 组件
+    printf "${YELLOW}[1/4] 正在启动强力清场，彻底擦除旧版组件...${NC}\n"
+
+    # A. 彻底清理并卸载旧的 OpenRC (Alpine) 服务
+    if [ -f /etc/init.d/komari-agent ]; then
+        printf "${YELLOW}   -> 正在卸载旧的 OpenRC 服务...${NC}\n"
+        rc-service komari-agent stop >/dev/null 2>&1
+        rc-service komari-agent zap >/dev/null 2>&1
+        rc-update del komari-agent default >/dev/null 2>&1
+        rm -f /etc/init.d/komari-agent
+    fi
+
+    # B. 彻底清理并卸载旧的 Systemd (Ubuntu/Debian) 服务
+    if [ -f /etc/systemd/system/komari-agent.service ] || command -v systemctl >/dev/null 2>&1; then
+        printf "${YELLOW}   -> 正在卸载旧的 Systemd 服务...${NC}\n"
+        systemctl stop komari-agent >/dev/null 2>&1
+        systemctl disable komari-agent >/dev/null 2>&1
+        rm -f /etc/systemd/system/komari-agent.service
+        systemctl daemon-reload >/dev/null 2>&1
+    fi
+
+    # C. 暴力突击
+    printf "${YELLOW}   -> 正在猎杀残留孤儿进程...${NC}\n"
+    for pid in $(pidof komari-agent 2>/dev/null); do
+        kill -9 "$pid" >/dev/null 2>&1
+    done
+
+    # D. 斩草除根
+    rm -f "$BIN_PATH"
+    rm -f /var/run/komari-agent.pid
+    printf "${GREEN}   ✔ 旧版本已完全人间蒸发，系统环境已纯净。${NC}\n"
+
+    # 5. 架构检测
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64) BIN_ARCH="amd64" ;;
+        aarch64|arm64) BIN_ARCH="arm64" ;;
+        i386|i686) BIN_ARCH="386" ;;
+        *) printf "${RED}未知的系统架构: $ARCH${NC}\n"; exit 1 ;;
+    esac
+
+    # 6. 下载全新二进制程序
+    printf "${YELLOW}[2/4] 正在下载官方轻量化二进制程序...${NC}\n"
+    mkdir -p $(dirname "$BIN_PATH")
+    DOWNLOAD_URL="https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${BIN_ARCH}"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -L -k -o "$BIN_PATH" "$DOWNLOAD_URL"
+    else
+        wget --no-check-certificate -O "$BIN_PATH" "$DOWNLOAD_URL" 2>/dev/null || wget -O "$BIN_PATH" "$DOWNLOAD_URL"
+    fi
+
+    if [ ! -f "$BIN_PATH" ] || [ ! -s "$BIN_PATH" ]; then
+        printf "${RED}❌ 错误：文件下载失败，请检查小鸡的网络状态。${NC}\n"
+        exit 1
+    fi
+    chmod +x "$BIN_PATH"
+
+    # 7. 系统服务托管
+    printf "${YELLOW}[3/4] 正在配置系统守护服务...${NC}\n"
+
+    # A. Alpine Linux (OpenRC)
+    if [ -f /sbin/openrc-run ] || { [ -d /etc/init.d ] && [ ! -f /lib/systemd/systemd ]; }; then
+        printf "${GREEN}   配置全新 OpenRC 守护系统 (Alpine Linux)${NC}\n"
+        cat << END_OPENRC > /etc/init.d/komari-agent
+#!/sbin/openrc-run
+name="komari-agent"
+description="Komari Agent Secure Service"
+command="${BIN_PATH}"
+command_args="-e ${SERVER_URL} -t ${SECRET_TOKEN} ${EXTRA_ARGS}"
+pidfile="/var/run/\${RC_SVCNAME}.pid"
+command_background="true"
+depend() {
+    need net
+}
+END_OPENRC
+        chmod +x /etc/init.d/komari-agent
+        rc-update add komari-agent default >/dev/null 2>&1
+        rc-service komari-agent zap >/dev/null 2>&1
+        rc-service komari-agent start >/dev/null 2>&1
+
+    # B. Systemd
+    elif command -v systemctl >/dev/null 2>&1; then
+        printf "${GREEN}   配置全新 Systemd 守护系统 (Ubuntu/Debian/CentOS)${NC}\n"
+        cat << END_SYSTEMD > /etc/systemd/system/komari-agent.service
+[Unit]
+Description=Komari Agent Secure Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${BIN_PATH} -e ${SERVER_URL} -t ${SECRET_TOKEN} ${EXTRA_ARGS}
+Restart=always
+RestartSec=5
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+END_SYSTEMD
+        systemctl daemon-reload
+        systemctl enable komari-agent >/dev/null 2>&1
+        systemctl restart komari-agent >/dev/null 2>&1
+    else
+        nohup "$BIN_PATH" -e "$SERVER_URL" -t "$SECRET_TOKEN" $EXTRA_ARGS >/dev/null 2>&1 &
+    fi
+
+    # 8. 闭环验证
+    printf "${YELLOW}[4/4] 正在对新服务进行单例运行锁体检...${NC}\n"
+    sleep 2
+
+    PROCESS_COUNT=$(pidof komari-agent | wc -w)
+
+    printf "${GREEN}=======================================================${NC}\n"
+    printf "${GREEN} 🎉 Komari Agent 纯净全新部署完毕！${NC}\n"
+    printf " 当前全系统活跃进程数: ${YELLOW}$PROCESS_COUNT${NC} (标准单例应该为 1)\n"
+    printf " 系统服务自启锁状态:   ${GREEN}已全新锁定激活${NC}\n"
+    printf "${GREEN}=======================================================${NC}\n"
+    
+    printf "\n按任意键返回主菜单..."
+    read -r _
+    show_menu
+}
+
+# 菜单 2：一键升级工具箱自身
+upgrade_myself() {
+    clear
+    printf "${YELLOW}正在从 GitHub 检查并拉取最新工具箱脚本...${NC}\n"
+    
+    LOCAL_PATH="/usr/local/bin/tz"
+    TMP_FILE="/tmp/tz_update.sh"
+    
+    # 下载到临时文件防挂
+    if command -v curl >/dev/null 2>&1; then
+        curl -sSL -k -o "$TMP_FILE" "$GITHUB_URL"
+    else
+        wget --no-check-certificate -O "$TMP_FILE" "$GITHUB_URL" >/dev/null 2>&1
+    fi
+    
+    if [ $? -eq 0 ] && [ -s "$TMP_FILE" ]; then
+        mv "$TMP_FILE" "$LOCAL_PATH"
+        chmod +x "$LOCAL_PATH"
+        printf "${GREEN}✔ 脚本已成功一键升级到 GitHub 最新版本！${NC}\n"
+        printf "${GREEN}请重新输入 tz 即可启用新版功能。${NC}\n"
+        exit 0
+    else
+        rm -f "$TMP_FILE"
+        printf "${RED}❌ 升级失败！请检查服务器网络或检查 GITHUB_URL 是否正确。${NC}\n"
+        printf "\n按任意键返回主菜单..."
+        read -r _
+        show_menu
+    fi
+}
+
+# 交互主菜单
+show_menu() {
+    clear
+    printf "${GREEN}=======================================================${NC}\n"
+    printf "${GREEN}    Komari Agent 智能管理工具箱 (快捷键: tz)          ${NC}\n"
+    printf "${GREEN}=======================================================${NC}\n"
+    printf "  ${YELLOW}[1]${NC} 全新纯净卸载 & 安装 Komari Agent (原功能)\n"
+    printf "  ${YELLOW}[2]${NC} 一键升级 tz 脚本自身\n"
+    printf "  ${YELLOW}[0]${NC} 退出工具箱\n"
+    printf "${GREEN}=======================================================${NC}\n"
+    printf "请选择操作 [0-2]: "
+    read -r CHOICE
+
+    case "$CHOICE" in
+        1) run_original_installer ;;
+        2) upgrade_myself ;;
+        0) printf "\n老铁再见！\n"; exit 0 ;;
+        *) printf "${RED}输入错误，请重新选择！${NC}\n"; sleep 1; show_menu ;;
+    esac
+}
+
+# 脚本入口
+show_menu
