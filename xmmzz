@@ -1,13 +1,14 @@
 #!/bin/bash
 # ====================================================
 # 项目名称: 极简网络中转管理面板 (主控模块)
-# 项目版本: v2.0.0 (模块化重构)
+# 项目版本: v2.1.0 (模块化重构优化版)
 # ====================================================
 
 GITHUB_REPO_URL="https://raw.githubusercontent.com/yunfeibuzai/xmm/main"
 SCRIPT_DIR="/root/relay_scripts"
 
-# 更新为对应的模块文件名
+# 定义主面板和子模块的文件名
+MAIN_PANEL_NAME="xmmzz" # 请确保这与你 GitHub 仓库中的主控脚本名字一致
 RELAY_MODULE="${SCRIPT_DIR}/xmmrelay"
 DDNS_MODULE="${SCRIPT_DIR}/xmmddns"
 
@@ -26,12 +27,12 @@ init_env() {
         sleep 1.5
     fi
 
-    # 动态拉取子模块 (如果不存在，则从你的 GitHub 仓库拉取)
+    # 动态拉取子模块
     if [ ! -f "$RELAY_MODULE" ]; then
-        curl -sSfL "${GITHUB_REPO_URL}/xmmrelay" -o "$RELAY_MODULE" && chmod +x "$RELAY_MODULE"
+        curl -sSfL --retry 3 "${GITHUB_REPO_URL}/xmmrelay" -o "$RELAY_MODULE" && chmod +x "$RELAY_MODULE"
     fi
     if [ ! -f "$DDNS_MODULE" ]; then
-        curl -sSfL "${GITHUB_REPO_URL}/xmmddns" -o "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
+        curl -sSfL --retry 3 "${GITHUB_REPO_URL}/xmmddns" -o "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
     fi
 }
 
@@ -44,24 +45,29 @@ call_ddns() {
     [ -f "$DDNS_MODULE" ] && bash "$DDNS_MODULE" "$1" || echo -e "${RED}[-] DDNS模块缺失，请检查网络或执行更新！${PLAIN}"
 }
 
-# 一键更新功能 (适配你的新文件名)
+# 一键更新功能
 update_all_scripts() {
     echo -e "\n${CYAN}[*] 正在从 GitHub 同步所有模块代码...${PLAIN}"
-    # 假设你的主控脚本在仓库里叫 xmmzz，如果叫别的请自行修改下面这行
-    curl -sSfL "${GITHUB_REPO_URL}/xmmzz" -o /tmp/xmmzz.tmp
-    curl -sSfL "${GITHUB_REPO_URL}/xmmrelay" -o /tmp/xmmrelay.tmp
-    curl -sSfL "${GITHUB_REPO_URL}/xmmddns" -o /tmp/xmmddns.tmp
+    
+    # 增加 --retry 参数增强下载稳定性
+    curl -sSfL --retry 3 "${GITHUB_REPO_URL}/${MAIN_PANEL_NAME}" -o /tmp/${MAIN_PANEL_NAME}.tmp
+    curl -sSfL --retry 3 "${GITHUB_REPO_URL}/xmmrelay" -o /tmp/xmmrelay.tmp
+    curl -sSfL --retry 3 "${GITHUB_REPO_URL}/xmmddns" -o /tmp/xmmddns.tmp
 
     # 效验下载是否成功
-    if grep -q "#!/bin/bash" /tmp/xmmzz.tmp; then
-        mv /tmp/xmmzz.tmp /usr/local/bin/xmm && chmod +x /usr/local/bin/xmm
+    if grep -q "#!/bin/bash" /tmp/${MAIN_PANEL_NAME}.tmp; then
+        mv /tmp/${MAIN_PANEL_NAME}.tmp /usr/local/bin/xmm && chmod +x /usr/local/bin/xmm
         mv /tmp/xmmrelay.tmp "$RELAY_MODULE" && chmod +x "$RELAY_MODULE"
-        mv /tmp/xmmddns.tmp "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
+        
+        # 兼容处理 DDNS 模块（防止因未创建该文件而报错）
+        [ -f /tmp/xmmddns.tmp ] && grep -q "#!/bin/bash" /tmp/xmmddns.tmp && mv /tmp/xmmddns.tmp "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
+        
+        rm -f /tmp/*.tmp
         echo -e "${GREEN}[+] 所有模块升级成功！正在重新载入...${PLAIN}"
         sleep 1; exec bash /usr/local/bin/xmm
     else
         echo -e "${RED}[-] 下载失败，可能遭遇网络波动，请稍后再试。${PLAIN}"
-        rm -f /tmp/xmmzz.tmp /tmp/xmmrelay.tmp /tmp/xmmddns.tmp
+        rm -f /tmp/${MAIN_PANEL_NAME}.tmp /tmp/xmmrelay.tmp /tmp/xmmddns.tmp
     fi
     echo -e "\n按回车键返回..." && read -r
 }
@@ -74,7 +80,7 @@ init_env
 while true; do
     clear
     echo "======================================================"
-    echo -e "    ${GREEN}极简网络中转管理面板${PLAIN} ${CYAN}(模块化核心) v2.0.0${PLAIN}"
+    echo -e "    ${GREEN}极简网络中转管理面板${PLAIN} ${CYAN}(模块化核心) v2.1.0${PLAIN}"
     echo "======================================================"
     echo -e "  ${GREEN}1.${PLAIN} 安装中转依赖 (Realm/Socat)"
     echo -e "  ${GREEN}2.${PLAIN} 追加新中转配置"
