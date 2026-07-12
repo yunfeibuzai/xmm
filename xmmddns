@@ -1,6 +1,7 @@
 #!/bin/bash
 # ====================================================
 # 模块名称: Cloudflare DDNS 子系统 (优化版)
+# 更新内容: 支持自动清理多条同名冗余解析、兼容 Alpine 依赖
 # ====================================================
 
 SCRIPT_DIR="/root/relay_scripts"
@@ -11,11 +12,12 @@ GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; PL
 setup_ddns() {
     echo -e "\n${CYAN}--- 配置 Cloudflare DDNS ---${PLAIN}"
     
-    # 检查并安装核心依赖 jq
+    # 检查并安装核心依赖 jq (已增加 Alpine 支持)
     if ! command -v jq &> /dev/null; then
         echo -e "${YELLOW}[*] 未检测到 jq，正在自动安装以保障解析稳定性...${PLAIN}"
-        if [ -x "$(command -v apt-get)" ]; then apt-get update >/dev/null 2>&1 && apt-get install -y jq >/dev/null 2>&1
-        elif [ -x "$(command -v yum)" ]; then yum install -y epel-release >/dev/null 2>&1 && yum install -y jq >/dev/null 2>&1
+        if command -v apt-get >/dev/null 2>&1; then apt-get update >/dev/null 2>&1 && apt-get install -y jq >/dev/null 2>&1
+        elif command -v apk >/dev/null 2>&1; then apk update >/dev/null 2>&1 && apk add jq >/dev/null 2>&1
+        elif command -v yum >/dev/null 2>&1; then yum install -y epel-release >/dev/null 2>&1 && yum install -y jq >/dev/null 2>&1
         else echo -e "${RED}[-] 自动安装 jq 失败，请手动安装后重试。${PLAIN}"; return 1; fi
     fi
 
@@ -61,13 +63,23 @@ if [ "$API_SUCCESS" != "true" ]; then
     exit 1
 fi
 
-# 3. 统计记录数量，防止一个域名对应多个 IP 产生混乱
+# 3. 统计记录数量，清理冗余记录
 RECORD_COUNT=$(echo "$RECORD_INFO" | jq -r '.result | length')
 
 if [ "$RECORD_COUNT" -gt 1 ]; then
-    write_log "⚠️ 警告：发现域名存在多个同类型记录！为防止混乱，请前往 CF 后台手动清理至 1 个。"
-    exit 1
-elif [ "$RECORD_COUNT" -eq 1 ]; then
+    write_log "⚠️ 发现多条同名解析记录，正在自动清理冗余..."
+    # 遍历删除所有匹配的解析记录
+    for id in $(echo "$RECORD_INFO" | jq -r '.result[].id'); do
+        curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${id}" \
+            -H "Authorization: Bearer ${CF_TOKEN}" \
+            -H "Content-Type: application/json" >/dev/null
+    done
+    # 将记录数强制置 0，使脚本继续走下方的【新建】流程
+    RECORD_COUNT=0
+fi
+
+# 4. 执行更新或新建动作
+if [ "$RECORD_COUNT" -eq 1 ]; then
     # 存在唯一记录，提取 ID 和 旧 IP，判断是否需要更新
     RECORD_ID=$(echo "$RECORD_INFO" | jq -r '.result[0].id')
     OLD_IP=$(echo "$RECORD_INFO" | jq -r '.result[0].content')
@@ -81,8 +93,8 @@ elif [ "$RECORD_COUNT" -eq 1 ]; then
     else
         write_log "ℹ️ IP 未改变 ($CURRENT_IP)"
     fi
-else
-    # 不存在记录，执行新建动作
+elif [ "$RECORD_COUNT" -eq 0 ]; then
+    # 不存在记录（或已被上方的排障清理），执行新建动作
     RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
         -H "Authorization: Bearer ${CF_TOKEN}" \
         -H "Content-Type: application/json" \
@@ -95,6 +107,9 @@ EOF
     sed -i "s|MY_DOMAIN|${ddns_domain}|g; s|MY_IP_TYPE|${ddns_type}|g; s|MY_CF_TOKEN|${cf_token}|g; s|MY_ZONE_ID|${cf_zone_id}|g; s|MY_RECORD_TYPE|${RECORD_TYPE}|g; s|MY_LOG_FILE|${DDNS_LOG}|g" "$DDNS_SCRIPT"
     chmod +x "$DDNS_SCRIPT"
     
+    # 预先创建 Crontab 缓存目录（针对 Alpine）
+    mkdir -p /root/.cache 2>/dev/null
+
     echo -e "${YELLOW}[*] 尝试首次同步...${PLAIN}"
     bash "$DDNS_SCRIPT"
     
