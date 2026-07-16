@@ -1,19 +1,18 @@
 #!/bin/bash
 # =================================================================
-# 麦卖云 Cloudflare Argo Tunnel 独立日志诊断引擎 (修复版)
-# 支持 Systemd (Ubuntu/Debian/CentOS) 与 OpenRC (Alpine) 双模自适应
+# 麦卖云 Cloudflare Argo Tunnel 智能诊断引擎 (极速进化版)
+# 独创：配置自动剖析、内部端口监听对齐检测、进程存活穿透探针
 # =================================================================
 
-# 1. 初始化标准控制台颜色变量（确保脱离主脚本后颜色不失效）
+# 1. 初始化标准控制台颜色变量
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 
 # 权限预检
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
-# 2. 核心日志诊断引擎函数
 view_cf_tunnel_logs() {
-    echo -e "\n${cyan}====== 🔍 CF 隧道日志诊断 ======${plain}"
+    echo -e "\n${cyan}====== 🔍 CF 隧道实时智能诊断引擎 ======${plain}"
     local tunnels=()
     
     # 动态抓取 Systemd 环境下的独立隧道
@@ -40,33 +39,88 @@ view_cf_tunnel_logs() {
         return
     fi
 
-    # 打印隧道列表
-    echo -e "${green}检测到当前机器存在以下独立隧道：${plain}"
-    local i=1
-    for t in "${tunnels[@]}"; do
-        echo -e "  ${green}${i}.${plain} 隧道名称: ${cyan}${t}${plain}"
-        ((i++))
-    done
+    local target=""
+    # 🌟 优化：如果只有一个隧道，直接免输进入诊断
+    if [[ ${#tunnels[@]} -eq 1 ]]; then
+        target="${tunnels[0]}"
+        echo -e "${green}检测到当前机器仅存在 1 个隧道，已自动选定: ${cyan}${target}${plain}"
+    else
+        # 打印隧道列表
+        echo -e "${green}检测到当前机器存在以下独立隧道：${plain}"
+        local i=1
+        for t in "${tunnels[@]}"; do
+            echo -e "  ${green}${i}.${plain} 隧道名称: ${cyan}${t}${plain}"
+            ((i++))
+        done
 
-    # 读取交互输入
-    read -rp "请输入要查看日志的隧道序号 [1-${#tunnels[@]}]: " sel
-    if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#tunnels[@]} )); then
-        echo -e "${red}无效输入！${plain}"
-        return
+        # 读取交互输入
+        read -rp "请输入要查看日志的隧道序号 [1-${#tunnels[@]}]: " sel
+        if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#tunnels[@]} )); then
+            echo -e "${red}无效输入！${plain}"
+            return
+        fi
+        target="${tunnels[$((sel-1))]}"
     fi
 
-    local target="${tunnels[$((sel-1))]}"
-    echo -e "\n${yellow}正在获取隧道 [${target}] 的最近 50 条日志...${plain}"
-    echo -e "${magenta}------------------------------------------------------${plain}"
-
-    # 3. 动态识别环境并提取日志（已修复 Alpine 匹配规则）
+    echo -e "\n${cyan}====== [ 1. 进程存活诊断 ] ======${plain}"
+    local pid=""
     if command -v systemctl &>/dev/null; then
-        # Systemd 环境直接读取 journal 日志
+        pid=$(systemctl show -p MainPID "cf-${target}" 2>/dev/null | cut -d= -f2)
+        [[ "$pid" == "0" ]] && pid=""
+    elif [ -f "/run/cf-${target}.pid" ]; then
+        pid=$(cat "/run/cf-${target}.pid" 2>/dev/null)
+    fi
+
+    if [[ -n "$pid" ]] && ps -p "$pid" &>/dev/null; then
+        echo -e "进程状态: ${green}● 正在运行 (PID: ${pid})${plain}"
+    else
+        echo -e "进程状态: ${red}○ 未在运行 (服务可能已停止或崩溃)${plain}"
+    fi
+
+    # 🌟 核心硬核进化：主动剖析配置文件，检查 503 隐患
+    echo -e "\n${cyan}====== [ 2. 内部端口对齐探针 ] ======${plain}"
+    local config_file="/etc/cloudflared/${target}.yml"
+    [[ ! -f "$config_file" ]] && config_file="/root/.cloudflared/config.yml"
+
+    if [[ -f "$config_file" ]]; then
+        # 从配置文件中提取实际转发的本地 Service 端口与协议
+        local forward_url
+        forward_url=$(awk '/service:/ && !/http_status/ {print $2}' "$config_file" | head -n 1)
+        
+        if [[ -n "$forward_url" ]]; then
+            local forward_port
+            forward_port=$(echo "$forward_url" | grep -oE '[0-9]+$')
+            echo -e "配置文件: ${green}${config_file}${plain}"
+            echo -e "穿透目标: ${yellow}${forward_url}${plain}"
+
+            # 兼容 Alpine 的 netstat 监听检测
+            if command -v ss &>/dev/null; then
+                listen_check=$(ss -tlnp | grep -E "(:| )${forward_port} ")
+            else
+                listen_check=$(netstat -an | grep -E "LISTEN" | grep -E "(:|\.)${forward_port} ")
+            fi
+
+            if [[ -n "$listen_check" ]]; then
+                echo -e "端口状态: ${green}✔ 正常开门中！本地有服务正在监听 ${forward_port} 端口。${plain}"
+            else
+                echo -e "端口状态: ${red}❌ 致命警告！本地没有任何服务监听 ${forward_port} 端口！${plain}"
+                echo -e "          ${yellow}👉 这会导致外网访问 100% 报错 503 Service Unavailable！${plain}"
+                echo -e "          ${yellow}👉 请检查后端核心（如 V2bX）是否开启，或端口是否配错。${plain}"
+            fi
+        else
+            echo -e "${yellow}未在配置文件中解析到本地转发规则(ingress)。${plain}"
+        fi
+    else
+        echo -e "${yellow}未找到本地配置文件，跳过端口对齐检测。${plain}"
+    fi
+
+    # 3. 日志提取输出
+    echo -e "\n${cyan}====== [ 3. 历史日志诊断 (最近 50 条) ] ======${plain}"
+    echo -e "${magenta}------------------------------------------------------${plain}"
+    if command -v systemctl &>/dev/null; then
         journalctl -u "cf-${target}" -n 50 --no-pager
     elif command -v rc-service &>/dev/null; then
-        # Alpine OpenRC 环境多路径兼容性匹配
         if [[ -f "/var/log/cf-${target}.log" ]]; then
-            # 🌟 优先匹配最新优化的极简纯净版日志名
             tail -n 50 "/var/log/cf-${target}.log"
         elif [[ -f "/var/log/cf-${target}_err.log" ]]; then
             tail -n 50 "/var/log/cf-${target}_err.log"
@@ -81,7 +135,7 @@ view_cf_tunnel_logs() {
     # 排错干货提示
     echo -e "${yellow}💡 【排错提示】${plain}"
     echo -e "1. 若看到 ${red}Failed to serve quic connection${plain}，通常是被墙或网络质量差，建议将隧道协议改为 http2。"
-    echo -e "2. 若看到 ${red}connection refused${plain}，说明小鸡上的后端核心（如 V2bX）没运行，或端口没对齐（隧道指了 20026 但配置里写了别的端口）。"
+    echo -e "2. 若看到 ${red}connection refused${plain}，说明小鸡上的后端核心（如 V2bX）没运行，或者 V2bX 占用的端口跟隧道转发的端口没有对齐。"
 }
 
 # 执行诊断
