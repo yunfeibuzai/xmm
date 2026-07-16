@@ -7,10 +7,11 @@ echo -e "${cyan}====== 🛠️ Cloudflare Argo Tunnel 部署向导 (终极自愈
 # 1. 专项优化：Alpine 环境依赖预检 (自动补齐组件)
 if [ -f /etc/alpine-release ]; then
     echo -e "${yellow}检测到 Alpine Linux，正在静默安装必备依赖组件...${plain}"
-    apk add --no-cache wget ca-certificates gawk libc6-compat >/dev/null 2>&1
+    apk update >/dev/null 2>&1
+    apk add --no-cache wget curl ca-certificates gawk libc6-compat >/dev/null 2>&1
 fi
 
-# 2. 架构自适应优化
+# 2. 架构自适应优化与安全下载
 if ! command -v cloudflared &> /dev/null; then
     arch=$(uname -m)
     case "$arch" in
@@ -19,21 +20,31 @@ if ! command -v cloudflared &> /dev/null; then
         *) echo -e "${red}❌ 不支持的架构: $arch${plain}"; exit 1 ;;
     esac
     echo -e "${yellow}正在下载官方最新版 cloudflared (${cf_arch})...${plain}"
-    wget -qO /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"
+    if ! wget -qO /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"; then
+        echo -e "${red}❌ 下载 cloudflared 失败，请检查服务器网络！${plain}"; exit 1
+    fi
     chmod +x /usr/local/bin/cloudflared
 fi
 
-if [ ! -f ~/.cloudflared/cert.pem ]; then cloudflared tunnel login; fi
+# 确保证书目录存在
+mkdir -p ~/.cloudflared
+
+if [ ! -f ~/.cloudflared/cert.pem ]; then 
+    echo -e "${yellow}⚠️ 尚未登录，请复制下方链接在浏览器打开以授权 Cloudflare：${plain}"
+    cloudflared tunnel login
+    # 校验是否真登录成功
+    if [ ! -f ~/.cloudflared/cert.pem ]; then
+        echo -e "${red}❌ 未检测到授权证书(cert.pem)，部署终止！${plain}"; exit 1
+    fi
+fi
 
 read -rp "输入隧道名称 (如 node1): " tunnel_name
 if [ -z "$tunnel_name" ]; then echo -e "${red}❌ 名称不能为空！${plain}"; exit 1; fi
 
-# 3. 🌟 矩阵级 ID 与 密钥一致性校验 (彻底根治 530 与凭证不匹配问题)
+# 3. 🌟 矩阵级 ID 与密钥一致性校验 (彻底根治 530 与凭证不匹配问题)
 echo -e "${yellow}正在校验云端与本地的 ID 一致性...${plain}"
-# 获取云端最新的当前名称对应的 ID
 cloud_id=$(cloudflared tunnel list 2>/dev/null | awk -v name="$tunnel_name" '$2 == name {print $1}')
 
-# 检查本地是否存在完好的对应密钥文件
 local_json_ok=0
 if [ -n "$cloud_id" ]; then
     if [ -f "/root/.cloudflared/${cloud_id}.json" ] || [ -f "~/.cloudflared/${cloud_id}.json" ]; then
@@ -41,52 +52,41 @@ if [ -n "$cloud_id" ]; then
     fi
 fi
 
-# 核心自愈判断
 if [ -n "$cloud_id" ] && [ "$local_json_ok" -eq 1 ]; then
-    # 场景 1：云端有，本地有，且 ID 严丝合缝对得上，安全复用
     tunnel_id="$cloud_id"
     echo -e "${green}✅ 云端 ID 与本地密钥完美匹配，安全复用 ID: ${tunnel_id}${plain}"
 else
-    # 场景 2：有任何一处对不上（旧残留、ID错位、密钥丢失）
     echo -e "${yellow}⚠️ 检测到云端记录或本地密钥不匹配/有残留，正在启动全自动重置洗牌程序...${plain}"
     
-    # 停止可能正在运行的同名旧服务
+    # 停止旧服务
     if command -v systemctl &> /dev/null; then systemctl stop "cf-${tunnel_name}" 2>/dev/null; fi
     if command -v rc-service &> /dev/null; then rc-service "cf-${tunnel_name}" stop 2>/dev/null; fi
     
-    # 强行扬了云端的死记录
+    # 强行清理云端与本地死记录
     if [ -n "$cloud_id" ]; then
         echo -e "${yellow}正在注销云端陈旧死隧道...${plain}"
         cloudflared tunnel delete -f "$tunnel_name" >/dev/null 2>&1
     fi
-    
-    # 清理本地可能导致错位的、旧的同名 .yml 配置
     rm -f "/etc/cloudflared/${tunnel_name}.yml"
     
-    # 重新向云端申请全新的隧道
     echo -e "${cyan}正在重新向云端申请全新隧道 ID 并下发新密钥...${plain}"
     create_output=$(cloudflared tunnel create "$tunnel_name" 2>&1)
-    
-    # 从创建输出中精准抓取全新的 Tunnel ID
     tunnel_id=$(echo "$create_output" | grep -oE '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})' | head -n 1)
     
     if [ -z "$tunnel_id" ]; then
-        # 兜底抓取方案
         tunnel_id=$(cloudflared tunnel list | grep -w "$tunnel_name" | awk '{print $1}')
     fi
-    
     if [ -z "$tunnel_id" ]; then
-        echo -e "${red}❌ 隧道创建失败！错误日志：\n$create_output${plain}"
-        exit 1
+        echo -e "${red}❌ 隧道创建失败！错误日志：\n$create_output${plain}"; exit 1
     fi
     echo -e "${green}🎉 全新隧道创建成功！新 ID: ${tunnel_id}${plain}"
 fi
 
 # 4. 路由与端口绑定
-read -rp "绑定 CF 域名: " cf_domain
+read -rp "绑定 CF 域名 (如 jp.xxx.com): " cf_domain
 if [ -z "$cf_domain" ]; then echo -e "${red}❌ 域名不能为空！${plain}"; exit 1; fi
 
-echo "正在刷新云端 DNS 路由记录..."
+echo -e "${yellow}正在刷新云端 DNS 路由记录...${plain}"
 cloudflared tunnel route dns "$tunnel_name" "$cf_domain" >/dev/null 2>&1
 
 read -rp "本地端口 (默认 20026): " local_port
@@ -100,28 +100,25 @@ proto="http"
 mkdir -p /etc/cloudflared
 config_path="/etc/cloudflared/${tunnel_name}.yml"
 
-# 5. 彻底重写 YAML 生成逻辑：严格靠左对齐，根治 Bash 缩进 Bug
-cat <<EOF > "$config_path"
-tunnel: $tunnel_id
-credentials-file: /root/.cloudflared/${tunnel_id}.json
-EOF
+# 5. 彻底重写 YAML 生成逻辑：强制使用 127.0.0.1 阻断 IPv6 错误，并精确写入层级
+echo -e "${yellow}正在生成精确路由配置...${plain}"
+echo "tunnel: $tunnel_id" > "$config_path"
+echo "credentials-file: /root/.cloudflared/${tunnel_id}.json" >> "$config_path"
+echo "ingress:" >> "$config_path"
+echo "  - hostname: $cf_domain" >> "$config_path"
+echo "    service: ${proto}://127.0.0.1:${local_port}" >> "$config_path" # ⚠️ 强制锁定 IPv4
 
+# 安全注入 TLS 忽略配置
 if [[ "$proto" == "https" ]]; then
-cat <<EOF >> "$config_path"
-originRequest:
-  originServerName: $cf_domain
-  noTLSVerify: true
-EOF
+    echo "    originRequest:" >> "$config_path"
+    echo "      originServerName: $cf_domain" >> "$config_path"
+    echo "      noTLSVerify: true" >> "$config_path"
 fi
 
-cat <<EOF >> "$config_path"
-ingress:
-  - hostname: $cf_domain
-    service: ${proto}://localhost:${local_port}
-  - service: http_status:404
-EOF
+# 兜底规则
+echo "  - service: http_status:404" >> "$config_path"
 
-# 6. 守护进程服务注册 (根据当前系统环境，自动兼容标准 Systemd 或 Alpine OpenRC)
+# 6. 守护进程服务注册 (增加 --no-autoupdate 阻断静默闪退)
 if [ -d /run/systemd/system ] || command -v systemctl &> /dev/null; then
     echo -e "${yellow}检测到标准 Linux 环境，正在注册 Systemd 服务...${plain}"
     cat <<EOF > "/etc/systemd/system/cf-${tunnel_name}.service"
@@ -132,7 +129,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/cloudflared tunnel --protocol http2 --config ${config_path} run
+# ⚠️ 增加了 --no-autoupdate 参数
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --config ${config_path} run
 Restart=on-failure
 RestartSec=5
 
@@ -152,7 +150,8 @@ description="Cloudflare Argo Tunnel (${tunnel_name})"
 rc_ulimit=""
 
 command="/usr/local/bin/cloudflared"
-command_args="tunnel --protocol http2 --config ${config_path} run"
+# ⚠️ 增加了 --no-autoupdate 参数
+command_args="tunnel --no-autoupdate --protocol http2 --config ${config_path} run"
 command_background="yes"
 pidfile="/run/cf-${tunnel_name}.pid"
 output_log="/var/log/cf-${tunnel_name}.log"
@@ -168,6 +167,11 @@ EOF
     rc-service "cf-${tunnel_name}" restart
 fi
 
+echo -e "\n${green}=================================================${plain}"
 echo -e "${green}✅ 隧道 ${tunnel_name} 部署完成并成功上线！${plain}"
-echo -e "💡 记得在机场面板中把连接地址（Server）改为优选域名：${cyan}xmmcf.130209.xyz${plain}"
-echo -e "💡 节点的 Host / SNI 填入你刚才绑定的域名：${cyan}${cf_domain}${plain}"
+echo -e "${green}=================================================${plain}"
+echo -e "💡 【客户端配置指北】"
+echo -e " 1. 机场面板中的连接地址 (Server) 改为：${cyan}xmmcf.130209.xyz${plain}"
+echo -e " 2. 节点的 端口 (Port) 改为：${cyan}443${plain}"
+echo -e " 3. 节点的 Host / SNI 填入绑定的域名：${cyan}${cf_domain}${plain}"
+echo -e "=================================================\n"
