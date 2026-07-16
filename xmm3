@@ -1,35 +1,203 @@
 #!/bin/bash
-# 模块：追加节点配置
-red='\033[31m'; green='\033[32m'; yellow='\033[33m'; magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
+
+# =======================================================
+# 麦卖云 V2bX 节点独立追加向导引擎 (多面板共存/矩阵美化版)
+# =======================================================
+sh_ver="2.2.0"
+red='\033[31m'; green='\033[32m'; yellow='\033[33m'
+magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 config_file="/etc/V2bX/config.json"
 
-echo -e "\n${yellow}========== 进入配置追加向导模式 ==========${plain}"
-if [[ ! -f "$config_file" ]]; then echo -e "${red}[错误] 未找到配置文件${plain}"; exit 1; fi
+echo -e "\n${yellow}========== 进入多面板向导式追加模式 ==========${plain}"
 
-api_host=$(jq -r '.Nodes[0].ApiHost' "$config_file" 2>/dev/null)
-api_key=$(jq -r '.Nodes[0].ApiKey' "$config_file" 2>/dev/null)
-[[ -z "$api_host" || "$api_host" == "null" ]] && api_host="https://example.com"
+# 1. 前置依赖与文件检查
+if ! command -v jq &>/dev/null; then
+    echo -e "${red}[错误] 缺少 jq 依赖！追加模式需要解析 JSON 结构。${plain}"
+    echo -e "请先执行 ${cyan}apt install jq${plain} 或 ${cyan}yum install jq${plain} 安装后再试。"
+    exit 1
+fi
 
-echo -e "${green}[读取成功] 已对接机场: ${cyan}${api_host}${plain}"
-added_count=0
+if [[ ! -f "$config_file" ]]; then 
+    echo -e "${red}[错误] 未找到配置文件 (${config_file})，请先使用主生成脚本创建基础配置！${plain}"
+    exit 1
+fi
+
+# 2. 多面板对接逻辑：读取上次保存的凭证，但也允许输入新的
+saved_file="/etc/V2bX/.saved_creds"
+default_host="https://example.com"
+default_key=""
+
+if [[ -f "$saved_file" ]]; then
+    source "$saved_file" 2>/dev/null
+    default_host=${saved_host:-"https://example.com"}
+    default_key=${saved_key:-""}
+fi
+
+echo -e "\n${cyan}[提示] 当前处于追加模式，支持对接多个不同的机场面板。${plain}"
+read -rp "请 输 入 本 次 追 加 的 机 场 网 址 (默认: ${default_host})： " input_host
+api_host=${input_host:-"$default_host"}
+
+# 如果输入的域名和默认一致，且存在 key，则默认使用已保存的 key；否则强制要求输入
+if [[ -n "$default_key" && "$api_host" == "$default_host" ]]; then
+    read -rp "请 输 入 面 板 API Key (直接回车使用已保存的Key): " input_key
+    api_key=${input_key:-"$default_key"}
+else
+    api_key=""
+    while [[ -z "$api_key" ]]; do
+        read -rp "请 输 入 该 面 板 的 API Key： " api_key
+    done
+fi
+
+read -rp "是 否 将 该 凭 证 设 置 为 默 认 ？ (y/n) " save_yn
+if [[ "$save_yn" == "y" || "$save_yn" == "Y" ]]; then
+    echo "saved_host=\"$api_host\"" > "$saved_file"
+    echo "saved_key=\"$api_key\"" >> "$saved_file"
+    echo -e "${green}[提示] 凭证已更新锁定。${plain}"
+fi
+
+# 3. 收集追加的节点数据
+nodes_block=""
+has_xray=false
+has_sing=false
+has_hysteria2=false
+node_count=0
 
 while true; do
-    ((added_count++))
-    read -rp "请输入节点 Node ID: " node_id
-    read -rp "请输入传输协议(vless/vmess/trojan): " node_type
-    read -rp "请输入监听端口 (默认 20026): " input_port
+    ((node_count++))
+    echo -e "\n${cyan}--------------------------------------------${plain}"
+    echo -e "${cyan}🌟 开始配置第 ${node_count} 个追加节点：${plain}"
+    echo -e "${cyan}--------------------------------------------${plain}"
+    
+    # 初始化变量防止污染
+    core_num="" core_type="" node_id="" protocol_num="" node_type=""
+    reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token="" node_port=""
+
+    # 核心选择
+    echo -e "请 选 择 节 点 核 心 类 型 ："
+    echo -e "1. xray\n2. singbox\n3. hysteria2"
+    while [[ ! "$core_num" =~ ^[1-3]$ ]]; do read -rp "请 输 入 ： " core_num; done
+    case "$core_num" in 
+        1) core_type="xray"; has_xray=true ;; 
+        2) core_type="sing"; has_sing=true ;; 
+        3) core_type="hysteria2"; has_hysteria2=true ;; 
+    esac
+
+    while [[ -z "$node_id" ]]; do read -rp "请 输 入 节 点 Node ID： " node_id; done
+
+    # 协议选择
+    echo -e "请 选 择 节 点 传 输 协 议 ："
+    echo -e "1. Shadowsocks\n2. Vless\n3. Vmess\n4. Hysteria\n5. Hysteria2\n6. Trojan\n7. Tuic\n8. AnyTLS"
+    while [[ ! "$protocol_num" =~ ^[1-8]$ ]]; do read -rp "请 输 入 ： " protocol_num; done
+    case "$protocol_num" in
+        1) node_type="shadowsocks" ;; 2) node_type="vless" ;; 3) node_type="vmess" ;; 4) node_type="hysteria" ;;
+        5) node_type="hysteria2" ;; 6) node_type="trojan" ;; 7) node_type="tuic" ;; 8) node_type="anytls" ;;
+    esac
+
+    # TLS 逻辑
+    run_tls_flow=false
+    if [[ "$protocol_num" =~ ^[1368]$ ]]; then
+        read -rp "请 选 择 是 否 进 行 TLS配 置 ？ (y/n) " tls_yn
+        [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
+    elif [[ "$protocol_num" == "2" ]]; then
+        read -rp "请 选 择 是 否 为 reality节 点 ？ (y/n) " reality_yn
+        if [[ "$reality_yn" == "y" || "$reality_yn" == "Y" ]]; then
+            cert_mode="none"
+        else
+            read -rp "请 选 择 是 否 进 行 TLS配 置 ？ (y/n) " tls_yn
+            [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
+        fi
+    elif [[ "$protocol_num" =~ ^[457]$ ]]; then
+        run_tls_flow=true
+    fi
+
+    if [ "$run_tls_flow" = true ]; then
+        echo -e "请 选 择 证 书 申 请 模 式 ："
+        echo -e "1. http模 式 自 动 申 请 ， 节 点 域 名 已 正 确 解 析"
+        echo -e "2. dns模 式 自 动 申 请 ， 需 填 入 正 确 域 名 服 务商 API参 数"
+        echo -e "3. self模 式 ， 自 签 证 书 或 提 供 已 有 证 书 文 件"
+        while [[ ! "$cert_mode_num" =~ ^[1-3]$ ]]; do read -rp "请 输 入 ： " cert_mode_num; done
+
+        if [[ "$cert_mode_num" =~ ^[12]$ ]]; then
+            while [[ -z "$cert_domain" ]]; do read -rp "请输入证书申请域名 (如 domain.com): " cert_domain; done
+            if [[ "$cert_mode_num" == "1" ]]; then
+                cert_mode="http"
+            else
+                cert_mode="dns"
+                while [[ -z "$cf_token" ]]; do read -rp "CLOUDFLARE_DNS_API_TOKEN: 请 输入 你的 真实 CF_Token_ : " cf_token; done
+            fi
+        elif [[ "$cert_mode_num" == "3" ]]; then
+            cert_mode="self"
+        fi
+    fi
+
+    # 组装证书模块
+    if [[ "$cert_mode" == "dns" ]]; then
+        cert_block='{ "CertMode": "dns", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com", "Provider": "cloudflare", "DNSEnv": { "CLOUDFLARE_DNS_API_TOKEN": "'"${cf_token}"'" } }'
+    elif [[ "$cert_mode" == "http" ]]; then
+        cert_block='{ "CertMode": "http", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com" }'
+    elif [[ "$cert_mode" == "self" ]]; then
+        cert_block='{ "CertMode": "self", "RejectUnknownSni": false, "CertDomain": "cf.babymonster.cc.cd", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com" }'
+    else
+        cert_block='{ "CertMode": "none" }'
+    fi
+
+    read -rp "请 输 入 该 节 点 监 听 端 口 (直接回车默认 20026)： " input_port
     node_port=${input_port:-"20026"}
 
+    # 组装单节点 JSON 字符串
     current_node='{
-"Core": "xray", "ApiHost": "'"${api_host}"'", "ApiKey": "'"${api_key}"'", "NodeID": '"${node_id}"', "NodeType": "'"${node_type}"'",
+"Core": "'"${core_type}"'", "ApiHost": "'"${api_host}"'", "ApiKey": "'"${api_key}"'", "NodeID": '"${node_id}"', "NodeType": "'"${node_type}"'",
 "Timeout": 30, "ListenIP": "::", "SendIP": "0.0.0.0", "Port": '"${node_port}"', "DeviceOnlineMinTraffic": 200, "MinReportTraffic": 0,
-"TCPFastOpen": true, "SniffEnabled": true, "CertConfig": { "CertMode": "none" }
+"TCPFastOpen": true, "SniffEnabled": true, "CertConfig": '"${cert_block}"'
 }'
 
-    jq --argjson newNode "$current_node" '.Nodes += [$newNode]' "$config_file" > "${config_file}.tmp" && mv -f "${config_file}.tmp" "$config_file"
-    echo -e "${green}[成功] 节点 ID: ${node_id} 已追加。${plain}"
-    
-    read -rp "是否继续添加？(y/n) " continue_yn
-    [[ "$continue_yn" != "y" && "$continue_yn" != "Y" ]] && break
+    if [[ -z "$nodes_block" ]]; then
+        nodes_block="$current_node"
+    else
+        nodes_block="${nodes_block},${current_node}"
+    fi
+
+    echo -e ""
+    read -rp "是 否 继 续 追 加 节 点 ？ (y/n) " continue_yn
+    if [[ "$continue_yn" != "y" && "$continue_yn" != "Y" ]]; then break; fi
 done
-echo -e "${green}追加完毕！${plain}"
+
+# 4. 追加可能缺失的核心依赖 (Cores)
+cores_array=()
+if [ "$has_xray" = true ]; then
+    cores_array+=('{"Type": "xray", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}')
+fi
+if [ "$has_sing" = true ]; then
+    cores_array+=('{"Type": "sing", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}')
+fi
+if [ "$has_hysteria2" = true ]; then
+    cores_array+=('{"Type": "hysteria2", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}')
+fi
+cores_block=$(IFS=,; echo "${cores_array[*]}")
+
+if [[ ! -f /etc/V2bX/sing_origin.json ]]; then
+    cat << 'EOF' > /etc/V2bX/sing_origin.json
+{ "outbounds": [ { "type": "direct", "tag": "direct" } ] }
+EOF
+fi
+
+# 5. 使用 jq 安全、精准合并配置到原文件
+echo -e "\n${yellow}正在将 ${node_count} 个节点安全并入现有配置文件...${plain}"
+
+# 将拼接的字符串转为合法的 JSON 数组并传入 jq 处理
+if jq --argjson newNodes "[$nodes_block]" \
+      --argjson newCores "[$cores_block]" \
+      '.Nodes += $newNodes | .Cores = (.Cores + $newCores | unique_by(.Type))' \
+      "$config_file" > "${config_file}.tmp"; then
+      
+    mv -f "${config_file}.tmp" "$config_file"
+    echo -e "${green}[成功] 共计 ${node_count} 个节点已成功追加，支持双机场多节点并发运行！${plain}"
+    
+    # 自动重启 V2bX 生效
+    systemctl restart v2bx 2>/dev/null || v2bx restart 2>/dev/null
+    echo -e "${cyan}[提示] 尝试重启 V2bX 服务已下发。${plain}"
+else
+    rm -f "${config_file}.tmp"
+    echo -e "${red}[错误] JSON 合并失败！请检查您输入的某些参数（如 Token 或证书）是否含有破坏语法的特殊字符。${plain}"
+    exit 1
+fi
