@@ -1,17 +1,19 @@
 #!/bin/bash
-# 模块：部署 CF 隧道 (VLESS+TLS 存量节点变隧道 - 完美兼容 Alpine/Systemd/OpenRC 终极自愈守护版)
+# =========================================================
+# 项目: Cloudflare Argo Tunnel 一键终极自愈守护版部署脚本
+# 适用: 完美兼容 Alpine (OpenRC) / 传统 Linux (Systemd)
+# =========================================================
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
 
 echo -e "${cyan}====== 🛠️ Cloudflare Argo Tunnel 部署向导 (终极守护版) ======${plain}"
 
-# 1. 专项优化：Alpine 环境依赖预检 (自动补齐组件，包含 gcompat 与 openrc)
+# 1. 专项优化：Alpine 环境依赖预检 (自动补齐组件)
 if [ -f /etc/alpine-release ]; then
     echo -e "${yellow}检测到 Alpine Linux，正在静默安装必备依赖组件...${plain}"
     apk update >/dev/null 2>&1
     apk add --no-cache wget curl ca-certificates gawk libc6-compat gcompat openrc >/dev/null 2>&1
 fi
 
-# 统一使用绝对路径，避免波浪号 ~ 在双引号内失效的问题
 CONFIG_DIR="$HOME/.cloudflared"
 mkdir -p "$CONFIG_DIR"
 
@@ -33,7 +35,6 @@ fi
 if [ ! -f "$CONFIG_DIR/cert.pem" ]; then 
     echo -e "${yellow}⚠️ 尚未登录，请复制下方出来的网址并在浏览器打开以授权 Cloudflare：${plain}"
     cloudflared tunnel login
-    # 校验是否真登录成功
     if [ ! -f "$CONFIG_DIR/cert.pem" ]; then
         echo -e "${red}❌ 未检测到授权证书(cert.pem)，部署终止！${plain}"; exit 1
     fi
@@ -45,7 +46,7 @@ chmod 600 "$CONFIG_DIR/cert.pem" 2>/dev/null
 read -rp "输入隧道名称 (如 japan): " tunnel_name
 if [ -z "$tunnel_name" ]; then echo -e "${red}❌ 名称不能为空！${plain}"; exit 1; fi
 
-# 3. 🌟 矩阵级 ID 与密钥一致性校验 (彻底根治 530 与凭证不匹配问题)
+# 3. 🌟 矩阵级 ID 与密钥一致性校验
 echo -e "${yellow}正在校验云端与本地的 ID 一致性...${plain}"
 cloud_id=$(cloudflared tunnel list 2>/dev/null | awk -v name="$tunnel_name" '$2 == name {print $1}')
 
@@ -62,11 +63,9 @@ if [ -n "$cloud_id" ] && [ "$local_json_ok" -eq 1 ]; then
 else
     echo -e "${yellow}⚠️ 检测到云端记录或本地密钥不匹配/有残留，正在启动全自动重置洗牌程序...${plain}"
     
-    # 停止旧服务
     if command -v systemctl &> /dev/null; then systemctl stop "cf-${tunnel_name}" 2>/dev/null; fi
     if command -v rc-service &> /dev/null; then rc-service "cf-${tunnel_name}" stop 2>/dev/null; fi
     
-    # 强行清理云端与本地死记录
     if [ -n "$cloud_id" ]; then
         echo -e "${yellow}正在注销云端陈旧死隧道...${plain}"
         cloudflared tunnel delete -f "$tunnel_name" >/dev/null 2>&1
@@ -88,7 +87,6 @@ fi
 
 # 🛡️ 安全加固：收紧 JSON 隧道密钥权限
 chmod 600 "$CONFIG_DIR/${tunnel_id}.json" 2>/dev/null
-
 # 4. 路由与端口绑定
 read -rp "绑定 CF 域名 (如 jp.xxx.com): " cf_domain
 if [ -z "$cf_domain" ]; then echo -e "${red}❌ 域名不能为空！${plain}"; exit 1; fi
@@ -108,7 +106,7 @@ mkdir -p /etc/cloudflared
 config_path="/etc/cloudflared/${tunnel_name}.yml"
 log_path="/var/log/cf-${tunnel_name}.log"
 
-# 5. 彻底重写 YAML 生成逻辑：强制使用 127.0.0.1 阻断 IPv6 错误，并精确写入层级
+# 5. 生成 YAML 配置：强制锁定 IPv4
 echo -e "${yellow}正在生成精确路由配置...${plain}"
 echo "tunnel: $tunnel_id" > "$config_path"
 echo "credentials-file: $CONFIG_DIR/${tunnel_id}.json" >> "$config_path"
@@ -116,14 +114,12 @@ echo "ingress:" >> "$config_path"
 echo "  - hostname: $cf_domain" >> "$config_path"
 echo "    service: ${proto}://127.0.0.1:${local_port}" >> "$config_path"
 
-# 安全注入 TLS 忽略配置
 if [[ "$proto" == "https" ]]; then
     echo "    originRequest:" >> "$config_path"
     echo "      originServerName: $cf_domain" >> "$config_path"
     echo "      noTLSVerify: true" >> "$config_path"
 fi
 
-# 兜底规则
 echo "  - service: http_status:404" >> "$config_path"
 
 # 6. 守护进程服务注册 (自动判断 Systemd 与 Alpine OpenRC)
@@ -137,4 +133,51 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --config ${config_path} run
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:${log_path}
+StandardError=append:${log_path}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable "cf-${tunnel_name}" >/dev/null 2>&1
+    systemctl restart "cf-${tunnel_name}"
+    echo -e "${green}🚀 Systemd 服务部署完毕并已启动！(日志路径: ${log_path})${plain}"
+
+elif [ -f /etc/alpine-release ] || command -v rc-service &> /dev/null; then
+    echo -e "${yellow}检测到 Alpine / OpenRC 环境，正在配置 supervise-daemon 进程守护...${plain}"
+    cat <<EOF > "/etc/init.d/cf-${tunnel_name}"
+#!/sbin/openrc-run
+
+name="cf-${tunnel_name}"
+description="Cloudflare Argo Tunnel (\${name})"
+command="/usr/local/bin/cloudflared"
+command_args="tunnel --no-autoupdate --protocol http2 --config ${config_path} run"
+supervisor="supervise-daemon"
+pidfile="/run/cf-${tunnel_name}.pid"
+output_log="${log_path}"
+error_log="${log_path}"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+    chmod +x "/etc/init.d/cf-${tunnel_name}"
+    rc-update add "cf-${tunnel_name}" default >/dev/null 2>&1
+    rc-service "cf-${tunnel_name}" restart
+    echo -e "${green}🚀 Alpine OpenRC 服务部署完毕并已启动！(日志路径: ${log_path})${plain}"
+else
+    echo -e "${yellow}⚠️ 未检测到服务管理器，将采用后台进程模式运行...${plain}"
+    nohup /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --config "${config_path}" run > "${log_path}" 2>&1 &
+    echo -e "${green}🚀 后台进程已启动！(日志路径: ${log_path})${plain}"
+fi
+
+echo -e "${green}=========================================="
+echo -e "🎉 部署完成！隧道名称: ${tunnel_name}"
+echo -e "🔗 绑定域名: ${cf_domain} -> 127.0.0.1:${local_port}"
+echo -e "📄 运行日志: tail -f ${log_path}"
+echo -e "==========================================${plain}"
