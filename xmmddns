@@ -1,25 +1,58 @@
 #!/bin/bash
 # ====================================================
-# 模块名称: Cloudflare DDNS 子系统 (优化版)
-# 更新内容: 支持自动清理多条同名冗余解析、兼容 Alpine 依赖
+# Project: Cloudflare DDNS Subsystem
+# Description: 自动更新 Cloudflare DNS 解析，支持 IPv4/IPv6，支持冗余清理
+# Author: YourName / YourProject
 # ====================================================
 
 SCRIPT_DIR="/root/relay_scripts"
 DDNS_LOG="/var/log/xmm_ddns.log"
 
-GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; PLAIN='\033[0m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+PLAIN='\033[0m'
 
+# ====================================================
+# 1. 核心依赖自动检测与安装
+# ====================================================
+install_dependencies() {
+    # 检测并安装 jq
+    if ! command -v jq &> /dev/null; then
+        echo -e "${YELLOW}[*] 未检测到 jq，正在自动安装...${PLAIN}"
+        if command -v apt-get >/dev/null 2>&1; then 
+            apt-get update >/dev/null 2>&1 && apt-get install -y jq >/dev/null 2>&1
+        elif command -v apk >/dev/null 2>&1; then 
+            apk update >/dev/null 2>&1 && apk add jq >/dev/null 2>&1
+        elif command -v yum >/dev/null 2>&1; then 
+            yum install -y epel-release >/dev/null 2>&1 && yum install -y jq >/dev/null 2>&1
+        fi
+    fi
+
+    # 检测并安装 crontab
+    if ! command -v crontab &> /dev/null; then
+        echo -e "${YELLOW}[*] 未检测到 crontab (定时任务)，正在自动安装...${PLAIN}"
+        if command -v apt-get >/dev/null 2>&1; then 
+            apt-get update >/dev/null 2>&1 && apt-get install -y cron >/dev/null 2>&1
+            systemctl enable --now cron >/dev/null 2>&1
+        elif command -v apk >/dev/null 2>&1; then 
+            apk update >/dev/null 2>&1 && apk add dcron >/dev/null 2>&1
+            rc-update add dcron >/dev/null 2>&1; crond
+        elif command -v yum >/dev/null 2>&1; then 
+            yum install -y crontabs >/dev/null 2>&1
+            systemctl enable --now crond >/dev/null 2>&1
+        fi
+    fi
+}
+
+# ====================================================
+# 2. 配置并生成 DDNS 核心脚本
+# ====================================================
 setup_ddns() {
     echo -e "\n${CYAN}--- 配置 Cloudflare DDNS ---${PLAIN}"
     
-    # 检查并安装核心依赖 jq (已增加 Alpine 支持)
-    if ! command -v jq &> /dev/null; then
-        echo -e "${YELLOW}[*] 未检测到 jq，正在自动安装以保障解析稳定性...${PLAIN}"
-        if command -v apt-get >/dev/null 2>&1; then apt-get update >/dev/null 2>&1 && apt-get install -y jq >/dev/null 2>&1
-        elif command -v apk >/dev/null 2>&1; then apk update >/dev/null 2>&1 && apk add jq >/dev/null 2>&1
-        elif command -v yum >/dev/null 2>&1; then yum install -y epel-release >/dev/null 2>&1 && yum install -y jq >/dev/null 2>&1
-        else echo -e "${RED}[-] 自动安装 jq 失败，请手动安装后重试。${PLAIN}"; return 1; fi
-    fi
+    install_dependencies
 
     read -p "[1/4] CF 解析域名 (例: relay.xmm.com): " ddns_domain
     read -p "[2/4] 解析类型 (4=IPv4, 6=IPv6): " ddns_type
@@ -28,11 +61,10 @@ setup_ddns() {
 
     RECORD_TYPE=$([ "$ddns_type" == "4" ] && echo "A" || echo "AAAA")
     
-    # 确保目录存在
+    # 确保脚本存放目录存在
     mkdir -p "$SCRIPT_DIR"
     DDNS_SCRIPT="${SCRIPT_DIR}/cf_ddns.sh"
-
-    # 生成内部 DDNS 脚本
+    # 写入内部执行脚本 (Heredoc)
     cat << 'EOF' > "$DDNS_SCRIPT"
 #!/bin/bash
 DOMAIN="MY_DOMAIN"
@@ -44,6 +76,7 @@ LOG_FILE="MY_LOG_FILE"
 
 write_log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    # 仅保留最近30条日志，防止磁盘占满
     tail -n 30 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
 }
 
@@ -68,19 +101,16 @@ RECORD_COUNT=$(echo "$RECORD_INFO" | jq -r '.result | length')
 
 if [ "$RECORD_COUNT" -gt 1 ]; then
     write_log "⚠️ 发现多条同名解析记录，正在自动清理冗余..."
-    # 遍历删除所有匹配的解析记录
     for id in $(echo "$RECORD_INFO" | jq -r '.result[].id'); do
         curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${id}" \
             -H "Authorization: Bearer ${CF_TOKEN}" \
             -H "Content-Type: application/json" >/dev/null
     done
-    # 将记录数强制置 0，使脚本继续走下方的【新建】流程
     RECORD_COUNT=0
 fi
 
 # 4. 执行更新或新建动作
 if [ "$RECORD_COUNT" -eq 1 ]; then
-    # 存在唯一记录，提取 ID 和 旧 IP，判断是否需要更新
     RECORD_ID=$(echo "$RECORD_INFO" | jq -r '.result[0].id')
     OLD_IP=$(echo "$RECORD_INFO" | jq -r '.result[0].content')
 
@@ -94,7 +124,6 @@ if [ "$RECORD_COUNT" -eq 1 ]; then
         write_log "ℹ️ IP 未改变 ($CURRENT_IP)"
     fi
 elif [ "$RECORD_COUNT" -eq 0 ]; then
-    # 不存在记录（或已被上方的排障清理），执行新建动作
     RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
         -H "Authorization: Bearer ${CF_TOKEN}" \
         -H "Content-Type: application/json" \
@@ -107,30 +136,50 @@ EOF
     sed -i "s|MY_DOMAIN|${ddns_domain}|g; s|MY_IP_TYPE|${ddns_type}|g; s|MY_CF_TOKEN|${cf_token}|g; s|MY_ZONE_ID|${cf_zone_id}|g; s|MY_RECORD_TYPE|${RECORD_TYPE}|g; s|MY_LOG_FILE|${DDNS_LOG}|g" "$DDNS_SCRIPT"
     chmod +x "$DDNS_SCRIPT"
     
-    # 预先创建 Crontab 缓存目录（针对 Alpine）
+    # 预先创建 Crontab 缓存目录（针对 Alpine 等精简系统的兼容处理）
     mkdir -p /root/.cache 2>/dev/null
 
     echo -e "${YELLOW}[*] 尝试首次同步...${PLAIN}"
     bash "$DDNS_SCRIPT"
     
-    # 检测运行结果
+    # 检测运行结果并写入定时任务
     if tail -n 1 "$DDNS_LOG" | grep -qE "✅|ℹ️"; then
-        echo -e "${GREEN}[+] DDNS 配置成功！已加入定时任务。${PLAIN}"
-        (crontab -l 2>/dev/null | grep -v "$DDNS_SCRIPT"; echo "*/5 * * * * bash $DDNS_SCRIPT >/dev/null 2>&1") | crontab -
+        echo -e "${GREEN}[+] DDNS 配置成功！准备加入定时任务...${PLAIN}"
+        if command -v crontab &> /dev/null; then
+            # 移除旧的同名任务，添加新的任务 (每 5 分钟执行一次)
+            (crontab -l 2>/dev/null | grep -v "$DDNS_SCRIPT"; echo "*/5 * * * * bash $DDNS_SCRIPT >/dev/null 2>&1") | crontab -
+            echo -e "${GREEN}[+] 定时任务已成功添加！(每5分钟同步一次)${PLAIN}"
+        else
+            echo -e "${RED}[-] 添加定时任务失败：crontab 环境异常。${PLAIN}"
+        fi
     else
         echo -e "${RED}[-] 测试失败，请检查参数配置或日志。${PLAIN}"
     fi
+    
     echo -e "\n按回车键返回..." && read -r
 }
 
+# ====================================================
+# 3. 日志查看功能
+# ====================================================
 view_logs() {
     echo -e "\n${CYAN}=== DDNS 日志 ===${PLAIN}"
-    [ -f "$DDNS_LOG" ] && cat "$DDNS_LOG" || echo -e "${RED}暂无记录。${PLAIN}"
+    if [ -f "$DDNS_LOG" ]; then
+        cat "$DDNS_LOG"
+    else
+        echo -e "${RED}暂无记录。${PLAIN}"
+    fi
     echo -e "${CYAN}=================${PLAIN}"
     echo -e "\n按回车键返回..." && read -r
 }
 
-# 接收主控传入的指令并执行对应的函数
+# ====================================================
+# 4. 主程序入口
+# ====================================================
 if [ -n "$1" ]; then
+    # 允许通过参数直接调用函数，如 ./xmmddns.sh setup_ddns
     "$1"
+else
+    # 如果没有传参，可以直接展示一个简易菜单或提示
+    echo "Usage: $0 {setup_ddns|view_logs}"
 fi
