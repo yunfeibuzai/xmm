@@ -1,53 +1,244 @@
-#!/bin/bash
-# =========================================================
-# 第一段：环境预检、依赖安装与云端授权
-# =========================================================
-red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
+#!/usr/bin/env bash
+# =================================================================
+# 麦卖云 Cloudflare Argo Tunnel 全自动部署与全能管理引擎
+# 特性：
+# 1. 全系统自适应 (Debian / Ubuntu / CentOS / Alpine OpenRC)
+# 2. 智能识别已存在隧道与残留组件
+# 3. 交互式选择彻底清理 (y/n) 或继续安装 / 新增
+# 4. 原生防爆、屏蔽自动更新、跳过本地 TLS 校验
+# =================================================================
 
-echo -e "${cyan}====== 🛠️ Cloudflare Tunnel 部署向导 (终极自愈守护版) ======${plain}"
-
-# 1. 专项优化：Alpine 环境依赖预检 (自动补齐组件)
-if [ -f /etc/alpine-release ]; then
-    echo -e "${yellow}检测到 Alpine Linux，正在静默安装必备依赖组件...${plain}"
-    apk update >/dev/null 2>&1
-    apk add --no-cache bash wget curl ca-certificates gawk libc6-compat gcompat openrc tzdata >/dev/null 2>&1
+# 0. Alpine 运行环境自愈（若通过 sh 执行或缺少 bash，自动修补）
+if [ -z "$BASH_VERSION" ]; then
+    if command -v apk >/dev/null 2>&1; then
+        echo -e "\033[33m检测到 Alpine 环境，正在自动补齐 bash 运行环境...\033[0m"
+        apk update >/dev/null 2>&1 && apk add --no-cache bash >/dev/null 2>&1
+        exec bash "$0" "$@"
+    else
+        echo "错误：请使用 bash 运行此脚本 (例如: bash $0)"
+        exit 1
+    fi
 fi
 
-CONFIG_DIR="$HOME/.cloudflared"
+# 1. 颜色与终端样式
+red='\033[31m'; green='\033[32m'; yellow='\033[33m'
+magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'
+
+# 权限预检
+[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
+
+# 基础目录
+CONFIG_DIR="/root/.cloudflared"
 mkdir -p "$CONFIG_DIR"
 
-# 2. 架构自适应优化与安全下载
+# 2. 全系统基础依赖自动补齐
+install_dependencies() {
+    local needed=()
+    for cmd in wget curl gawk grep sed; do
+        command -v "$cmd" &>/dev/null || needed+=("$cmd")
+    done
+
+    if [ ${#needed[@]} -gt 0 ] || [ -f /etc/alpine-release ]; then
+        echo -e "${yellow}正在检查并补齐系统基础依赖...${plain}"
+        if command -v apt-get &>/dev/null; then
+            apt-get update -y -q >/dev/null 2>&1
+            apt-get install -y --no-install-recommends wget curl ca-certificates gawk libc6 >/dev/null 2>&1
+        elif command -v apk &>/dev/null; then
+            apk update >/dev/null 2>&1
+            apk add --no-cache bash wget curl ca-certificates gawk libc6-compat gcompat openrc tzdata >/dev/null 2>&1
+        elif command -v yum &>/dev/null; then
+            yum install -y wget curl ca-certificates gawk >/dev/null 2>&1
+        elif command -v dnf &>/dev/null; then
+            dnf install -y wget curl ca-certificates gawk >/dev/null 2>&1
+        fi
+    fi
+}
+install_dependencies
+
+# 3. 进程与服务存活探针（兼容 BusyBox / 无 ps -p 环境）
+check_pid_alive() {
+    local pid="$1"
+    [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# 4. 检测本机是否已安装 / 存在 CF 隧道及相关组件
+detect_existing_cf() {
+    local found=0
+    local details=()
+
+    # 检测二进制文件
+    if command -v cloudflared &>/dev/null || [[ -f "/usr/local/bin/cloudflared" ]]; then
+        found=1
+        details+=("已安装核心二进制: /usr/local/bin/cloudflared")
+    fi
+
+    # 检测授权文件
+    if [[ -f "$CONFIG_DIR/cert.pem" ]]; then
+        found=1
+        details+=("已存在授权证书: $CONFIG_DIR/cert.pem")
+    fi
+
+    # 检测 Systemd 服务
+    if command -v systemctl &>/dev/null; then
+        for f in /etc/systemd/system/cf-*.service /etc/systemd/system/cloudflared*.service; do
+            [[ -f "$f" ]] || continue
+            found=1
+            details+=("Systemd 服务: $(basename "$f")")
+        done
+    fi
+
+    # 检测 OpenRC 服务
+    if [[ -d "/etc/init.d" ]]; then
+        for f in /etc/init.d/cf-* /etc/init.d/cloudflared*; do
+            [[ -f "$f" ]] || continue
+            found=1
+            details+=("OpenRC 服务: $(basename "$f")")
+        done
+    fi
+
+    # 检测配置文件
+    if [[ -d "/etc/cloudflared" ]] && ls /etc/cloudflared/*.yml &>/dev/null; then
+        found=1
+        details+=("存在配置文件目录: /etc/cloudflared/")
+    fi
+
+    echo "$found"
+}
+
+# 5. 彻底清理/卸载所有 CF 隧道及关联残留
+purge_all_cf_tunnel() {
+    echo -e "\n${yellow}正在停止所有相关的 Cloudflare 守护服务与进程...${plain}"
+
+    # 1. 停止并清理 Systemd 服务
+    if command -v systemctl &>/dev/null; then
+        for svc in $(systemctl list-unit-files 'cf-*' 'cloudflared*' 2>/dev/null | awk '{print $1}' | grep -E '\.service$'); do
+            echo -e "  ➜ 停止并禁用服务: ${svc}"
+            systemctl stop "$svc" >/dev/null 2>&1
+            systemctl disable "$svc" >/dev/null 2>&1
+            rm -f "/etc/systemd/system/$svc"
+        done
+        systemctl daemon-reload >/dev/null 2>&1
+    fi
+
+    # 2. 停止并清理 OpenRC (Alpine) 服务
+    if command -v rc-service &>/dev/null || [[ -d "/etc/init.d" ]]; then
+        for f in /etc/init.d/cf-* /etc/init.d/cloudflared; do
+            [[ -f "$f" ]] || continue
+            local s_name
+            s_name=$(basename "$f")
+            echo -e "  ➜ 停止并清理 OpenRC 服务: ${s_name}"
+            rc-service "$s_name" stop >/dev/null 2>&1
+            rc-update del "$s_name" default >/dev/null 2>&1
+            rm -f "$f"
+        done
+    fi
+
+    # 3. 强制杀死所有残留 cloudflared 进程
+    for p in /proc/[0-9]*; do
+        [[ -d "$p" ]] || continue
+        local pid="${p##*/}"
+        local cmdline
+        cmdline=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+        if [[ "$cmdline" =~ cloudflared && "$pid" != "$$" ]]; then
+            echo -e "  ➜ 终结残留进程 (PID: $pid)"
+            kill -9 "$pid" >/dev/null 2>&1
+        fi
+    done
+
+    # 4. 清理所有本地配置、日志、临时文件
+    echo -e "${yellow}正在清除配置文件、运行日志及缓存...${plain}"
+    rm -rf /etc/cloudflared
+    rm -f /var/log/cf-*.log /var/log/cloudflared*.log
+    rm -f /run/cf-*.pid /run/cloudflared*.pid /var/run/cf-*.pid
+
+    # 5. 询问是否连同 cert.pem 授权文件与二进制文件一起删除
+    echo ""
+    read -rp "是否彻底删除 Cloudflare 官方核心程序及云端登录凭据(cert.pem)？[y/N]: " del_core < /dev/tty
+    if [[ "$del_core" =~ ^[Yy]$ ]]; then
+        rm -rf "$CONFIG_DIR"
+        rm -f /usr/local/bin/cloudflared /usr/bin/cloudflared
+        echo -e "${green}✔ 核心程序、配置目录与授权凭据已完全移除！${plain}"
+    else
+        # 仅保留 cert.pem，清理其他 json 隧道凭据
+        find "$CONFIG_DIR" -type f ! -name "cert.pem" -delete 2>/dev/null
+        echo -e "${green}✔ 已清理所有隧道配置与 ID 凭据，保留了登录凭据 (cert.pem) 与核心程序。${plain}"
+    fi
+
+    echo -e "${green}🎉 所有 Cloudflare Argo Tunnel 相关服务与配置已彻底清除！${plain}\n"
+}
+
+# =========================================================
+# 第一阶段：智能识别与交互确认
+# =========================================================
+clear
+echo -e "${cyan}================================================================${plain}"
+echo -e "${cyan}      🛠️ Cloudflare Tunnel 部署向导 (全系统适配+自愈守护版)     ${plain}"
+echo -e "${cyan}================================================================${plain}"
+
+is_installed=$(detect_existing_cf)
+
+if [ "$is_installed" -eq 1 ]; then
+    echo -e "${yellow}⚠️  检测到本机已经存在 Cloudflare Argo Tunnel 相关配置或运行服务！${plain}\n"
+    read -rp "是否彻底删除所有 CF 隧道及相关东西 (服务/配置/残留)？[y/n]: " clean_opt < /dev/tty
+    
+    if [[ "$clean_opt" =~ ^[Yy]$ ]]; then
+        purge_all_cf_tunnel
+        read -rp "是否现在立即重新开始安装全新的隧道？[Y/n]: " cont_opt < /dev/tty
+        if [[ "$cont_opt" =~ ^[Nn]$ ]]; then
+            echo -e "${green}已成功退出脚本。${plain}"
+            exit 0
+        fi
+        echo -e "${cyan}正在进入全新安装流程...${plain}\n"
+    else
+        echo -e "${green}✔ 已保留现有隧道与配置，继续进行部署/新增隧道流程。${plain}\n"
+    fi
+fi
+
+# =========================================================
+# 第二阶段：架构识别与核心下载
+# =========================================================
 if ! command -v cloudflared &> /dev/null; then
     arch=$(uname -m)
     case "$arch" in
-        x86_64)  cf_arch="amd64" ;;
+        x86_64|amd64) cf_arch="amd64" ;;
         aarch64|arm64) cf_arch="arm64" ;;
-        *) echo -e "${red}❌ 不支持的架构: $arch${plain}"; exit 1 ;;
+        armv7l|armhf)  cf_arch="arm" ;;
+        i386|i686)     cf_arch="386" ;;
+        *) echo -e "${red}❌ 不支持的 CPU 架构: $arch${plain}"; exit 1 ;;
     esac
     echo -e "${yellow}正在下载官方最新版 cloudflared (${cf_arch})...${plain}"
-    if ! wget -qO /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"; then
-        echo -e "${red}❌ 下载 cloudflared 失败，请检查服务器网络！${plain}"; exit 1
+    if ! wget -q --show-progress -O /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"; then
+        # 兜底备用下载
+        curl -sLo /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"
+    fi
+
+    if [ ! -s /usr/local/bin/cloudflared ]; then
+        echo -e "${red}❌ 下载 cloudflared 失败，请检查网络！${plain}"
+        exit 1
     fi
     chmod +x /usr/local/bin/cloudflared
 fi
 
+# 授权凭据检测
 if [ ! -f "$CONFIG_DIR/cert.pem" ]; then 
-    echo -e "${yellow}⚠️ 尚未登录，请复制下方网址并在浏览器打开以授权 Cloudflare：${plain}"
+    echo -e "\n${yellow}⚠️ 尚未登录 Cloudflare，请复制下方链接在浏览器打开完成授权：${plain}"
     cloudflared tunnel login
     if [ ! -f "$CONFIG_DIR/cert.pem" ]; then
-        echo -e "${red}❌ 未检测到授权证书(cert.pem)，部署终止！${plain}"; exit 1
+        echo -e "${red}❌ 未检测到授权证书 ($CONFIG_DIR/cert.pem)，部署终止！${plain}"
+        exit 1
     fi
 fi
 chmod 600 "$CONFIG_DIR/cert.pem" 2>/dev/null
-echo -e "${green}✅ 环境初始化与授权完成，准备执行核心配置。${plain}"
-# =========================================================
-# 第二段：隧道创建、协议选择与无证书验证(noTLSVerify)配置
-# =========================================================
+echo -e "${green}✅ 环境初始化与授权校验完成。${plain}"
 
-read -rp "输入隧道名称 (如 japan): " tunnel_name
-if [ -z "$tunnel_name" ]; then echo -e "${red}❌ 名称不能为空！${plain}"; exit 1; fi
+# =========================================================
+# 第三阶段：隧道配置与路由绑定
+# =========================================================
+echo -e "\n${cyan}====== [ 配置隧道参数 ] ======${plain}"
+read -rp "请输入隧道名称 (如 japan): " tunnel_name < /dev/tty
+if [ -z "$tunnel_name" ]; then echo -e "${red}❌ 隧道名称不能为空！${plain}"; exit 1; fi
 
-echo -e "${yellow}正在校验云端与本地的 ID 一致性...${plain}"
+echo -e "${yellow}正在核验云端与本地隧道 ID...${plain}"
 cloud_id=$(cloudflared tunnel list 2>/dev/null | awk -v name="$tunnel_name" '$2 == name {print $1}')
 
 local_json_ok=0
@@ -55,68 +246,85 @@ if [ -n "$cloud_id" ] && [ -f "$CONFIG_DIR/${cloud_id}.json" ]; then local_json_
 
 if [ -n "$cloud_id" ] && [ "$local_json_ok" -eq 1 ]; then
     tunnel_id="$cloud_id"
-    echo -e "${green}✅ 匹配成功，安全复用 ID: ${tunnel_id}${plain}"
+    echo -e "${green}✅ 成功匹配，安全复用隧道 ID: ${tunnel_id}${plain}"
 else
-    echo -e "${yellow}⚠️ 检测到不匹配或无残留，启动重置洗牌程序...${plain}"
-    if command -v systemctl &> /dev/null; then systemctl stop "cf-${tunnel_name}" 2>/dev/null; fi
-    if command -v rc-service &> /dev/null; then rc-service "cf-${tunnel_name}" stop 2>/dev/null; fi
+    echo -e "${yellow}⚠️ 检测到旧残余或 ID 未关联，开始自动初始化...${plain}"
+    # 停止可能存在的同名旧服务
+    command -v systemctl &>/dev/null && systemctl stop "cf-${tunnel_name}" 2>/dev/null
+    command -v rc-service &>/dev/null && rc-service "cf-${tunnel_name}" stop 2>/dev/null
     
     [ -n "$cloud_id" ] && cloudflared tunnel delete -f "$tunnel_name" >/dev/null 2>&1
     rm -f "/etc/cloudflared/${tunnel_name}.yml"
     
     create_output=$(cloudflared tunnel create "$tunnel_name" 2>&1)
     tunnel_id=$(echo "$create_output" | grep -oE '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})' | head -n 1)
-    [ -z "$tunnel_id" ] && tunnel_id=$(cloudflared tunnel list | grep -w "$tunnel_name" | awk '{print $1}')
-    if [ -z "$tunnel_id" ]; then echo -e "${red}❌ 隧道创建失败！\n$create_output${plain}"; exit 1; fi
+    [ -z "$tunnel_id" ] && tunnel_id=$(cloudflared tunnel list 2>/dev/null | awk -v name="$tunnel_name" '$2 == name {print $1}')
+    
+    if [ -z "$tunnel_id" ]; then
+        echo -e "${red}❌ 隧道创建失败！错误信息：\n$create_output${plain}"
+        exit 1
+    fi
     echo -e "${green}🎉 新隧道创建成功！ID: ${tunnel_id}${plain}"
 fi
 chmod 600 "$CONFIG_DIR/${tunnel_id}.json" 2>/dev/null
 
-# 路由与协议配置
-read -rp "绑定 CF 域名 (如 jp.xxx.com): " cf_domain
+# 域名与本地转发设定
+read -rp "绑定 CF 域名 (例如 jp.yourdomain.com): " cf_domain < /dev/tty
+echo -e "${yellow}正在配置 Cloudflare DNS 路由解析...${plain}"
 cloudflared tunnel route dns "$tunnel_name" "$cf_domain" >/dev/null 2>&1
-read -rp "本地端口 (默认 8443): " local_port
+
+read -rp "本地服务转发端口 (默认: 8443): " local_port < /dev/tty
 local_port=${local_port:-8443}
-read -rp "是否开启 TLS (https)? (y/n, 默认 y): " use_tls
-local_proto="http"; [[ "${use_tls:-y}" =~ [yY] ]] && local_proto="https"
+
+read -rp "本地服务是否开启了 TLS (HTTPS)? [y/N] (默认 n): " use_tls < /dev/tty
+local_proto="http"
+[[ "$use_tls" =~ ^[yY]$ ]] && local_proto="https"
 
 # 进阶网络参数选择
-echo -e "${cyan}--- 进阶网络设置 ---${plain}"
-read -rp "选择与 CF 边缘节点的传输协议 [1) quic (推荐/默认)  2) http2]: " proto_choice
-cf_protocol="quic"; [[ "$proto_choice" == "2" ]] && cf_protocol="http2"
+echo -e "\n${cyan}--- 进阶回源传输配置 ---${plain}"
+read -rp "选择与 CF 边缘节点的传输协议 [1) quic (推荐/默认)  2) http2]: " proto_choice < /dev/tty
+cf_protocol="quic"
+[[ "$proto_choice" == "2" ]] && cf_protocol="http2"
 
-read -rp "选择与 CF 边缘节点的 IP 协议 [1) auto (默认)  2) ipv4 (解决v6不通)  3) ipv6]: " ip_choice
+read -rp "选择与 CF 边缘节点的 IP 协议 [1) auto (默认)  2) ipv4 (针对v6故障小鸡)  3) ipv6]: " ip_choice < /dev/tty
 cf_ip_version="auto"
 [[ "$ip_choice" == "2" ]] && cf_ip_version="4"
 [[ "$ip_choice" == "3" ]] && cf_ip_version="6"
 
-# 生成 YAML
+# 生成 YAML 配置文件
 mkdir -p /etc/cloudflared
 config_path="/etc/cloudflared/${tunnel_name}.yml"
 log_path="/var/log/cf-${tunnel_name}.log"
 
-echo "tunnel: $tunnel_id" > "$config_path"
-echo "credentials-file: $CONFIG_DIR/${tunnel_id}.json" >> "$config_path"
-echo "ingress:" >> "$config_path"
-echo "  - hostname: $cf_domain" >> "$config_path"
-echo "    service: ${local_proto}://127.0.0.1:${local_port}" >> "$config_path"
+cat <<EOF > "$config_path"
+tunnel: ${tunnel_id}
+credentials-file: ${CONFIG_DIR}/${tunnel_id}.json
+ingress:
+  - hostname: ${cf_domain}
+    service: ${local_proto}://127.0.0.1:${local_port}
+EOF
 
-# 核心功能：若开启 HTTPS，则强制跳过本地证书验证以避免 context canceled
+# 针对 HTTPS 自动注入跳过证书校验 (解决 self-signed / fake CA 502/报错)
 if [[ "$local_proto" == "https" ]]; then
-    echo "    originRequest:" >> "$config_path"
-    echo "      noTLSVerify: true" >> "$config_path"
+    cat <<EOF >> "$config_path"
+    originRequest:
+      noTLSVerify: true
+EOF
 fi
 
-echo "  - service: http_status:404" >> "$config_path"
-echo -e "${green}✅ 配置文件已生成 (已自动处理 TLS 验证)，准备注册进程。${plain}"
-# =========================================================
-# 第三段：注册守护服务与启动 (加入屏蔽自动更新功能)
-# =========================================================
+cat <<EOF >> "$config_path"
+  - service: http_status:404
+EOF
 
-# 组装启动参数 (融合协议选择、IP版本限制，并强制屏蔽自动更新 --no-autoupdate)
+echo -e "${green}✅ 配置文件已生成: ${config_path}${plain}"
+
+# =========================================================
+# 第四阶段：注册开机自启守护服务与启动
+# =========================================================
 CF_ARGS="tunnel --no-autoupdate --protocol ${cf_protocol} --edge-ip-version ${cf_ip_version} --config ${config_path} run"
 
-if [ -d /run/systemd/system ] || command -v systemctl &> /dev/null; then
+# A. Systemd 系统 (Debian / Ubuntu / CentOS / etc.)
+if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
     echo -e "${yellow}正在注册 Systemd 守护服务...${plain}"
     cat <<EOF > "/etc/systemd/system/cf-${tunnel_name}.service"
 [Unit]
@@ -130,6 +338,7 @@ User=root
 ExecStart=/usr/local/bin/cloudflared ${CF_ARGS}
 Restart=always
 RestartSec=5
+LimitNOFILE=65535
 StandardOutput=append:${log_path}
 StandardError=append:${log_path}
 
@@ -139,10 +348,11 @@ EOF
     systemctl daemon-reload
     systemctl enable "cf-${tunnel_name}" >/dev/null 2>&1
     systemctl restart "cf-${tunnel_name}"
-    echo -e "${green}🚀 Systemd 服务启动完毕！${plain}"
+    echo -e "${green}🚀 Systemd 守护服务已启动！${plain}"
 
-elif [ -f /etc/alpine-release ] || command -v rc-service &> /dev/null; then
-    echo -e "${yellow}正在配置 Alpine OpenRC supervise-daemon 进程守护...${plain}"
+# B. OpenRC 系统 (Alpine Linux)
+elif command -v rc-service &>/dev/null || [ -f /etc/alpine-release ]; then
+    echo -e "${yellow}正在配置 Alpine OpenRC supervise-daemon 守护服务...${plain}"
     cat <<EOF > "/etc/init.d/cf-${tunnel_name}"
 #!/sbin/openrc-run
 
@@ -163,21 +373,24 @@ EOF
     chmod +x "/etc/init.d/cf-${tunnel_name}"
     rc-update add "cf-${tunnel_name}" default >/dev/null 2>&1
     rc-service "cf-${tunnel_name}" restart
-    echo -e "${green}🚀 Alpine OpenRC 服务启动完毕！${plain}"
+    echo -e "${green}🚀 Alpine OpenRC 守护服务已启动！${plain}"
+
+# C. 兜底 nohup 模式
 else
-    echo -e "${yellow}⚠️ 未检测到服务管理器，采用 nohup 后台进程模式...${plain}"
+    echo -e "${yellow}⚠️ 未检测到系统服务管理器，使用后台 nohup 守护...${plain}"
     nohup /usr/local/bin/cloudflared ${CF_ARGS} > "${log_path}" 2>&1 &
     echo -e "${green}🚀 后台进程已启动！${plain}"
 fi
 
-# 状态汇报处理
-tls_msg=""
-[[ "$local_proto" == "https" ]] && tls_msg="| 已跳过本地证书验证"
+# 状态输出与配置卡片
+tls_msg="未启用"
+[[ "$local_proto" == "https" ]] && tls_msg="${green}已启用 (强制 noTLSVerify)${plain}"
 
-echo -e "${cyan}==========================================${plain}"
-echo -e "🎉 ${green}部署完成！隧道名称: ${tunnel_name}${plain}"
-echo -e "🔗 ${yellow}路由规则: ${cf_domain} -> ${local_proto}://127.0.0.1:${local_port}${plain}"
-echo -e "⚙️  ${yellow}传输协议: ${cf_protocol} | IP版本: ${cf_ip_version}${plain}"
-echo -e "🛡️  ${yellow}安全策略: 已屏蔽自动更新 ${tls_msg}${plain}"
-echo -e "📄 ${yellow}运行日志: tail -f ${log_path}${plain}"
-echo -e "${cyan}==========================================${plain}"
+echo -e "\n${cyan}================================================================${plain}"
+echo -e "🎉 ${green}部署成功！隧道服务已进入后台自愈运行。${plain}"
+echo -e "🔖 隧道标识: ${bold}${tunnel_name}${plain} (ID: ${yellow}${tunnel_id}${plain})"
+echo -e "🌐 穿透域名: ${bold}${cyan}${cf_domain}${plain}"
+echo -e "🎯 本地转发: ${yellow}${local_proto}://127.0.0.1:${local_port}${plain} (${tls_msg})"
+echo -e "⚡ 核心参数: 协议=${cf_protocol} | IP版本=${cf_ip_version} | 屏蔽自动更新=开"
+echo -e "📄 运行日志: ${yellow}tail -f ${log_path}${plain}"
+echo -e "${cyan}================================================================${plain}\n"
