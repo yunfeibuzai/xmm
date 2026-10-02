@@ -1,0 +1,507 @@
+#!/usr/bin/env bash
+# =================================================================
+# 麦卖云 Cloudflare Argo Tunnel 交互式管理引擎 (全系统/Alpine深度适配版)
+# 兼容：Alpine (OpenRC/BusyBox)、Debian/Ubuntu/CentOS/Fedora (Systemd)
+# =================================================================
+
+# 0. Alpine 运行环境自愈（若通过 sh 运行或缺少 bash，自动修补）
+if [ -z "$BASH_VERSION" ]; then
+    if command -v apk >/dev/null 2>&1; then
+        echo -e "\033[33m检测到 Alpine 环境，正在自动准备 bash 运行环境...\033[0m"
+        apk update >/dev/null 2>&1 && apk add --no-cache bash grep sed gawk >/dev/null 2>&1
+        exec bash "$0" "$@"
+    else
+        echo "错误：请使用 bash 运行此脚本 (例如: bash $0)"
+        exit 1
+    fi
+fi
+
+# 1. 控制台颜色
+red='\033[31m'; green='\033[32m'; yellow='\033[33m'
+magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'
+
+# 权限预检
+[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
+
+# 2. 通用底层进程存活检测（完全避开 BusyBox ps -p 报错，兼容所有 Linux）
+check_pid_alive() {
+    local pid="$1"
+    [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# 3. 跨系统全能状态探针 (Systemd / OpenRC / Proc 穿透)
+get_tunnel_status() {
+    local target="$1"
+    local config="$2"
+    STATUS_RUNNING=0
+    STATUS_PID=""
+    STATUS_DESC="${red}○ 已停止${plain}"
+
+    # A. Systemd 系统检测
+    if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
+        local svc=""
+        if systemctl list-unit-files "cf-${target}.service" &>/dev/null && [[ -f "/etc/systemd/system/cf-${target}.service" ]]; then
+            svc="cf-${target}"
+        elif [[ "$target" == "cloudflared" ]] && systemctl list-unit-files "cloudflared.service" &>/dev/null; then
+            svc="cloudflared"
+        fi
+
+        if [[ -n "$svc" ]]; then
+            local pid
+            pid=$(systemctl show -p MainPID "$svc" 2>/dev/null | cut -d= -f2)
+            if check_pid_alive "$pid"; then
+                STATUS_RUNNING=1
+                STATUS_PID="$pid"
+                STATUS_DESC="${green}● 运行中 (PID: ${pid} | Systemd)${plain}"
+                return
+            fi
+        fi
+    fi
+
+    # B. Alpine / OpenRC 系统检测
+    if command -v rc-service &>/dev/null; then
+        local rc_svc="cf-${target}"
+        [[ "$target" == "cloudflared" ]] && rc_svc="cloudflared"
+
+        if [[ -f "/etc/init.d/${rc_svc}" ]]; then
+            # 优先从 PID 文件读取
+            local pid=""
+            if [[ -f "/run/${rc_svc}.pid" ]]; then
+                pid=$(cat "/run/${rc_svc}.pid" 2>/dev/null)
+            elif [[ -f "/var/run/${rc_svc}.pid" ]]; then
+                pid=$(cat "/var/run/${rc_svc}.pid" 2>/dev/null)
+            fi
+
+            if check_pid_alive "$pid"; then
+                STATUS_RUNNING=1
+                STATUS_PID="$pid"
+                STATUS_DESC="${green}● 运行中 (PID: ${pid} | OpenRC)${plain}"
+                return
+            fi
+
+            # 通过 rc-service status 探查
+            if rc-service "$rc_svc" status 2>/dev/null | grep -qiE 'started|running'; then
+                STATUS_RUNNING=1
+                STATUS_DESC="${green}● 运行中 (OpenRC 托管)${plain}"
+                return
+            fi
+        fi
+    fi
+
+    # C. 兜底方案：直接穿透扫描 /proc 目录（免依赖 pgrep，完美兼容 Alpine Busybox）
+    local cfg_name
+    cfg_name=$(basename "$config" 2>/dev/null)
+    for p in /proc/[0-9]*; do
+        [[ -d "$p" ]] || continue
+        local pid="${p##*/}"
+        [[ "$pid" == "$$" ]] && continue
+
+        local cmdline
+        cmdline=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+        if [[ "$cmdline" =~ cloudflared ]] && ([[ -n "$target" && "$cmdline" =~ $target ]] || [[ -n "$cfg_name" && "$cmdline" =~ $cfg_name ]]); then
+            if check_pid_alive "$pid"; then
+                STATUS_RUNNING=1
+                STATUS_PID="$pid"
+                STATUS_DESC="${green}● 运行中 (PID: ${pid} | 独立进程)${plain}"
+                return
+            fi
+        fi
+    done
+}
+
+# 4. 全局扫描本地所有隧道 (OpenRC / Systemd / 目录文件)
+scan_all_local_tunnels() {
+    local discovered=()
+
+    # 扫描 Systemd 服务
+    if command -v systemctl &>/dev/null; then
+        for f in /etc/systemd/system/cf-*.service; do
+            [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//;s/\.service$//')")
+        done
+        [[ -f "/etc/systemd/system/cloudflared.service" ]] && discovered+=("cloudflared")
+    fi
+
+    # 扫描 Alpine OpenRC 服务
+    if command -v rc-service &>/dev/null || [[ -d "/etc/init.d" ]]; then
+        for f in /etc/init.d/cf-*; do
+            [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//')")
+        done
+        [[ -f "/etc/init.d/cloudflared" ]] && discovered+=("cloudflared")
+    fi
+
+    # 扫描常规配置目录
+    for dir in "/etc/cloudflared" "/root/.cloudflared"; do
+        if [[ -d "$dir" ]]; then
+            for yml in "$dir"/*.yml "$dir"/*.yaml; do
+                [[ -f "$yml" ]] || continue
+                local base
+                base=$(basename "$yml" | sed 's/\.yml$//;s/\.yaml$//')
+                [[ "$base" == "cert" ]] && continue
+                discovered+=("$base")
+            done
+        fi
+    done
+
+    # 数组去重并输出
+    if [[ ${#discovered[@]} -gt 0 ]]; then
+        echo "${discovered[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '
+    fi
+}
+
+# 5. 配置文件路径解析
+find_config_file() {
+    local target="$1"
+    local candidates=(
+        "/etc/cloudflared/${target}.yml"
+        "/etc/cloudflared/${target}.yaml"
+        "/etc/cloudflared/config.yml"
+        "/etc/cloudflared/config.yaml"
+        "/root/.cloudflared/${target}.yml"
+        "/root/.cloudflared/${target}.yaml"
+        "/root/.cloudflared/config.yml"
+    )
+    for c in "${candidates[@]}"; do
+        if [[ -f "$c" ]]; then
+            echo "$c"
+            return
+        fi
+    done
+    echo ""
+}
+
+# 6. 可视化配置详情看板 (采用 POSIX awk 规则，兼容 BusyBox awk)
+inspect_tunnel_card() {
+    local target="$1"
+    local config="$2"
+
+    get_tunnel_status "$target" "$config"
+
+    local tunnel_id cred_file hostnames forward_urls
+    # 采用 [ \t] 代替 [[:space:]]，确保 BusyBox awk 100% 正常解析
+    tunnel_id=$(grep -E '^[ \t]*tunnel:' "$config" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'")
+    cred_file=$(grep -E '^[ \t]*credentials-file:' "$config" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'")
+    hostnames=$(awk '/^[ \t]*-[ \t]*hostname:/ {print $NF}' "$config" 2>/dev/null | tr -d '"' | tr -d "'")
+    forward_urls=$(awk '/^[ \t]*service:/ && !/http_status/ {print $2}' "$config" 2>/dev/null | tr -d '"' | tr -d "'")
+
+    echo -e "\n${cyan}┌─── 📋 隧道详情看板: ${bold}${target}${plain} ${cyan}─────────────────────────────${plain}"
+    echo -e "${cyan}│${plain} 运行状态: ${STATUS_DESC}"
+    echo -e "${cyan}│${plain} 配置文件: ${green}${config}${plain}"
+    echo -e "${cyan}│${plain} 隧道 ID : ${yellow}${tunnel_id:-<未配置/未读取到>}${plain}"
+
+    # 凭证检测
+    if [[ -n "$cred_file" ]]; then
+        if [[ -f "$cred_file" ]]; then
+            echo -e "${cyan}│${plain} 凭据密钥: ${green}${cred_file} (✔ 密钥文件存在)${plain}"
+        else
+            echo -e "${cyan}│${plain} 凭据密钥: ${red}${cred_file} (❌ 文件丢失！)${plain}"
+        fi
+    fi
+
+    # 域名列表
+    if [[ -n "$hostnames" ]]; then
+        echo -e "${cyan}│${plain} 穿透域名:"
+        while IFS= read -r host; do
+            [[ -n "$host" ]] && echo -e "${cyan}│${plain}   🌐 ${bold}${green}${host}${plain}"
+        done <<< "$hostnames"
+    else
+        echo -e "${cyan}│${plain} 穿透域名: ${yellow}未匹配到 hostname 规则${plain}"
+    fi
+
+    # 转发后端
+    if [[ -n "$forward_urls" ]]; then
+        echo -e "${cyan}│${plain} 本地转发:"
+        while IFS= read -r svc; do
+            [[ -n "$svc" ]] && echo -e "${cyan}│${plain}   🎯 ${magenta}${svc}${plain}"
+        done <<< "$forward_urls"
+    fi
+    echo -e "${cyan}└────────────────────────────────────────────────────────${plain}"
+}
+
+# 7. 配置安全备份
+backup_config_file() {
+    local config="$1"
+    local bak="${config}.bak.$(date +%Y%m%d_%H%M%S)"
+    cp "$config" "$bak"
+    echo -e "${green}✔ 已自动备份原始配置至:${plain} ${bak}"
+}
+
+# 8. 修改域名 (Hostname)
+modify_hostname() {
+    local config="$1"
+    local current_hosts
+    current_hosts=$(awk '/^[ \t]*-[ \t]*hostname:/ {print $NF}' "$config" | tr -d '"' | tr -d "'")
+
+    if [[ -z "$current_hosts" ]]; then
+        echo -e "${red}错误：配置文件中未找到 hostname 节点，无法自动替换。${plain}"
+        return
+    fi
+
+    local old_host=""
+    local count
+    count=$(echo "$current_hosts" | grep -c .)
+
+    if [[ $count -eq 1 ]]; then
+        old_host="$current_hosts"
+        echo -e "\n当前绑定的域名为: ${yellow}${old_host}${plain}"
+    else
+        echo -e "\n${green}当前配置文件绑定了多个域名：${plain}"
+        local i=1
+        local arr_hosts=()
+        while IFS= read -r h; do
+            [[ -z "$h" ]] && continue
+            echo -e "  [${i}] ${h}"
+            arr_hosts+=("$h")
+            ((i++))
+        done <<< "$current_hosts"
+
+        read -rp "请选择需要修改的域名序号 [1-${#arr_hosts[@]}]: " h_sel
+        if ! [[ "$h_sel" =~ ^[0-9]+$ ]] || (( h_sel < 1 || h_sel > ${#arr_hosts[@]} )); then
+            echo -e "${red}输入无效，已取消。${plain}"
+            return
+        fi
+        old_host="${arr_hosts[$((h_sel-1))]}"
+    fi
+
+    echo ""
+    read -rp "请输入新域名 (如: vpn.domain.com): " new_host
+    new_host=$(echo "$new_host" | xargs)
+
+    if [[ -z "$new_host" ]]; then
+        echo -e "${red}域名不能为空！${plain}"
+        return
+    fi
+
+    if [[ "$new_host" == "$old_host" ]]; then
+        echo -e "${yellow}新旧域名一致，未做修改。${plain}"
+        return
+    fi
+
+    backup_config_file "$config"
+    # 采用通用 sed 替换，避免 BusyBox sed 参数报错
+    sed -i "s|hostname:[ \t]*${old_host}|hostname: ${new_host}|g" "$config"
+    echo -e "\n${green}✔ 域名修改完成！${plain}"
+    echo -e "  原域名: ${red}${old_host}${plain}  ➔  新域名: ${green}${new_host}${plain}"
+}
+
+# 9. 修改 Tunnel ID (UUID)
+modify_tunnel_id() {
+    local config="$1"
+    local old_id
+    old_id=$(grep -E '^[ \t]*tunnel:' "$config" | awk '{print $2}' | tr -d '"' | tr -d "'")
+
+    echo -e "\n当前 Tunnel ID (UUID) 为: ${yellow}${old_id:-未定义}${plain}"
+    read -rp "请输入全新的 Tunnel UUID: " new_id
+    new_id=$(echo "$new_id" | xargs)
+
+    if [[ -z "$new_id" ]]; then
+        echo -e "${red}Tunnel ID 不能为空！${plain}"
+        return
+    fi
+
+    if [[ "$new_id" == "$old_id" ]]; then
+        echo -e "${yellow}新旧 ID 相同，跳过修改。${plain}"
+        return
+    fi
+
+    backup_config_file "$config"
+
+    # 替换 tunnel: 行 (标准基本正则替换)
+    if grep -q -E '^[ \t]*tunnel:' "$config"; then
+        sed -i "s|^[ \t]*tunnel:.*|tunnel: ${new_id}|" "$config"
+    else
+        sed -i "1i tunnel: ${new_id}" "$config"
+    fi
+
+    # 联动检查 credentials-file 路径
+    if [[ -n "$old_id" ]] && grep -q "$old_id" "$config"; then
+        read -rp "检测到凭证文件名与旧 ID 关联，是否同步更新路径中的 UUID？[Y/n]: " sync_cred
+        sync_cred=${sync_cred:-Y}
+        if [[ "$sync_cred" =~ ^[Yy]$ ]]; then
+            sed -i "s|${old_id}|${new_id}|g" "$config"
+            echo -e "${green}✔ 凭据配置路径已联动修改为新 UUID。${plain}"
+        fi
+    fi
+
+    # 凭证丢失警示
+    local new_cred_file
+    new_cred_file=$(grep -E '^[ \t]*credentials-file:' "$config" | awk '{print $2}' | tr -d '"' | tr -d "'")
+    if [[ -n "$new_cred_file" && ! -f "$new_cred_file" ]]; then
+        echo -e "\n${yellow}⚠️️ 提示：未在系统找到对应的密钥文件：${plain}${red}${new_cred_file}${plain}"
+        echo -e "${yellow}👉 请将官方生成的 ${new_id}.json 存放到该路径，否则隧道将无法启动！${plain}"
+    fi
+
+    echo -e "\n${green}✔ Tunnel ID 修改完成！${plain}"
+    echo -e "  原 ID: ${red}${old_id}${plain}  ➔  新 ID: ${green}${new_id}${plain}"
+}
+
+# 10. 服务控制引擎 (完美兼容 OpenRC / Systemd)
+manage_service() {
+    local target="$1"
+    local action="$2" # start | stop | restart
+    local action_zh="启动"
+    [[ "$action" == "stop" ]] && action_zh="停止"
+    [[ "$action" == "restart" ]] && action_zh="重启"
+
+    echo -e "\n${cyan}正在执行操作: ${action_zh}隧道服务...${plain}"
+
+    local svc_name="cf-${target}"
+    [[ "$target" == "cloudflared" ]] && svc_name="cloudflared"
+
+    # A. Systemd 处理
+    if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
+        systemctl "$action" "$svc_name" 2>/dev/null || systemctl "$action" cloudflared 2>/dev/null
+        sleep 1
+        if [[ "$action" == "stop" ]]; then
+            echo -e "${green}✔ 服务停止命令已下发。${plain}"
+        else
+            if systemctl is-active --quiet "$svc_name" 2>/dev/null || systemctl is-active --quiet cloudflared 2>/dev/null; then
+                echo -e "${green}✔ 服务已成功处于活跃运行状态！${plain}"
+            else
+                echo -e "${red}❌ 服务未处于运行状态，请检查日志排查。${plain}"
+            fi
+        fi
+        return
+    fi
+
+    # B. OpenRC (Alpine) 处理
+    if command -v rc-service &>/dev/null; then
+        local rc_target="$svc_name"
+        [[ ! -f "/etc/init.d/$rc_target" && -f "/etc/init.d/cloudflared" ]] && rc_target="cloudflared"
+        
+        if [[ -f "/etc/init.d/$rc_target" ]]; then
+            rc-service "$rc_target" "$action" 2>/dev/null
+            sleep 1
+            if [[ "$action" == "stop" ]]; then
+                echo -e "${green}✔ OpenRC 服务停止命令已执行。${plain}"
+            else
+                if rc-service "$rc_target" status 2>/dev/null | grep -qiE 'started|running'; then
+                    echo -e "${green}✔ OpenRC 服务已成功恢复并运行！${plain}"
+                else
+                    echo -e "${red}❌ OpenRC 状态未处于 started，请检查 /var/log/cf-${target}.log。${plain}"
+                fi
+            fi
+            return
+        fi
+    fi
+
+    echo -e "${yellow}未找到标准服务管理器（Systemd/OpenRC）。若为前台命令运行，请手动重启进程。${plain}"
+}
+
+# 11. 主程序交互入口
+main() {
+    clear
+    echo -e "${cyan}================================================================${plain}"
+    echo -e "${cyan}   🚀 Cloudflare Argo Tunnel 交互式管理引擎 (全系统兼容版)       ${plain}"
+    echo -e "${cyan}================================================================${plain}"
+
+    local raw_tunnels
+    raw_tunnels=$(scan_all_local_tunnels)
+    local tunnels=($raw_tunnels)
+
+    local target_name=""
+    local config_file=""
+
+    if [[ ${#tunnels[@]} -eq 0 ]]; then
+        echo -e "${yellow}未在标准服务或目录中找到隧道，进入手动模式。${plain}"
+        read -rp "请输入 cloudflared yml 配置文件的完整绝对路径: " manual_cfg
+        if [[ ! -f "$manual_cfg" ]]; then
+            echo -e "${red}文件不存在，退出。${plain}"
+            exit 1
+        fi
+        config_file="$manual_cfg"
+        target_name="custom"
+    else
+        echo -e "${green}已识别到本机存在以下隧道实例：${plain}\n"
+        local i=1
+        for t in "${tunnels[@]}"; do
+            local cfg
+            cfg=$(find_config_file "$t")
+            get_tunnel_status "$t" "$cfg"
+            printf "  ${green}%2d.${plain} 隧道标识: ${cyan}%-18s${plain} 状态: %b\n" "$i" "$t" "$STATUS_DESC"
+            ((i++))
+        done
+        echo ""
+
+        if [[ ${#tunnels[@]} -eq 1 ]]; then
+            echo -e "${green}检测到当前机器仅有 1 个隧道，已自动选定: ${cyan}${tunnels[0]}${plain}"
+            target_name="${tunnels[0]}"
+        else
+            read -rp "请输入要进入管理的隧道序号 [1-${#tunnels[@]}]: " t_sel
+            if ! [[ "$t_sel" =~ ^[0-9]+$ ]] || (( t_sel < 1 || t_sel > ${#tunnels[@]} )); then
+                echo -e "${red}输入无效，退出。${plain}"
+                exit 1
+            fi
+            target_name="${tunnels[$((t_sel-1))]}"
+        fi
+        config_file=$(find_config_file "$target_name")
+    fi
+
+    # 兜底文件检测
+    if [[ -z "$config_file" || ! -f "$config_file" ]]; then
+        echo -e "\n${yellow}未能自动定位 ${target_name} 的配置文件路径！${plain}"
+        read -rp "请手动输入该配置文件的绝对路径 (如 /etc/cloudflared/${target_name}.yml): " config_file
+        [[ ! -f "$config_file" ]] && echo -e "${red}文件不存在，退出。${plain}" && exit 1
+    fi
+
+    # 主循环菜单
+    while true; do
+        inspect_tunnel_card "$target_name" "$config_file"
+
+        echo -e "\n${bold}请选择要执行的操作：${plain}"
+        echo -e "  ${green}1.${plain} 修改绑定的域名 (Hostname)"
+        echo -e "  ${green}2.${plain} 修改隧道 ID (Tunnel UUID)"
+        echo -e "  ${green}3.${plain} 同时修改 ID 与 域名"
+        echo -e "  ${green}4.${plain} 重启隧道服务 (Reload / Restart)"
+        if [[ $STATUS_RUNNING -eq 1 ]]; then
+            echo -e "  ${green}5.${plain} ${red}停止隧道服务 (Stop)${plain}"
+        else
+            echo -e "  ${green}5.${plain} ${green}启动隧道服务 (Start)${plain}"
+        fi
+        echo -e "  ${green}0.${plain} 保存并退出程序"
+        echo ""
+        read -rp "请输入菜单选项 [0-5]: " opt
+
+        case "$opt" in
+            1)
+                modify_hostname "$config_file"
+                read -rp "是否立即重启隧道使新域名生效？[Y/n]: " r_ans
+                [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart"
+                ;;
+            2)
+                modify_tunnel_id "$config_file"
+                read -rp "是否立即重启隧道使新 ID 生效？[Y/n]: " r_ans
+                [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart"
+                ;;
+            3)
+                modify_tunnel_id "$config_file"
+                echo -e "${magenta}------------------------------------------------------${plain}"
+                modify_hostname "$config_file"
+                read -rp "是否立即重启隧道使配置生效？[Y/n]: " r_ans
+                [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart"
+                ;;
+            4)
+                manage_service "$target_name" "restart"
+                ;;
+            5)
+                if [[ $STATUS_RUNNING -eq 1 ]]; then
+                    manage_service "$target_name" "stop"
+                else
+                    manage_service "$target_name" "start"
+                fi
+                ;;
+            0)
+                echo -e "\n${green}操作完成，已安全退出。${plain}\n"
+                exit 0
+                ;;
+            *)
+                echo -e "${red}无效输入，请重新选择。${plain}"
+                ;;
+        esac
+
+        echo ""
+        read -rp "按回车键刷新面板..."
+        clear
+    done
+}
+
+main
