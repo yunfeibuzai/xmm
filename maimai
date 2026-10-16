@@ -1,16 +1,16 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="4.5.0-Modular"
+sh_ver="4.7.0-Comprehensive"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 
-[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用root用户运行此脚本！\n" && exit 1
+[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
-# 🌟 基础依赖自动补齐
+# 🌟 基础依赖自动补齐 (增加 sed、jq 保障 Alpine 兼容性)
 install_dependencies() {
-    local cmds=("wget" "curl" "tar" "unzip" "jq" "nano")
+    local cmds=("wget" "curl" "tar" "unzip" "jq" "nano" "sed")
     local needs_install=false
 
     for cmd in "${cmds[@]}"; do
@@ -20,7 +20,6 @@ install_dependencies() {
         fi
     done
 
-    # 检查根证书与 Alpine 兼容层
     if ! command -v update-ca-certificates &>/dev/null && [ ! -d /etc/ssl/certs ]; then
         needs_install=true
     fi
@@ -35,12 +34,12 @@ install_dependencies() {
         echo -e "${yellow}正在检查并补齐系统基础依赖与架构兼容层...${plain}"
         if command -v apt-get &>/dev/null; then
             apt-get update -y -q >/dev/null 2>&1
-            apt-get install -y --no-install-recommends wget curl tar unzip jq nano ca-certificates >/dev/null 2>&1
+            apt-get install -y --no-install-recommends wget curl tar unzip jq nano sed ca-certificates >/dev/null 2>&1
         elif command -v yum &>/dev/null; then
             yum install -y epel-release >/dev/null 2>&1
-            yum install -y wget curl tar unzip jq nano ca-certificates >/dev/null 2>&1
+            yum install -y wget curl tar unzip jq nano sed ca-certificates >/dev/null 2>&1
         elif command -v apk &>/dev/null; then
-            apk add --no-cache wget curl tar unzip jq nano ca-certificates gcompat libc6-compat >/dev/null 2>&1
+            apk add --no-cache wget curl tar unzip jq nano sed ca-certificates gcompat libc6-compat >/dev/null 2>&1
         fi
     fi
 }
@@ -69,7 +68,7 @@ register_shortcut() {
 }
 register_shortcut
 
-# 🌟 统一远程模块分发引擎 (解耦重复代码，统一代理重试逻辑)
+# 🌟 统一远程模块分发引擎 (容灾多线路)
 run_remote_module() {
     local mod_name="$1"
     local desc="$2"
@@ -112,15 +111,6 @@ manage_service() {
             status) systemctl status V2bX ;;
             enable) systemctl enable V2bX >/dev/null 2>&1 ;;
             disable) systemctl disable V2bX >/dev/null 2>&1 ;;
-            logs) 
-                echo -e "${cyan}=== 正在追踪 V2bX 运行日志 (按 Ctrl+C 退出) ===${plain}"
-                if [ -f /etc/V2bX/error.log ] && [ -s /etc/V2bX/error.log ]; then
-                    echo -e "${yellow}检测到存在独立错误日志 (/etc/V2bX/error.log)，优先输出末尾报错：${plain}"
-                    tail -n 20 /etc/V2bX/error.log
-                    echo "---------------------------------------------------"
-                fi
-                journalctl -u V2bX -n 50 -f --no-pager 
-                ;;
         esac
     elif command -v rc-service &>/dev/null; then
         case "$action" in
@@ -130,17 +120,55 @@ manage_service() {
             status) rc-service V2bX status ;;
             enable) rc-update add V2bX default >/dev/null 2>&1 ;;
             disable) rc-update del V2bX default >/dev/null 2>&1 ;;
-            logs) 
-                if [ -f /var/log/v2bx_err.log ]; then 
-                    tail -n 50 /var/log/v2bx_err.log
-                elif [ -f /etc/V2bX/error.log ]; then
-                    tail -n 50 /etc/V2bX/error.log
-                else 
-                    echo -e "${yellow}暂无错误日志汇总或服务未曾崩溃${plain}"
-                fi 
-                ;;
         esac
     fi
+}
+
+# 🌟 独立多维日志排查控制台 (完美修复 Ctrl+C 退出脚本问题)
+inspect_logs() {
+    echo -e "\n${cyan}================ 📊 V2bX 日志诊断中心 ================${plain}"
+    echo -e "  ${green}1.${plain} 追踪系统级运行输出 (Systemd / OpenRC 控制台)"
+    echo -e "  ${green}2.${plain} 查看核心错误日志 (/etc/V2bX/error.log)"
+    echo -e "  ${green}3.${plain} 查看用户连接日志 (/var/log/V2bX/access.log)"
+    echo -e "  ${green}4.${plain} 返回上级菜单"
+    read -rp "请选择日志类型 [1-4] (默认 1): " log_type < /dev/tty
+    [[ -z "$log_type" ]] && log_type=1
+
+    if [[ "$log_type" == "4" ]]; then return; fi
+
+    echo -e "${yellow}💡 提示：正在实时滚动日志，随时按 [Ctrl+C] 退出查看并返回菜单。${plain}\n"
+    
+    # 局部拦截 Ctrl+C，只中断 tail/journalctl，不退出脚本
+    trap 'echo -e "\n${green}已停止查看日志。${plain}"; return' INT
+
+    case "$log_type" in
+        1)
+            if command -v systemctl &>/dev/null; then
+                journalctl -u V2bX -n 50 -f --no-pager
+            else
+                tail -n 50 -f /var/log/v2bx_out.log 2>/dev/null || echo -e "${yellow}暂无控制台日志${plain}"
+            fi
+            ;;
+        2)
+            if [ -f /etc/V2bX/error.log ]; then
+                tail -n 50 -f /etc/V2bX/error.log
+            elif [ -f /var/log/v2bx_err.log ]; then
+                tail -n 50 -f /var/log/v2bx_err.log
+            else
+                echo -e "${green}暂无独立错误日志，核心运行良好！${plain}"
+            fi
+            ;;
+        3)
+            if [ -f /var/log/V2bX/access.log ]; then
+                tail -n 50 -f /var/log/V2bX/access.log
+            else
+                echo -e "${yellow}未找到 /var/log/V2bX/access.log (可能连接日志已关闭或尚无连接)${plain}"
+            fi
+            ;;
+    esac
+
+    # 查看完毕后解除拦截，恢复正常
+    trap - INT
 }
 
 show_status() {
@@ -158,8 +186,7 @@ show_status() {
                 guard_status="${green}内核级防爆已开启${plain}"
             fi
         elif command -v rc-service &>/dev/null; then
-            local rc_out
-            rc_out=$(rc-service V2bX status 2>/dev/null)
+            local rc_out; rc_out=$(rc-service V2bX status 2>/dev/null)
             if echo "$rc_out" | grep -q "started"; then
                 core_status="${green}运行中${plain}"
             elif echo "$rc_out" | grep -q "crashed"; then
@@ -177,22 +204,21 @@ show_status() {
 }
 
 show_menu() {
-    local status_text
-    status_text="$(show_status)"
+    local status_text; status_text="$(show_status)"
     local menu_text
     menu_text=$(cat <<EOF
 ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
 --- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---
   ${green}0.${plain} 快捷修改主配置 (config.json)
 --------------------------------------------
-  ${green}1.${plain} 安装 V2bX (全协议核心 / 智能防爆版)
+  ${green}1.${plain} 安装 V2bX (Shannon-x 全协议核心 / 智能防爆版)
   ${green}2.${plain} 更新 V2bX 核心
   ${green}3.${plain} 卸载 V2bX
   ${green}4.${plain} 启动 V2bX 服务
   ${green}5.${plain} 停止 V2bX 服务
   ${green}6.${plain} 重启 V2bX 服务
   ${green}7.${plain} 查看 V2bX 运行状态
-  ${green}8.${plain} 查看 V2bX 实时日志 (支持多维报错定位)
+  ${green}8.${plain} 📊 查看 V2bX 实时运行与错误日志
   ${green}9.${plain} 设置开机自启动
   ${green}10.${plain} 取消开机自启动
 --------------------------------------------
@@ -219,6 +245,7 @@ EOF
     printf '%b\n%b\n' "$menu_text" "$status_text"
 }
 
+# 🌟 核心部署引擎 (修复多地址霸屏与系统适配)
 self_install_core() {
     echo -e "${yellow}正在准备部署 V2bX 后端核心组件...${plain}"
     
@@ -230,8 +257,7 @@ self_install_core() {
     read -rp "请选择限额策略 [1-4] (默认 1): " limit_opt < /dev/tty
     [[ -z "$limit_opt" ]] && limit_opt=1
 
-    local mem_limit=""
-    local cpu_limit=""
+    local mem_limit=""; local cpu_limit=""
     
     if [ "$limit_opt" -eq 2 ]; then
         mem_limit=128; cpu_limit=40
@@ -240,8 +266,7 @@ self_install_core() {
     elif [ "$limit_opt" -eq 4 ]; then
         read -rp "请输入允许核心使用的内存硬性上限 (单位 MiB, 例如 256): " mem_limit < /dev/tty
         read -rp "请输入允许核心使用的最大 CPU 使用率 (单位 %, 例如 60): " cpu_limit < /dev/tty
-        [[ -z "$mem_limit" ]] && mem_limit=128
-        [[ -z "$cpu_limit" ]] && cpu_limit=40
+        [[ -z "$mem_limit" ]] && mem_limit=128; [[ -z "$cpu_limit" ]] && cpu_limit=40
     fi
 
     manage_service stop
@@ -250,38 +275,35 @@ self_install_core() {
     mkdir -p /usr/local/V2bX /etc/V2bX /var/log/V2bX
     rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
 
-    local raw_arch=$(uname -m)
-    local arch=""
+    local raw_arch=$(uname -m); local arch="linux-64"
     case "${raw_arch}" in 
         x86_64 | amd64) arch="linux-64" ;; 
         arm64 | aarch64) arch="linux-arm64-v8a" ;; 
+        armv7* | armhf) arch="linux-arm32-v7a" ;;
+        s390x) arch="linux-s390x" ;;
+        riscv64) arch="linux-riscv64" ;;
         *) arch="linux-64" ;; 
     esac
     
-    # 动态拉取最新 Release
+    # 完美解决刷屏问题：直接利用 GitHub latest 跳转，静默重试机制
     local repo_owner="Shannon-x"
-    local last_version
-    last_version=$(curl -sL "https://api.github.com/repos/${repo_owner}/V2bX/releases/latest" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$last_version" ]] && last_version="latest"
-
     local urls=(
-        "https://ghp.ci/https://github.com/${repo_owner}/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
-        "https://mirror.ghproxy.net/https://github.com/${repo_owner}/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
-        "https://github.com/${repo_owner}/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
+        "https://ghp.ci/https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
+        "https://mirror.ghproxy.net/https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
+        "https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
     )
 
     local success=false
+    echo -e "${cyan}开始从云端拉取 V2bX 最新版核心 (架构: ${arch})...${plain}"
     for url in "${urls[@]}"; do
-        echo -e "${yellow}探测拉取线: ${url}${plain}"
         local tmp_file="/tmp/v2bx_tmp_${RANDOM}.zip"
         
-        wget -q --show-progress -O "$tmp_file" "$url" --timeout=15 
-
-        if [[ -f "$tmp_file" && -s "$tmp_file" ]]; then
-            if head -c 4 "$tmp_file" | grep -q 'PK'; then
+        # 只显示下载进度，不再疯狂打印探测网址
+        if wget -q --show-progress -O "$tmp_file" "$url" --timeout=15; then
+            if [[ -f "$tmp_file" && -s "$tmp_file" ]] && head -c 4 "$tmp_file" | grep -q 'PK\|ELF'; then
                 local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
                 mkdir -p "$tmp_dir"
-                unzip -q -o "$tmp_file" -d "$tmp_dir"
+                unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1
                 
                 local b_target=""
                 [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
@@ -290,10 +312,10 @@ self_install_core() {
                 
                 if [[ -n "$b_target" && -f "$b_target" ]]; then
                     mv -f "$b_target" /usr/local/V2bX/V2bX && success=true
+                elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
+                    mv -f "$tmp_file" /usr/local/V2bX/V2bX && success=true
                 fi
                 rm -rf "$tmp_dir"
-            elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
-                mv -f "$tmp_file" /usr/local/V2bX/V2bX && success=true
             fi
         fi
         rm -f "$tmp_file"
@@ -319,19 +341,22 @@ self_install_core() {
         fi
     fi
 
-    # 配置守护进程
+    # 配置守护进程 (补充 -w 热重载与 DNS 环境变亮)
     if [ -d /etc/systemd/system ]; then
         cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
-Description=V2bX Service - Adaptive Managed
+Description=V2bX Service - Adaptive Managed (Hot-Reload)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json
+ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json -w
 Restart=always
 RestartSec=10
 User=root
 LimitNOFILE=1048576
+LimitNPROC=51200
+Environment="XRAY_DNS_PATH=/etc/V2bX/dns.json"
+Environment="SING_DNS_PATH=/etc/V2bX/sing_dns.json"
 EOF
 
         if [ "$limit_opt" -ne 1 ]; then
@@ -355,18 +380,19 @@ EOF
     elif [ -d /etc/init.d ]; then
         cat << EOF > /etc/init.d/V2bX
 #!/sbin/openrc-run
-description="V2bX Alpine Service"
+description="V2bX Alpine Service (Hot-Reload)"
 command="/usr/local/V2bX/V2bX"
-command_args="server -c /etc/V2bX/config.json"
+command_args="server -c /etc/V2bX/config.json -w"
 command_background=true
 pidfile="/run/V2bX.pid"
 output_log="/var/log/v2bx_out.log"
 error_log="/var/log/v2bx_err.log"
+command_env="XRAY_DNS_PATH=/etc/V2bX/dns.json SING_DNS_PATH=/etc/V2bX/sing_dns.json"
 EOF
 
         if [ "$limit_opt" -ne 1 ]; then
             cat << EOF >> /etc/init.d/V2bX
-command_env="GOMEMLIMIT=${mem_limit}MiB GOGC=80"
+command_env="\$command_env GOMEMLIMIT=${mem_limit}MiB GOGC=80"
 start_stop_daemon_args="--nicelevel 19"
 EOF
         fi
@@ -383,10 +409,24 @@ EOF
     
     if [ -f /etc/V2bX/config.json ]; then
         manage_service restart
-        echo -e "${green}V2bX 部署启动完成！${plain}"
+        echo -e "${green}V2bX 部署启动完成！热重载 (-w) 已生效。${plain}"
     else
         echo -e "${yellow}V2bX 核心已就绪，请在主菜单配置 config.json 后启动。${plain}"
     fi
+}
+
+# 🌟 生成 X25519 密钥对并给出明确引导
+generate_x25519() {
+    if [[ ! -x /usr/local/V2bX/V2bX ]]; then
+        echo -e "${red}错误：尚未安装 V2bX，请先执行选项 1 安装核心！${plain}"
+        return
+    fi
+    echo -e "${cyan}正在生成 Reality X25519 密钥对...${plain}\n"
+    /usr/local/V2bX/V2bX x25519
+    echo "--------------------------------------------------------"
+    echo -e "${yellow}💡 配置指引：${plain}"
+    echo -e "  - ${green}Private key (私钥)${plain} : 填入节点配置"
+    echo -e "  - ${green}Public key (公钥)${plain}  : 填入面板后台供客户端校验"
 }
 
 install_bbr() { 
@@ -414,8 +454,8 @@ process_run() {
         else
             nano /etc/V2bX/config.json
             echo -e "${green}V2bX 支持自动热重载，若修改了关键端口或内核配置，建议重启服务生效。${plain}"
-            read -rp "是否立即重启 V2bX 服务？(y/n，默认 y): " ask_restart < /dev/tty
-            [[ -z "$ask_restart" || "$ask_restart" =~ ^[Yy]$ ]] && manage_service restart
+            read -rp "是否立即强制重启 V2bX 服务？(y/n，默认 n): " ask_restart < /dev/tty
+            [[ "$ask_restart" =~ ^[Yy]$ ]] && manage_service restart
         fi
         ;; 
     1|2) self_install_core ;; 
@@ -441,18 +481,12 @@ process_run() {
     5) manage_service stop ;; 
     6) manage_service restart ;; 
     7) manage_service status ;; 
-    8) manage_service logs ;; 
+    8) inspect_logs ;; 
     9) manage_service enable ;; 
     10) manage_service disable ;; 
     11) run_remote_module "xmm2" "全新覆盖配置向导" ;; 
     12) run_remote_module "xmm3" "原有配置追加向导" ;;  
-    13) 
-        if [[ -x /usr/local/V2bX/V2bX ]]; then
-            /usr/local/V2bX/V2bX x25519
-        else
-            echo -e "${red}错误：尚未安装 V2bX，请先执行选项 1 安装核心！${plain}"
-        fi
-        ;;
+    13) generate_x25519 ;;
     14) update_shell ;; 
     15) install_bbr ;; 
     16) run_remote_module "lianjie" "高并发连接数与端口解锁" ;; 
