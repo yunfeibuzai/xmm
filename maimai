@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="4.4.0-Modular"
+sh_ver="4.5.0-Modular"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
@@ -20,6 +20,11 @@ install_dependencies() {
         fi
     done
 
+    # 检查根证书与 Alpine 兼容层
+    if ! command -v update-ca-certificates &>/dev/null && [ ! -d /etc/ssl/certs ]; then
+        needs_install=true
+    fi
+
     if command -v apk &>/dev/null; then
         if ! apk info -e gcompat &>/dev/null || ! apk info -e libc6-compat &>/dev/null; then
             needs_install=true
@@ -30,12 +35,12 @@ install_dependencies() {
         echo -e "${yellow}正在检查并补齐系统基础依赖与架构兼容层...${plain}"
         if command -v apt-get &>/dev/null; then
             apt-get update -y -q >/dev/null 2>&1
-            apt-get install -y --no-install-recommends wget curl tar unzip jq nano >/dev/null 2>&1
+            apt-get install -y --no-install-recommends wget curl tar unzip jq nano ca-certificates >/dev/null 2>&1
         elif command -v yum &>/dev/null; then
             yum install -y epel-release >/dev/null 2>&1
-            yum install -y wget curl tar unzip jq nano >/dev/null 2>&1
+            yum install -y wget curl tar unzip jq nano ca-certificates >/dev/null 2>&1
         elif command -v apk &>/dev/null; then
-            apk add --no-cache wget curl tar unzip jq nano gcompat libc6-compat >/dev/null 2>&1
+            apk add --no-cache wget curl tar unzip jq nano ca-certificates gcompat libc6-compat >/dev/null 2>&1
         fi
     fi
 }
@@ -64,6 +69,38 @@ register_shortcut() {
 }
 register_shortcut
 
+# 🌟 统一远程模块分发引擎 (解耦重复代码，统一代理重试逻辑)
+run_remote_module() {
+    local mod_name="$1"
+    local desc="$2"
+    echo -e "${cyan}正在拉取并运行 ${desc}...${plain}"
+
+    local tmp_file="/tmp/${mod_name}_${RANDOM}"
+    local urls=(
+        "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/${mod_name}"
+        "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/${mod_name}"
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/${mod_name}"
+    )
+
+    local success=false
+    for url in "${urls[@]}"; do
+        if wget -q --timeout=10 -O "$tmp_file" "$url" || curl -sL --connect-timeout 8 "$url" -o "$tmp_file"; then
+            if [[ -f "$tmp_file" && -s "$tmp_file" ]]; then
+                success=true
+                break
+            fi
+        fi
+    done
+
+    if [ "$success" = true ]; then
+        chmod +x "$tmp_file"
+        bash "$tmp_file"
+        rm -f "$tmp_file"
+    else
+        echo -e "${red}错误：拉取模块 [${desc}] 失败，请检查网络或 GitHub 存储库！${plain}"
+    fi
+}
+
 # 🌟 智能内核服务管理器
 manage_service() {
     local action=$1
@@ -75,7 +112,15 @@ manage_service() {
             status) systemctl status V2bX ;;
             enable) systemctl enable V2bX >/dev/null 2>&1 ;;
             disable) systemctl disable V2bX >/dev/null 2>&1 ;;
-            logs) journalctl -u V2bX -n 50 --no-pager ;;
+            logs) 
+                echo -e "${cyan}=== 正在追踪 V2bX 运行日志 (按 Ctrl+C 退出) ===${plain}"
+                if [ -f /etc/V2bX/error.log ] && [ -s /etc/V2bX/error.log ]; then
+                    echo -e "${yellow}检测到存在独立错误日志 (/etc/V2bX/error.log)，优先输出末尾报错：${plain}"
+                    tail -n 20 /etc/V2bX/error.log
+                    echo "---------------------------------------------------"
+                fi
+                journalctl -u V2bX -n 50 -f --no-pager 
+                ;;
         esac
     elif command -v rc-service &>/dev/null; then
         case "$action" in
@@ -88,6 +133,8 @@ manage_service() {
             logs) 
                 if [ -f /var/log/v2bx_err.log ]; then 
                     tail -n 50 /var/log/v2bx_err.log
+                elif [ -f /etc/V2bX/error.log ]; then
+                    tail -n 50 /etc/V2bX/error.log
                 else 
                     echo -e "${yellow}暂无错误日志汇总或服务未曾崩溃${plain}"
                 fi 
@@ -129,44 +176,6 @@ show_status() {
     echo -e "V2bX 状态: $core_status | 资源护卫: $guard_status"
 }
 
-# 🌟 CF 隧道日志动态拉取模块
-view_cf_tunnel_logs() {
-    echo -e "${cyan}正在拉取并运行 CF 隧道日志诊断模块...${plain}"
-    local remote_log_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cfjournal"
-    local proxy_log_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cfjournal"
-    
-    wget -O /tmp/cfjournal "$proxy_log_url" --timeout=12 2>/dev/null || \
-    wget -O /tmp/cfjournal "$remote_log_url" --timeout=12 2>/dev/null || \
-    curl -sL "$remote_log_url" -o /tmp/cfjournal
-    
-    if [[ -f /tmp/cfjournal && -s /tmp/cfjournal ]]; then
-        chmod +x /tmp/cfjournal
-        bash /tmp/cfjournal
-        rm -f /tmp/cfjournal
-    else
-        echo -e "${red}错误：无法连接到云端仓库拉取 CF 日志模块！${plain}"
-    fi
-}
-
-# 🌟 CF 隧道交互式配置与状态管理模块
-manage_cf_tunnel() {
-    echo -e "${cyan}正在拉取并运行 CF 隧道交互式管理引擎...${plain}"
-    local remote_mgr_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cfmgr"
-    local proxy_mgr_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cfmgr"
-
-    wget -O /tmp/cfmgr "$proxy_mgr_url" --timeout=12 2>/dev/null || \
-    wget -O /tmp/cfmgr "$remote_mgr_url" --timeout=12 2>/dev/null || \
-    curl -sL "$remote_mgr_url" -o /tmp/cfmgr
-
-    if [[ -f /tmp/cfmgr && -s /tmp/cfmgr ]]; then
-        chmod +x /tmp/cfmgr
-        bash /tmp/cfmgr
-        rm -f /tmp/cfmgr
-    else
-        echo -e "${red}错误：无法连接到云端仓库拉取 CF 隧道管理模块！${plain}"
-    fi
-}
-
 show_menu() {
     local status_text
     status_text="$(show_status)"
@@ -176,14 +185,14 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
 --- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---
   ${green}0.${plain} 快捷修改主配置 (config.json)
 --------------------------------------------
-  ${green}1.${plain} 安装 V2bX (支持 XHTTP / 现代协议版)
+  ${green}1.${plain} 安装 V2bX (全协议核心 / 智能防爆版)
   ${green}2.${plain} 更新 V2bX 核心
   ${green}3.${plain} 卸载 V2bX
   ${green}4.${plain} 启动 V2bX 服务
   ${green}5.${plain} 停止 V2bX 服务
   ${green}6.${plain} 重启 V2bX 服务
   ${green}7.${plain} 查看 V2bX 运行状态
-  ${green}8.${plain} 查看 V2bX 实时日志 (支持查看报错)
+  ${green}8.${plain} 查看 V2bX 实时日志 (支持多维报错定位)
   ${green}9.${plain} 设置开机自启动
   ${green}10.${plain} 取消开机自启动
 --------------------------------------------
@@ -195,11 +204,11 @@ ${magenta}[🌟 核心战力配置向导群]${plain}
 --------------------------------------------
 ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}15.${plain} 豪华版 BBR 加速控制台
-  ${green}16.${plain} 放行全局端口+自适应链接数
+  ${green}16.${plain} 放行全局端口 + 自适应高并发连接数
   ${green}17.${plain} Linux 系统级内存与 Swap 深度净化
-  ${green}18.${plain} 彻底清空各种顽固大日志 + 开启全局日志轮转硬控 (推荐)
-  ${green}19.${plain} 提升内存回收
-  ${green}20.${plain} 将现有cdn节点改为cf隧道
+  ${green}18.${plain} 彻底清空顽固大日志 + 开启全局日志轮转硬控
+  ${green}19.${plain} 提升内存回收机制
+  ${green}20.${plain} 将现有 CDN 节点改为 CF 隧道
   ${green}21.${plain} 🔍 查看隧道日志 (排查超时)
   ${green}22.${plain} 🛠️ CF 隧道交互式管理 (改域名/ID/监控/启停)
   ${green}23.${plain} 彻底退出脚本
@@ -210,48 +219,14 @@ EOF
     printf '%b\n%b\n' "$menu_text" "$status_text"
 }
 
-make_full_config() {
-    echo -e "${cyan}正在拉取最新向导引擎...${plain}"
-    local remote_wizard_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
-    local proxy_wizard_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
-    
-    wget -O /tmp/xmm2 "$proxy_wizard_url" --timeout=10 2>/dev/null || wget -O /tmp/xmm2 "$remote_wizard_url" --timeout=10 2>/dev/null || curl -sL "$remote_wizard_url" -o /tmp/xmm2
-    
-    if [[ -f /tmp/xmm2 && -s /tmp/xmm2 ]]; then
-        chmod +x /tmp/xmm2
-        bash /tmp/xmm2
-        rm -f /tmp/xmm2
-    else
-        echo -e "${red}错误：无法连接到云端仓库！${plain}"
-    fi
-}
-
-append_existing_config() {
-    echo -e "${cyan}正在拉取追加配置向导引擎...${plain}"
-    local remote_append_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm3"
-    local proxy_append_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm3"
-    
-    wget -O /tmp/v2bx_append "$proxy_append_url" --timeout=10 2>/dev/null || \
-    wget -O /tmp/v2bx_append "$remote_append_url" --timeout=10 2>/dev/null || \
-    curl -sL "$remote_append_url" -o /tmp/v2bx_append
-    
-    if [[ -f /tmp/v2bx_append && -s /tmp/v2bx_append ]]; then
-        chmod +x /tmp/v2bx_append
-        bash /tmp/v2bx_append
-        rm -f /tmp/v2bx_append
-    else
-        echo -e "${red}错误：无法连接到您的云端 xmm3 存储地址！${plain}"
-    fi
-}
-
 self_install_core() {
-    echo -e "${yellow}正在准备部署麦卖云后端核心组件 (ShylyPP 适配版)...${plain}"
+    echo -e "${yellow}正在准备部署 V2bX 后端核心组件...${plain}"
     
     echo -e "\n${cyan}====== 🛡️ 资源护卫限制策略选择 ======${plain}"
     echo -e "  ${green}1.${plain} 原生态无锁版 (满血狂飙，适合高配小鸡或大流量节点)"
     echo -e "  ${green}2.${plain} 标准防爆锁 (128M 内存锁 + 40% CPU 压制，推荐普通小鸡)"
     echo -e "  ${green}3.${plain} 极致低配锁 (40M 内存锁 + 20% CPU 压制，适合极限清贫的 NAT 鸡)"
-    echo -e "  ${green}4.${plain} 自定义限额 (手动指定你想给的内存 and CPU 上限)"
+    echo -e "  ${green}4.${plain} 自定义限额 (手动指定内存与 CPU 上限)"
     read -rp "请选择限额策略 [1-4] (默认 1): " limit_opt < /dev/tty
     [[ -z "$limit_opt" ]] && limit_opt=1
 
@@ -259,11 +234,9 @@ self_install_core() {
     local cpu_limit=""
     
     if [ "$limit_opt" -eq 2 ]; then
-        mem_limit=128
-        cpu_limit=40
+        mem_limit=128; cpu_limit=40
     elif [ "$limit_opt" -eq 3 ]; then
-        mem_limit=40
-        cpu_limit=20
+        mem_limit=40; cpu_limit=20
     elif [ "$limit_opt" -eq 4 ]; then
         read -rp "请输入允许核心使用的内存硬性上限 (单位 MiB, 例如 256): " mem_limit < /dev/tty
         read -rp "请输入允许核心使用的最大 CPU 使用率 (单位 %, 例如 60): " cpu_limit < /dev/tty
@@ -274,23 +247,27 @@ self_install_core() {
     manage_service stop
     manage_service disable
     killall -9 V2bX >/dev/null 2>&1
-    mkdir -p /usr/local/V2bX /etc/V2bX
+    mkdir -p /usr/local/V2bX /etc/V2bX /var/log/V2bX
     rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
 
-    local arch=$(uname -m)
-    case "${arch}" in 
+    local raw_arch=$(uname -m)
+    local arch=""
+    case "${raw_arch}" in 
         x86_64 | amd64) arch="linux-64" ;; 
         arm64 | aarch64) arch="linux-arm64-v8a" ;; 
         *) arch="linux-64" ;; 
     esac
     
-    local last_version=$(curl -sL "https://api.github.com/repos/ShylyPP/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [[ -z "$last_version" ]] && last_version="v0.4.0"
+    # 动态拉取最新 Release
+    local repo_owner="Shannon-x"
+    local last_version
+    last_version=$(curl -sL "https://api.github.com/repos/${repo_owner}/V2bX/releases/latest" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+    [[ -z "$last_version" ]] && last_version="latest"
 
     local urls=(
-        "https://github.com/ShylyPP/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
-        "https://ghp.ci/https://github.com/ShylyPP/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
-        "https://mirror.ghproxy.net/https://github.com/ShylyPP/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
+        "https://ghp.ci/https://github.com/${repo_owner}/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
+        "https://mirror.ghproxy.net/https://github.com/${repo_owner}/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
+        "https://github.com/${repo_owner}/V2bX/releases/download/${last_version}/V2bX-${arch}.zip"
     )
 
     local success=false
@@ -309,12 +286,7 @@ self_install_core() {
                 local b_target=""
                 [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
                 [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
-                [[ -f "$tmp_dir/V2bX-linux-64" ]] && b_target="$tmp_dir/V2bX-linux-64"
-                [[ -f "$tmp_dir/V2bX-linux-arm64-v8a" ]] && b_target="$tmp_dir/V2bX-linux-arm64-v8a"
-                
-                if [[ -z "$b_target" ]]; then
-                    b_target=$(find "$tmp_dir" -type f -name "V2bX*" | head -n 1)
-                fi
+                [[ -z "$b_target" ]] && b_target=$(find "$tmp_dir" -type f -name "V2bX*" | head -n 1)
                 
                 if [[ -n "$b_target" && -f "$b_target" ]]; then
                     mv -f "$b_target" /usr/local/V2bX/V2bX && success=true
@@ -341,17 +313,13 @@ self_install_core() {
     rm -f /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
 
     if [ ! -f /etc/V2bX/config.json ]; then
-        read -rp "未检测到配置文件，是否立即生成？(y/n) " ask_gen_config < /dev/tty
-        if [[ "$ask_gen_config" == "y" || "$ask_gen_config" == "Y" ]]; then
-            make_full_config
+        read -rp "未检测到配置文件，是否立即运行向导生成？(y/n) " ask_gen_config < /dev/tty
+        if [[ "$ask_gen_config" =~ ^[Yy]$ ]]; then
+            run_remote_module "xmm2" "向导配置创建引擎"
         fi
     fi
 
-    if command -v jq &>/dev/null && [ -f /etc/V2bX/config.json ]; then
-        sed -i 's/"TCPFastOpen": true/"TCPFastOpen": false/g' /etc/V2bX/config.json 2>/dev/null
-        sed -i 's/"SniffEnabled": true/"SniffEnabled": false/g' /etc/V2bX/config.json 2>/dev/null
-    fi
-
+    # 配置守护进程
     if [ -d /etc/systemd/system ]; then
         cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
@@ -388,26 +356,19 @@ EOF
         cat << EOF > /etc/init.d/V2bX
 #!/sbin/openrc-run
 description="V2bX Alpine Service"
-EOF
-
-        if [ "$limit_opt" -ne 1 ]; then
-            cat << EOF >> /etc/init.d/V2bX
-export GOMEMLIMIT=${mem_limit}MiB
-export GOGC=80
-EOF
-        fi
-
-        cat << EOF >> /etc/init.d/V2bX
 command="/usr/local/V2bX/V2bX"
 command_args="server -c /etc/V2bX/config.json"
 command_background=true
-pidfile="/var/run/V2bX.pid"
+pidfile="/run/V2bX.pid"
 output_log="/var/log/v2bx_out.log"
 error_log="/var/log/v2bx_err.log"
 EOF
 
         if [ "$limit_opt" -ne 1 ]; then
-            echo 'start_stop_daemon_args="--nicelevel 19"' >> /etc/init.d/V2bX
+            cat << EOF >> /etc/init.d/V2bX
+command_env="GOMEMLIMIT=${mem_limit}MiB GOGC=80"
+start_stop_daemon_args="--nicelevel 19"
+EOF
         fi
 
         cat << EOF >> /etc/init.d/V2bX
@@ -422,116 +383,59 @@ EOF
     
     if [ -f /etc/V2bX/config.json ]; then
         manage_service restart
-        echo -e "${green}V2bX 部署成功！日志处于全透明模式（可在主菜单选项 8 查看实时报错）。${plain}"
+        echo -e "${green}V2bX 部署启动完成！${plain}"
     else
-        echo -e "${yellow}V2bX 已安装，请配置 config.json 后启动。${plain}"
+        echo -e "${yellow}V2bX 核心已就绪，请在主菜单配置 config.json 后启动。${plain}"
     fi
 }
 
-install_bbr() { wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh; }
-update_shell() { curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai" && register_shortcut; echo -e "${green}脚本升级成功！${plain}"; exit 0; }
-
-open_ports() { 
-    echo -e "${cyan}正在拉取并运行 GitHub 独立高并发连接数解锁模块...${plain}"
-    local remote_link_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/lianjie"
-    local proxy_link_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/lianjie"
-    
-    wget -O /tmp/lianjie "$proxy_link_url" --timeout=12 2>/dev/null || wget -O /tmp/lianjie "$remote_link_url" --timeout=12 2>/dev/null || curl -sL "$remote_link_url" -o /tmp/lianjie
-    
-    if [[ -f /tmp/lianjie && -s /tmp/lianjie ]]; then
-        chmod +x /tmp/lianjie
-        bash /tmp/lianjie
-        rm -f /tmp/lianjie
-    else
-        echo -e "${red}错误：无法连接到你的 GitHub 仓库拉取连接数模块！${plain}"
-    fi
+install_bbr() { 
+    wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh
 }
 
-run_clean_script() {
-    echo -e "${cyan}正在拉取并运行 Linux 系统级深度净化引擎...${plain}"
-    local remote_clean_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/Linuxclean"
-    local proxy_clean_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/Linuxclean"
-    
-    wget -O /tmp/Linuxclean "$proxy_clean_url" --timeout=12 2>/dev/null || \
-    wget -O /tmp/Linuxclean "$remote_clean_url" --timeout=12 2>/dev/null || \
-    curl -sL "$remote_clean_url" -o /tmp/Linuxclean
-    
-    if [[ -f /tmp/Linuxclean && -s /tmp/Linuxclean ]]; then
-        chmod +x /tmp/Linuxclean
-        bash /tmp/Linuxclean
-        rm -f /tmp/Linuxclean
-    else
-        echo -e "${red}错误：无法连接到云端仓库，拉取系统净化模块失败！${plain}"
+update_shell() { 
+    local current_run="$0"
+    echo -e "${cyan}正在拉取脚本最新版本...${plain}"
+    curl -o /usr/local/bin/maimai_core.sh -Ls "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
+    if [[ -f "$current_run" && "$current_run" != "/usr/local/bin/maimai_core.sh" ]]; then
+        cp -f /usr/local/bin/maimai_core.sh "$current_run"
     fi
-}
-
-run_deep_log_clean() {
-    echo -e "${cyan}正在拉取并呼叫 GitHub 独立日志防爆强控引擎...${plain}"
-    local remote_clean_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bXclean"
-    local proxy_clean_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/V2bXclean"
-    
-    wget -O /tmp/V2bXclean "$proxy_clean_url" --timeout=12 2>/dev/null || \
-    wget -O /tmp/V2bXclean "$remote_clean_url" --timeout=12 2>/dev/null || \
-    curl -sL "$remote_clean_url" -o /tmp/V2bXclean
-    
-    if [[ -f /tmp/V2bXclean && -s /tmp/V2bXclean ]]; then
-        chmod +x /tmp/V2bXclean
-        bash /tmp/V2bXclean
-        rm -f /tmp/V2bXclean
-    else
-        echo -e "${red}错误：无法连接到云端仓库，拉取日志模块失败！${plain}"
-    fi
-}
-
-optimize_memory_recovery() {
-    echo -e "${cyan}正在拉取并运行内存回收优化模块...${plain}"
-    local remote_mem_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/memory"
-    local proxy_mem_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/memory"
-    
-    wget -O /tmp/v2bx_mem "$proxy_mem_url" --timeout=12 2>/dev/null || \
-    wget -O /tmp/v2bx_mem "$remote_mem_url" --timeout=12 2>/dev/null || \
-    curl -sL "$remote_mem_url" -o /tmp/v2bx_mem
-    
-    if [[ -f /tmp/v2bx_mem && -s /tmp/v2bx_mem ]]; then
-        chmod +x /tmp/v2bx_mem
-        bash /tmp/v2bx_mem
-        rm -f /tmp/v2bx_mem
-    else
-        echo -e "${red}错误：无法连接到云端仓库拉取内存回收模块！${plain}"
-    fi
-}
-
-convert_to_cf_tunnel() {
-    echo -e "${cyan}正在拉取并运行 CF 隧道转换模块...${plain}"
-    local remote_cf_url="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cf"
-    local proxy_cf_url="https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/cf"
-    
-    wget -O /tmp/v2bx_cf "$proxy_cf_url" --timeout=12 2>/dev/null || \
-    wget -O /tmp/v2bx_cf "$remote_cf_url" --timeout=12 2>/dev/null || \
-    curl -sL "$remote_cf_url" -o /tmp/v2bx_cf
-    
-    if [[ -f /tmp/v2bx_cf && -s /tmp/v2bx_cf ]]; then
-        chmod +x /tmp/v2bx_cf
-        bash /tmp/v2bx_cf
-        rm -f /tmp/v2bx_cf
-    else
-        echo -e "${red}错误：无法连接到云端仓库拉取 CF 隧道模块！${plain}"
-    fi
+    register_shortcut
+    echo -e "${green}脚本升级成功！${plain}"
+    exit 0
 }
 
 process_run() {
     local num; read -rp "请输入选择 [0-23]: " num < /dev/tty
     case "$num" in
-    0) nano /etc/V2bX/config.json && manage_service restart ;; 
+    0) 
+        if [ ! -f /etc/V2bX/config.json ]; then
+            echo -e "${yellow}配置文件不存在，请先执行向导生成配置！${plain}"
+        else
+            nano /etc/V2bX/config.json
+            echo -e "${green}V2bX 支持自动热重载，若修改了关键端口或内核配置，建议重启服务生效。${plain}"
+            read -rp "是否立即重启 V2bX 服务？(y/n，默认 y): " ask_restart < /dev/tty
+            [[ -z "$ask_restart" || "$ask_restart" =~ ^[Yy]$ ]] && manage_service restart
+        fi
+        ;; 
     1|2) self_install_core ;; 
     3) 
+        read -rp "是否保留节点配置文件和域名证书 (/etc/V2bX)？(y/n，默认 y): " keep_conf < /dev/tty
+        [[ -z "$keep_conf" ]] && keep_conf="y"
+
         manage_service stop
         manage_service disable
-        rm -rf /usr/local/V2bX /etc/V2bX /etc/systemd/system/V2bX.service /etc/init.d/V2bX \
+        rm -rf /usr/local/V2bX /etc/systemd/system/V2bX.service /etc/init.d/V2bX \
                /var/log/v2bx*.log /var/log/V2bX*.log /var/log/v2bx*.err /var/log/V2bX*.err \
                /etc/logrotate.d/v2bx_anti_explode /etc/logrotate.d/v2bx_all /etc/cron.hourly/v2bx_cleaner
+
+        if [[ ! "$keep_conf" =~ ^[Yy]$ ]]; then
+            rm -rf /etc/V2bX
+            echo -e "${yellow}已清除配置文件与证书目录。${plain}"
+        fi
+
         if command -v systemctl &>/dev/null; then systemctl daemon-reload; fi
-        echo "卸载完成" 
+        echo -e "${green}卸载完成！${plain}" 
         ;;
     4) manage_service start ;; 
     5) manage_service stop ;; 
@@ -540,21 +444,32 @@ process_run() {
     8) manage_service logs ;; 
     9) manage_service enable ;; 
     10) manage_service disable ;; 
-    11) make_full_config ;; 
-    12) append_existing_config ;;  
-    13) /usr/local/V2bX/V2bX x25519 ;;
+    11) run_remote_module "xmm2" "全新覆盖配置向导" ;; 
+    12) run_remote_module "xmm3" "原有配置追加向导" ;;  
+    13) 
+        if [[ -x /usr/local/V2bX/V2bX ]]; then
+            /usr/local/V2bX/V2bX x25519
+        else
+            echo -e "${red}错误：尚未安装 V2bX，请先执行选项 1 安装核心！${plain}"
+        fi
+        ;;
     14) update_shell ;; 
     15) install_bbr ;; 
-    16) open_ports ;; 
-    17) run_clean_script ;; 
-    18) run_deep_log_clean ;;
-    19) optimize_memory_recovery ;; 
-    20) convert_to_cf_tunnel ;;
-    21) view_cf_tunnel_logs ;; 
-    22) manage_cf_tunnel ;;
+    16) run_remote_module "lianjie" "高并发连接数与端口解锁" ;; 
+    17) run_remote_module "Linuxclean" "Linux 系统级深度净化" ;; 
+    18) run_remote_module "V2bXclean" "日志深度防爆与轮转强控" ;;
+    19) run_remote_module "memory" "内存回收机制优化" ;; 
+    20) run_remote_module "cf" "CDN 节点转 CF 隧道模块" ;;
+    21) run_remote_module "cfjournal" "CF 隧道日志排查诊断" ;; 
+    22) run_remote_module "cfmgr" "CF 隧道交互式管理控制台" ;;
     23) exit 0 ;; 
-    *) echo -e "${red}未知序号${plain}" ;;
+    *) echo -e "${red}未知序号，请输入 0-23 之间的数字${plain}" ;;
     esac
 }
 
-while true; do show_menu; process_run; echo ""; read -rp "按回车键返回主菜单..." < /dev/tty; done
+while true; do 
+    show_menu
+    process_run
+    echo ""
+    read -rp "按回车键返回主菜单..." < /dev/tty
+done
