@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 节点独立配置向导引擎 (xmm2 - 现代卡片矩阵版)
-sh_ver="3.2.0-UIPlus"
+# 麦卖云 V2bX 节点独立配置向导引擎 (xmm2 - 健壮卡片矩阵版)
+sh_ver="3.3.0-Stable"
 
 # 终端色彩与样式
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
@@ -58,11 +58,59 @@ restart_v2bx_service() {
     fi
 }
 
+# 🌟 修复 Bug 1 & 2：注入标准的 block 黑洞出站，并用纯 CIDR 替代 geoip.dat，彻底消灭崩溃源
 init_aux_files() {
-    [[ ! -f /etc/V2bX/sing_origin.json ]] && echo '{ "outbounds": [ { "type": "direct", "tag": "direct" } ] }' > /etc/V2bX/sing_origin.json
-    [[ ! -f /etc/V2bX/dns.json ]] && echo '{ "servers": [ "1.1.1.1", "8.8.8.8", "localhost" ], "tag": "dns_inbound" }' > /etc/V2bX/dns.json
-    [[ ! -f /etc/V2bX/custom_outbound.json ]] && echo '[ { "tag": "IPv4_out", "protocol": "freedom", "settings": { "domainStrategy": "UseIPv4v6" } } ]' > /etc/V2bX/custom_outbound.json
-    [[ ! -f /etc/V2bX/route.json ]] && echo '{ "domainStrategy": "AsIs", "rules": [ { "type": "field", "outboundTag": "block", "ip": [ "geoip:private" ] } ] }' > /etc/V2bX/route.json
+    if [[ ! -f /etc/V2bX/sing_origin.json ]]; then
+        cat << 'EOF' > /etc/V2bX/sing_origin.json
+{
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ]
+}
+EOF
+    fi
+
+    if [[ ! -f /etc/V2bX/dns.json ]]; then
+        cat << 'EOF' > /etc/V2bX/dns.json
+{
+  "servers": [ "1.1.1.1", "8.8.8.8", "localhost" ],
+  "tag": "dns_inbound"
+}
+EOF
+    fi
+
+    # 修复：补齐 blackhole block 出站，修正 domainStrategy
+    if [[ ! -f /etc/V2bX/custom_outbound.json ]]; then
+        cat << 'EOF' > /etc/V2bX/custom_outbound.json
+[
+  { "tag": "IPv4_out", "protocol": "freedom", "settings": { "domainStrategy": "UseIP" } },
+  { "tag": "block", "protocol": "blackhole" }
+]
+EOF
+    fi
+
+    # 修复：纯 CIDR 封禁局域网回流与 BT，无需任何外部 geoip.dat
+    if [[ ! -f /etc/V2bX/route.json ]]; then
+        cat << 'EOF' > /etc/V2bX/route.json
+{
+  "domainStrategy": "AsIs",
+  "rules": [
+    {
+      "type": "field",
+      "outboundTag": "block",
+      "ip": [
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+        "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+        "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+        "::1/128", "fc00::/7", "fe80::/10"
+      ]
+    },
+    { "type": "field", "outboundTag": "block", "protocol": [ "bittorrent" ] }
+  ]
+}
+EOF
+    fi
+
     [[ ! -f /etc/V2bX/hy2config.yaml ]] && generate_hy2_yaml
 }
 
@@ -81,11 +129,6 @@ disableUDP: false
 udpIdleTimeout: 120s
 resolver:
   type: system
-acl:
-  inline:
-    - direct(geosite:google)
-    - reject(geosite:cn)
-    - reject(geoip:cn)
 masquerade:
   type: 404
 EOF
@@ -108,6 +151,11 @@ load_or_ask_creds() {
     echo -ne " ${bold}▸ 请输入机场面板网址${plain} ${dim}[回车默认: ${default_host}]${plain}: "
     read -r input_host < /dev/tty
     api_host=${input_host:-"$default_host"}
+    
+    # 修复：自动补充 https:// 协议头与去除尾部斜杠
+    if [[ ! "$api_host" =~ ^https?:// ]]; then
+        api_host="https://${api_host}"
+    fi
     api_host="${api_host%/}"
 
     if [[ -n "$default_key" ]]; then
@@ -184,7 +232,7 @@ collect_single_node() {
     local idx="$1"
     ui_section "配置第 ${idx} 个后端节点"
 
-    # [1/4] 核心与协议
+    # [1/4] 核心与协议 (修复：动态按核心隔离支持的协议)
     ui_step "1/4" "选择代理核心与传输协议"
     echo -e "  ${cyan}[1]${plain} Xray      ${dim}(首选: Vless / Vmess / Reality / XHTTP / CDN)${plain}"
     echo -e "  ${cyan}[2]${plain} Sing-box  ${dim}(首选: Shadowsocks / Trojan / Tuic / AnyTLS)${plain}"
@@ -208,17 +256,25 @@ collect_single_node() {
         node_type="hysteria2"
         protocol_num="5"
         echo -e "  ${green}✔ Hysteria2 引擎自动锁定协议: hysteria2${plain}"
-    else
-        echo -e "\n  ${cyan}[1]${plain} Shadowsocks   ${cyan}[2]${plain} Vless          ${cyan}[3]${plain} Vmess         ${cyan}[4]${plain} Hysteria"
-        echo -e "  ${cyan}[5]${plain} Hysteria2     ${cyan}[6]${plain} Trojan         ${cyan}[7]${plain} Tuic          ${cyan}[8]${plain} AnyTLS"
-        while [[ ! "$protocol_num" =~ ^[1-8]$ ]]; do
-            echo -ne " ${bold}▸ 请选择传输协议${plain} [1-8, 默认 2-Vless]: "
+    elif [[ "$core_type" == "xray" ]]; then
+        echo -e "\n  ${cyan}[1]${plain} Vless ${dim}(推荐 Reality / XHTTP)${plain}  ${cyan}[2]${plain} Vmess  ${cyan}[3]${plain} Trojan  ${cyan}[4]${plain} Shadowsocks"
+        while [[ ! "$protocol_num" =~ ^[1-4]$ ]]; do
+            echo -ne " ${bold}▸ 请选择 Xray 支持的协议${plain} [1-4, 默认 1-Vless]: "
             read -r protocol_num < /dev/tty
-            [[ -z "$protocol_num" ]] && protocol_num=2
+            [[ -z "$protocol_num" ]] && protocol_num=1
         done
         case "$protocol_num" in
-            1) node_type="shadowsocks" ;; 2) node_type="vless" ;; 3) node_type="vmess" ;; 4) node_type="hysteria" ;;
-            5) node_type="hysteria2" ;; 6) node_type="trojan" ;; 7) node_type="tuic" ;; 8) node_type="anytls" ;;
+            1) node_type="vless" ;; 2) node_type="vmess" ;; 3) node_type="trojan" ;; 4) node_type="shadowsocks" ;;
+        esac
+    elif [[ "$core_type" == "sing" ]]; then
+        echo -e "\n  ${cyan}[1]${plain} Shadowsocks  ${cyan}[2]${plain} Trojan  ${cyan}[3]${plain} Tuic  ${cyan}[4]${plain} AnyTLS  ${cyan}[5]${plain} Hysteria"
+        while [[ ! "$protocol_num" =~ ^[1-5]$ ]]; do
+            echo -ne " ${bold}▸ 请选择 Sing-box 支持的协议${plain} [1-5, 默认 1-Shadowsocks]: "
+            read -r protocol_num < /dev/tty
+            [[ -z "$protocol_num" ]] && protocol_num=1
+        done
+        case "$protocol_num" in
+            1) node_type="shadowsocks" ;; 2) node_type="trojan" ;; 3) node_type="tuic" ;; 4) node_type="anytls" ;; 5) node_type="hysteria" ;;
         esac
     fi
 
@@ -235,13 +291,13 @@ collect_single_node() {
     read -r input_listen < /dev/tty
     [[ -n "$input_listen" ]] && listen_ip="$input_listen"
 
-    # [3/4] TLS 证书模式
+    # [3/4] TLS 证书模式 (修复 Bug 3 & 体验优化：Trojan 强制引导 TLS，废除无效的 self 模式)
     ui_step "3/4" "TLS 安全与证书模式"
     local run_tls_flow=false
     local reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token=""
     local cert_file="" key_file=""
 
-    if [[ "$protocol_num" == "2" ]]; then
+    if [[ "$node_type" == "vless" ]]; then
         echo -ne " ${bold}▸ 该 Vless 节点是否为 Reality 节点？${plain} [Y/n, 默认 Y]: "
         read -r reality_yn < /dev/tty
         [[ -z "$reality_yn" ]] && reality_yn="y"
@@ -251,10 +307,12 @@ collect_single_node() {
         else
             run_tls_flow=true
         fi
-    elif [[ "$protocol_num" == "4" || "$protocol_num" == "5" || "$protocol_num" == "7" ]]; then
+    elif [[ "$node_type" == "hysteria2" || "$node_type" == "tuic" || "$node_type" == "hysteria" || "$node_type" == "trojan" ]]; then
+        # Trojan, Hysteria, Tuic 原生必须具备 TLS
         run_tls_flow=true
+        echo -e "  ${yellow}ℹ 协议 [${node_type}] 必须配置 TLS 证书。${plain}"
     else
-        echo -ne " ${bold}▸ 是否开启 TLS 证书保护？${plain} [y/N, 默认 N]: "
+        echo -ne " ${bold}▸ 是否为此节点开启 TLS 证书保护？${plain} [y/N, 默认 N]: "
         read -r tls_yn < /dev/tty
         [[ "$tls_yn" =~ ^[Yy]$ ]] && run_tls_flow=true
     fi
@@ -262,8 +320,8 @@ collect_single_node() {
     if [ "$run_tls_flow" = true ]; then
         echo -e "  ${cyan}[1]${plain} HTTP 模式  ${dim}(域名需解析到本机，自动向 Let's Encrypt 申请)${plain}"
         echo -e "  ${cyan}[2]${plain} DNS 模式   ${dim}(使用 Cloudflare API Token 验证，免 80 端口)${plain}"
-        echo -e "  ${cyan}[3]${plain} Self 模式  ${dim}(自签证书模式)${plain}"
-        echo -e "  ${cyan}[4]${plain} File 模式  ${dim}(手动填入已有证书文件路径)${plain}"
+        echo -e "  ${cyan}[3]${plain} File 模式  ${dim}(手动填入已有证书文件路径)${plain}"
+        echo -e "  ${cyan}[4]${plain} 本地自签   ${dim}(自动用 openssl 生成自签证书并以 File 模式装载)${plain}"
         
         while [[ ! "$cert_mode_num" =~ ^[1-4]$ ]]; do
             echo -ne " ${bold}▸ 选择证书申请方式${plain} [1-4, 默认 1]: "
@@ -293,13 +351,6 @@ collect_single_node() {
                 cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem"
                 ;;
             3)
-                cert_mode="self"
-                echo -ne " ${bold}▸ 请输入自签域名${plain} ${dim}[默认: cf.babymonster.cc.cd]${plain}: "
-                read -r input_sni < /dev/tty
-                cert_domain=${input_sni:-"cf.babymonster.cc.cd"}
-                cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem"
-                ;;
-            4)
                 cert_mode="file"
                 echo -ne " ${bold}▸ 请输入节点域名${plain} ${dim}[可留空]${plain}: "
                 read -r cert_domain < /dev/tty
@@ -310,6 +361,20 @@ collect_single_node() {
                 read -r input_key < /dev/tty
                 key_file=${input_key:-"/etc/V2bX/cert.key"}
                 ;;
+            4)
+                # 修复 Bug 3：自动生成真实的自签证书文件，走 file 模式挂载
+                cert_mode="file"
+                echo -ne " ${bold}▸ 请输入自签域名${plain} ${dim}[默认: cf.babymonster.cc.cd]${plain}: "
+                read -r input_sni < /dev/tty
+                cert_domain=${input_sni:-"cf.babymonster.cc.cd"}
+                cert_file="/etc/V2bX/${cert_domain}.cert.pem"
+                key_file="/etc/V2bX/${cert_domain}.key.pem"
+                echo -e "  ${cyan}正在调用 openssl 生成自签证书...${plain}"
+                openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+                    -keyout "$key_file" -out "$cert_file" \
+                    -subj "/CN=${cert_domain}" >/dev/null 2>&1
+                echo -e "  ${green}✔ 自签名证书已生成至 /etc/V2bX/，已自动适配为 File 模式。${plain}"
+                ;;
         esac
     fi
 
@@ -317,7 +382,7 @@ collect_single_node() {
     local cert_block=""
     if [[ "$cert_mode" == "dns" ]]; then
         cert_block='{ "CertMode": "dns", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "'"${cert_file}"'", "KeyFile": "'"${key_file}"'", "Email": "admin@v2bx.com", "Provider": "cloudflare", "DNSEnv": { "CF_DNS_API_TOKEN": "'"${cf_token}"'", "CLOUDFLARE_DNS_API_TOKEN": "'"${cf_token}"'" } }'
-    elif [[ "$cert_mode" =~ ^(http|self|file)$ ]]; then
+    elif [[ "$cert_mode" =~ ^(http|file)$ ]]; then
         cert_block='{ "CertMode": "'"${cert_mode}"'", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "'"${cert_file}"'", "KeyFile": "'"${key_file}"'", "Email": "admin@v2bx.com" }'
     else
         cert_block='{ "CertMode": "none" }'
