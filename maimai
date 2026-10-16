@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="4.7.0-Comprehensive"
+sh_ver="4.8.0-Comprehensive"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
@@ -124,7 +124,7 @@ manage_service() {
     fi
 }
 
-# 🌟 独立多维日志排查控制台 (完美修复 Ctrl+C 退出脚本问题)
+# 🌟 独立多维日志排查控制台 (完美解决 Ctrl+C 卡死退出问题)
 inspect_logs() {
     echo -e "\n${cyan}================ 📊 V2bX 日志诊断中心 ================${plain}"
     echo -e "  ${green}1.${plain} 追踪系统级运行输出 (Systemd / OpenRC 控制台)"
@@ -136,39 +136,45 @@ inspect_logs() {
 
     if [[ "$log_type" == "4" ]]; then return; fi
 
-    echo -e "${yellow}💡 提示：正在实时滚动日志，随时按 [Ctrl+C] 退出查看并返回菜单。${plain}\n"
+    echo -e "${yellow}💡 提示：正在实时滚动日志，随时按 [Ctrl+C] 可安全退出查看并返回菜单。${plain}\n"
     
-    # 局部拦截 Ctrl+C，只中断 tail/journalctl，不退出脚本
-    trap 'echo -e "\n${green}已停止查看日志。${plain}"; return' INT
-
-    case "$log_type" in
-        1)
-            if command -v systemctl &>/dev/null; then
-                journalctl -u V2bX -n 50 -f --no-pager
-            else
-                tail -n 50 -f /var/log/v2bx_out.log 2>/dev/null || echo -e "${yellow}暂无控制台日志${plain}"
-            fi
-            ;;
-        2)
-            if [ -f /etc/V2bX/error.log ]; then
-                tail -n 50 -f /etc/V2bX/error.log
-            elif [ -f /var/log/v2bx_err.log ]; then
-                tail -n 50 -f /var/log/v2bx_err.log
-            else
-                echo -e "${green}暂无独立错误日志，核心运行良好！${plain}"
-            fi
-            ;;
-        3)
-            if [ -f /var/log/V2bX/access.log ]; then
-                tail -n 50 -f /var/log/V2bX/access.log
-            else
-                echo -e "${yellow}未找到 /var/log/V2bX/access.log (可能连接日志已关闭或尚无连接)${plain}"
-            fi
-            ;;
-    esac
-
-    # 查看完毕后解除拦截，恢复正常
+    # 核心技术：隔离主脚本的 Ctrl+C (SIGINT)
+    # 让主脚本免疫退出，但子进程 (tail/journalctl) 依然能被杀死
+    trap '' INT
+    
+    (
+        # 恢复子进程对 Ctrl+C 的响应
+        trap - INT
+        case "$log_type" in
+            1)
+                if command -v systemctl &>/dev/null; then
+                    journalctl -u V2bX -n 50 -f --no-pager
+                else
+                    tail -n 50 -f /var/log/v2bx_out.log 2>/dev/null || echo -e "${yellow}暂无控制台日志${plain}"
+                fi
+                ;;
+            2)
+                if [ -f /etc/V2bX/error.log ]; then
+                    tail -n 50 -f /etc/V2bX/error.log
+                elif [ -f /var/log/v2bx_err.log ]; then
+                    tail -n 50 -f /var/log/v2bx_err.log
+                else
+                    echo -e "${green}暂无独立错误日志，核心运行良好！${plain}"
+                fi
+                ;;
+            3)
+                if [ -f /var/log/V2bX/access.log ]; then
+                    tail -n 50 -f /var/log/V2bX/access.log
+                else
+                    echo -e "${yellow}未找到 /var/log/V2bX/access.log (可能连接日志已关闭或尚无连接)${plain}"
+                fi
+                ;;
+        esac
+    )
+    
+    # 恢复主脚本的默认行为
     trap - INT
+    echo -e "\n${green}✔ 已停止查阅日志。${plain}"
 }
 
 show_status() {
@@ -245,7 +251,7 @@ EOF
     printf '%b\n%b\n' "$menu_text" "$status_text"
 }
 
-# 🌟 核心部署引擎 (修复多地址霸屏与系统适配)
+# 🌟 核心部署引擎
 self_install_core() {
     echo -e "${yellow}正在准备部署 V2bX 后端核心组件...${plain}"
     
@@ -285,7 +291,6 @@ self_install_core() {
         *) arch="linux-64" ;; 
     esac
     
-    # 完美解决刷屏问题：直接利用 GitHub latest 跳转，静默重试机制
     local repo_owner="Shannon-x"
     local urls=(
         "https://ghp.ci/https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
@@ -298,7 +303,6 @@ self_install_core() {
     for url in "${urls[@]}"; do
         local tmp_file="/tmp/v2bx_tmp_${RANDOM}.zip"
         
-        # 只显示下载进度，不再疯狂打印探测网址
         if wget -q --show-progress -O "$tmp_file" "$url" --timeout=15; then
             if [[ -f "$tmp_file" && -s "$tmp_file" ]] && head -c 4 "$tmp_file" | grep -q 'PK\|ELF'; then
                 local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
@@ -341,7 +345,7 @@ self_install_core() {
         fi
     fi
 
-    # 配置守护进程 (补充 -w 热重载与 DNS 环境变亮)
+    # 100% 对齐 Shannon-x 环境变量与热重载 (-w)
     if [ -d /etc/systemd/system ]; then
         cat << EOF > /etc/systemd/system/V2bX.service
 [Unit]
