@@ -1,63 +1,212 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 节点独立配置向导引擎 (多节点循环矩阵美化版)
-sh_ver="2.1.0"
+# 麦卖云 V2bX 节点独立配置向导引擎 (Shannon-x 规范对齐 + 多节点矩阵版)
+sh_ver="3.0.0"
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
 
-echo -e "\n${yellow}========== 精确对齐向导式配置创建逻辑 ==========${plain}"
-mkdir -p /etc/V2bX
+[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
+mkdir -p /etc/V2bX /var/log/V2bX
 saved_file="/etc/V2bX/.saved_creds"
-default_host="https://example.com"
-default_key=""
 
-if [[ -f "$saved_file" ]]; then
-    source "$saved_file" 2>/dev/null
-    default_host=${saved_host:-"https://example.com"}
-    default_key=${saved_key:-""}
-fi
+# 🌟 自适应重启服务 (兼容 Systemd 与 Alpine OpenRC)
+restart_v2bx_service() {
+    if command -v systemctl &>/dev/null; then
+        systemctl restart V2bX 2>/dev/null && echo -e "${green}[服务] Systemd: V2bX 已重启生效！${plain}"
+    elif command -v rc-service &>/dev/null; then
+        rc-service V2bX restart 2>/dev/null && echo -e "${green}[服务] OpenRC: V2bX 已重启生效！${plain}"
+    else
+        echo -e "${yellow}[提示] 未检测到系统服务管理器，若已开启 -w 参数，配置将自动热重载。${plain}"
+    fi
+}
 
-read -rp "请 输 入 机 场 网 址 (如 ${default_host})： " input_host
-api_host=${input_host:-"$default_host"}
+# 🌟 初始化内核依赖的附属配置文件 (防止因文件缺失导致内核启动失败)
+init_aux_files() {
+    if [[ ! -f /etc/V2bX/sing_origin.json ]]; then
+        cat << 'EOF' > /etc/V2bX/sing_origin.json
+{
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ]
+}
+EOF
+    fi
 
-if [[ -n "$default_key" ]]; then
-    read -rp "请 输 入 面 面 对 接 API Key (直接回车使用已保存的Key): " input_key
-    api_key=${input_key:-"$default_key"}
-else
-    while [[ -z "$api_key" ]]; do
-        read -rp "请 输 入 面 面 对 接 API Key： " api_key
-    done
-fi
+    if [[ ! -f /etc/V2bX/dns.json ]]; then
+        cat << 'EOF' > /etc/V2bX/dns.json
+{
+  "servers": [ "1.1.1.1", "8.8.8.8", "localhost" ],
+  "tag": "dns_inbound"
+}
+EOF
+    fi
 
-read -rp "是 否 设 置 固 定 的 机 场 网 址 和 API Key？ (y/n) " save_yn
-if [[ "$save_yn" == "y" || "$save_yn" == "Y" ]]; then
-    echo "saved_host=\"$api_host\"" > "$saved_file"
-    echo "saved_key=\"$api_key\"" >> "$saved_file"
-    echo -e "${green}[提示] 凭证已固定锁定。${plain}"
-fi
+    if [[ ! -f /etc/V2bX/custom_outbound.json ]]; then
+        cat << 'EOF' > /etc/V2bX/custom_outbound.json
+[
+  { "tag": "IPv4_out", "protocol": "freedom", "settings": { "domainStrategy": "UseIPv4v6" } },
+  { "tag": "IPv6_out", "protocol": "freedom", "settings": { "domainStrategy": "UseIPv6" } },
+  { "protocol": "blackhole", "tag": "block" }
+]
+EOF
+    fi
 
-nodes_block=""
-has_xray=false
-has_sing=false
-has_hysteria2=false
-node_count=0
+    if [[ ! -f /etc/V2bX/route.json ]]; then
+        cat << 'EOF' > /etc/V2bX/route.json
+{
+  "domainStrategy": "AsIs",
+  "rules": [
+    { "type": "field", "outboundTag": "block", "ip": [ "geoip:private" ] },
+    { "type": "field", "outboundTag": "block", "protocol": [ "bittorrent" ] }
+  ]
+}
+EOF
+    fi
 
-while true; do
-    ((node_count++))
+    if [[ ! -f /etc/V2bX/hy2config.yaml ]]; then
+        generate_hy2_yaml
+    fi
+}
+
+# 🌟 生成 Hysteria2 高性能独立 YAML 配置 (严格对齐发行文档)
+generate_hy2_yaml() {
+    cat << 'EOF' > /etc/V2bX/hy2config.yaml
+quic:
+  initStreamReceiveWindow: 16777216
+  maxStreamReceiveWindow: 16777216
+  initConnReceiveWindow: 33554432
+  maxConnReceiveWindow: 33554432
+  maxIdleTimeout: 90s
+  maxIncomingStreams: 4096
+  disablePathMTUDiscovery: false
+ignoreClientBandwidth: false
+disableUDP: false
+udpIdleTimeout: 120s
+resolver:
+  type: system
+acl:
+  inline:
+    - direct(geosite:google)
+    - reject(geosite:cn)
+    - reject(geoip:cn)
+masquerade:
+  type: 404
+EOF
+}
+
+# 🌟 读取或设置面板凭证 (.saved_creds 便利逻辑保留)
+load_or_ask_creds() {
+    local default_host="https://example.com"
+    local default_key=""
+
+    if [[ -f "$saved_file" ]]; then
+        # shellcheck disable=SC1090
+        source "$saved_file" 2>/dev/null
+        default_host=${saved_host:-"https://example.com"}
+        default_key=${saved_key:-""}
+    fi
+
+    read -rp "请输入机场面板网址 (直接回车默认 ${default_host})： " input_host < /dev/tty
+    api_host=${input_host:-"$default_host"}
+    api_host="${api_host%/}"
+
+    if [[ -n "$default_key" ]]; then
+        read -rp "请输入面板对接 API Key (直接回车使用已保存 Key)： " input_key < /dev/tty
+        api_key=${input_key:-"$default_key"}
+    else
+        api_key=""
+        while [[ -z "$api_key" ]]; do
+            read -rp "请输入面板对接 API Key： " api_key < /dev/tty
+        done
+    fi
+
+    read -rp "是否固定保存该机场网址和 API Key 供下次直接使用？(y/n，默认 y)： " save_yn < /dev/tty
+    [[ -z "$save_yn" ]] && save_yn="y"
+    if [[ "$save_yn" =~ ^[Yy]$ ]]; then
+        echo "saved_host=\"$api_host\"" > "$saved_file"
+        echo "saved_key=\"$api_key\"" >> "$saved_file"
+        chmod 600 "$saved_file"
+        echo -e "${green}[提示] 面板凭证已加密锁定至 ${saved_file}${plain}"
+    fi
+}
+
+# 🌟 构建单个 Cores JSON 块
+build_xray_core_json() {
+    local hs=${1:-10} idle=${2:-300} up=${3:-2} down=${4:-4} buf=${5:-256}
+    cat << EOF
+{
+  "Type": "xray",
+  "Log": {
+    "Level": "error",
+    "AccessPath": "",
+    "ErrorPath": "/etc/V2bX/error.log",
+    "MaxSize": 100,
+    "MaxBackups": 0,
+    "MaxDays": 90,
+    "Compress": true
+  },
+  "AssetPath": "/etc/V2bX/",
+  "DnsConfigPath": "/etc/V2bX/dns.json",
+  "OutboundConfigPath": "/etc/V2bX/custom_outbound.json",
+  "RouteConfigPath": "/etc/V2bX/route.json",
+  "XrayConnectionConfig": {
+    "handshake": ${hs},
+    "connIdle": ${idle},
+    "uplinkOnly": ${up},
+    "downlinkOnly": ${down},
+    "bufferSize": ${buf}
+  }
+}
+EOF
+}
+
+build_sing_core_json() {
+    cat << 'EOF'
+{
+  "Type": "sing",
+  "Log": {
+    "Level": "error",
+    "Timestamp": true
+  },
+  "NTP": {
+    "Enable": false,
+    "Server": "time.apple.com",
+    "ServerPort": 0
+  },
+  "OriginalPath": "/etc/V2bX/sing_origin.json"
+}
+EOF
+}
+
+build_hy2_core_json() {
+    cat << 'EOF'
+{
+  "Type": "hysteria2",
+  "Log": {
+    "Level": "error"
+  }
+}
+EOF
+}
+
+# 🌟 交互式采集单个节点配置
+collect_single_node() {
+    local idx="$1"
     echo -e "\n${cyan}--------------------------------------------${plain}"
-    echo -e "${cyan}🌟 开始配置第 ${node_count} 个后端节点：${plain}"
+    echo -e "${cyan}🌟 开始配置第 ${idx} 个后端节点：${plain}"
     echo -e "${cyan}--------------------------------------------${plain}"
-    
-    core_num="" core_type="" node_id="" protocol_num="" node_type=""
-    reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token="" node_port=""
 
-    echo -e "请 选 择 节 点 核 心 类 型 ："
-    echo -e "1. xray"
-    echo -e "2. singbox"
-    echo -e "3. hysteria2"
+    local core_num="" protocol_num=""
+    node_id="" core_type="" node_type=""
+
+    echo -e "请选择节点核心类型 (Core)："
+    echo -e "  ${green}1.${plain} xray      (推荐 Vless / Vmess / Reality / XHTTP / CDN 节点)"
+    echo -e "  ${green}2.${plain} singbox   (推荐 Shadowsocks / Trojan / Tuic / AnyTLS)"
+    echo -e "  ${green}3.${plain} hysteria2 (Hysteria2 高性能专属内核)"
     while [[ ! "$core_num" =~ ^[1-3]$ ]]; do
-        read -rp "请 输 入 ： " core_num
+        read -rp "请输入 [1-3] (默认 1)： " core_num < /dev/tty
+        [[ -z "$core_num" ]] && core_num=1
     done
     case "$core_num" in 
         1) core_type="xray"; has_xray=true ;; 
@@ -65,149 +214,540 @@ while true; do
         3) core_type="hysteria2"; has_hysteria2=true ;; 
     esac
 
-    while [[ -z "$node_id" ]]; do
-        read -rp "请 输 入 节 点 Node ID： " node_id
+    while [[ ! "$node_id" =~ ^[0-9]+$ ]]; do
+        read -rp "请输入面板中的节点 ID (NodeID，纯数字)： " node_id < /dev/tty
     done
 
-    echo -e "请 选 择 节 点 传 输 协 议 ："
-    echo -e "1. Shadowsocks"
-    echo -e "2. Vless"
-    echo -e "3. Vmess"
-    echo -e "4. Hysteria"
-    echo -e "5. Hysteria2"
-    echo -e "6. Trojan"
-    echo -e "7. Tuic"
-    echo -e "8. AnyTLS"
-    while [[ ! "$protocol_num" =~ ^[1-8]$ ]]; do
-        read -rp "请 输 入 ： " protocol_num
-    done
+    if [[ "$core_type" == "hysteria2" ]]; then
+        node_type="hysteria2"
+        echo -e "${green}[自动绑定] Hysteria2 内核已自动锁定协议为: hysteria2${plain}"
+        protocol_num="5"
+    else
+        echo -e "请选择节点传输协议 (NodeType)："
+        echo -e "  ${green}1.${plain} shadowsocks"
+        echo -e "  ${green}2.${plain} vless"
+        echo -e "  ${green}3.${plain} vmess"
+        echo -e "  ${green}4.${plain} hysteria"
+        echo -e "  ${green}5.${plain} hysteria2"
+        echo -e "  ${green}6.${plain} trojan"
+        echo -e "  ${green}7.${plain} tuic"
+        echo -e "  ${green}8.${plain} anytls"
+        while [[ ! "$protocol_num" =~ ^[1-8]$ ]]; do
+            read -rp "请输入 [1-8] (默认 2-vless)： " protocol_num < /dev/tty
+            [[ -z "$protocol_num" ]] && protocol_num=2
+        done
+        case "$protocol_num" in
+            1) node_type="shadowsocks" ;; 2) node_type="vless" ;; 3) node_type="vmess" ;; 4) node_type="hysteria" ;;
+            5) node_type="hysteria2" ;; 6) node_type="trojan" ;; 7) node_type="tuic" ;; 8) node_type="anytls" ;;
+        esac
+    fi
 
-    case "$protocol_num" in
-        1) node_type="shadowsocks" ;; 2) node_type="vless" ;; 3) node_type="vmess" ;; 4) node_type="hysteria" ;;
-        5) node_type="hysteria2" ;; 6) node_type="trojan" ;; 7) node_type="tuic" ;; 8) node_type="anytls" ;;
-    esac
+    # 监听地址选择
+    local listen_ip="0.0.0.0"
+    read -rp "监听地址 ListenIP (回车默认 0.0.0.0，双栈/IPv6 可输入 ::)： " input_listen < /dev/tty
+    [[ -n "$input_listen" ]] && listen_ip="$input_listen"
 
-    run_tls_flow=false
+    # TLS 证书流程判定
+    local run_tls_flow=false
+    local reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token=""
+    local cert_file="" key_file=""
+
     if [[ "$protocol_num" == "1" || "$protocol_num" == "3" || "$protocol_num" == "6" || "$protocol_num" == "8" ]]; then
-        read -rp "请 选 择 是 否 进 行 TLS配 置 ？ (y/n)" tls_yn
-        [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
+        read -rp "是否为该节点启用 TLS 配置？(y/n，默认 n)： " tls_yn < /dev/tty
+        [[ "$tls_yn" =~ ^[Yy]$ ]] && run_tls_flow=true
     elif [[ "$protocol_num" == "2" ]]; then
-        read -rp "请 选 择 是 否 为 reality节 点 ？ (y/n)" reality_yn
-        if [[ "$reality_yn" == "y" || "$reality_yn" == "Y" ]]; then
+        read -rp "该 Vless 节点是否为 Reality 节点？(y/n，默认 y)： " reality_yn < /dev/tty
+        [[ -z "$reality_yn" ]] && reality_yn="y"
+        if [[ "$reality_yn" =~ ^[Yy]$ ]]; then
             cert_mode="none"
         else
-            read -rp "请 选 择 是 否 进 行 TLS配 置 ？ (y/n)" tls_yn
-            [[ "$tls_yn" == "y" || "$tls_yn" == "Y" ]] && run_tls_flow=true
+            read -rp "是否进行 TLS 证书配置？(y/n，默认 n)： " tls_yn < /dev/tty
+            [[ "$tls_yn" =~ ^[Yy]$ ]] && run_tls_flow=true
         fi
     elif [[ "$protocol_num" == "4" || "$protocol_num" == "5" || "$protocol_num" == "7" ]]; then
         run_tls_flow=true
     fi
 
     if [ "$run_tls_flow" = true ]; then
-        echo -e "请 选 择 证 书 申 请 模 式 ："
-        echo -e "1. http模 式 自 动 申 请 ， 节 点 域 名 已 正 确 解 析"
-        echo -e "2. dns模 式 自 动 申 请 ， 需 填 入 正 确 域 名 服 务商 API参 数"
-        echo -e "3. self模 式 ， 自 签 证 书 或 提 供 已 有 证 书 文 件"
-        while [[ ! "$cert_mode_num" =~ ^[1-3]$ ]]; do
-            read -rp "请 输 入 ： " cert_mode_num
+        echo -e "请选择 TLS 证书模式 (CertMode)："
+        echo -e "  ${green}1.${plain} http 模式 (自动申请 Let's Encrypt，域名需已解析到本机且 80 端口空闲)"
+        echo -e "  ${green}2.${plain} dns  模式 (Cloudflare DNS API 自动申请，无需 80 端口)"
+        echo -e "  ${green}3.${plain} self 模式 (自签证书模式)"
+        echo -e "  ${green}4.${plain} file 模式 (手动指定已有的证书文件路径)"
+        while [[ ! "$cert_mode_num" =~ ^[1-4]$ ]]; do
+            read -rp "请输入 [1-4] (默认 1)： " cert_mode_num < /dev/tty
+            [[ -z "$cert_mode_num" ]] && cert_mode_num=1
         done
 
-        if [[ "$cert_mode_num" == "1" || "$cert_mode_num" == "2" ]]; then
-            while [[ -z "$cert_domain" ]]; do
-                read -rp "请输入证书申请域名 (如 domain.com): " cert_domain
-            done
-            if [[ "$cert_mode_num" == "1" ]]; then
+        case "$cert_mode_num" in
+            1)
                 cert_mode="http"
-            else
-                cert_mode="dns"
-                while [[ -z "$cf_token" ]]; do
-                    read -rp "CLOUDFLARE_DNS_API_TOKEN: 请 输入 你的 真实 CF_Token_ 粘贴 在 这里: " cf_token
+                while [[ -z "$cert_domain" ]]; do
+                    read -rp "请输入已解析到本机的节点域名 (如 node1.example.com)： " cert_domain < /dev/tty
                 done
-            fi
-        elif [[ "$cert_mode_num" == "3" ]]; then
-            cert_mode="self"
-        fi
+                cert_file="/etc/V2bX/${cert_domain}.cert.pem"
+                key_file="/etc/V2bX/${cert_domain}.key.pem"
+                ;;
+            2)
+                cert_mode="dns"
+                while [[ -z "$cert_domain" ]]; do
+                    read -rp "请输入要申请证书的节点域名 (如 node1.example.com)： " cert_domain < /dev/tty
+                done
+                while [[ -z "$cf_token" ]]; do
+                    read -rp "请粘贴你的 Cloudflare API Token： " cf_token < /dev/tty
+                done
+                cert_file="/etc/V2bX/${cert_domain}.cert.pem"
+                key_file="/etc/V2bX/${cert_domain}.key.pem"
+                ;;
+            3)
+                cert_mode="self"
+                read -rp "请输入自签证书域名 (直接回车默认 cf.babymonster.cc.cd)： " input_sni < /dev/tty
+                cert_domain=${input_sni:-"cf.babymonster.cc.cd"}
+                cert_file="/etc/V2bX/${cert_domain}.cert.pem"
+                key_file="/etc/V2bX/${cert_domain}.key.pem"
+                ;;
+            4)
+                cert_mode="file"
+                read -rp "请输入节点域名 (可留空)： " cert_domain < /dev/tty
+                read -rp "请输入证书公钥路径 (默认 /etc/V2bX/server.crt.cer)： " input_cert < /dev/tty
+                cert_file=${input_cert:-"/etc/V2bX/server.crt.cer"}
+                read -rp "请输入证书私钥路径 (默认 /etc/V2bX/cert.key)： " input_key < /dev/tty
+                key_file=${input_key:-"/etc/V2bX/cert.key"}
+                ;;
+        esac
     fi
 
-    cert_block=""
+    # 组装 CertConfig
+    local cert_block=""
     if [[ "$cert_mode" == "dns" ]]; then
-        cert_block='{ "CertMode": "dns", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com", "Provider": "cloudflare", "DNSEnv": { "CLOUDFLARE_DNS_API_TOKEN": "'"${cf_token}"'" } }'
-    elif [[ "$cert_mode" == "http" ]]; then
-        cert_block='{ "CertMode": "http", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com" }'
-    elif [[ "$cert_mode" == "self" ]]; then
-        cert_block='{ "CertMode": "self", "RejectUnknownSni": false, "CertDomain": "cf.babymonster.cc.cd", "CertFile": "/etc/V2bX/server.crt.cer", "KeyFile": "/etc/V2bX/cert.key", "Email": "v2bx@github.com" }'
+        cert_block='{
+          "CertMode": "dns",
+          "RejectUnknownSni": false,
+          "CertDomain": "'"${cert_domain}"'",
+          "CertFile": "'"${cert_file}"'",
+          "KeyFile": "'"${key_file}"'",
+          "Email": "admin@v2bx.com",
+          "Provider": "cloudflare",
+          "DNSEnv": {
+            "CF_DNS_API_TOKEN": "'"${cf_token}"'",
+            "CLOUDFLARE_DNS_API_TOKEN": "'"${cf_token}"'"
+          }
+        }'
+    elif [[ "$cert_mode" == "http" || "$cert_mode" == "self" || "$cert_mode" == "file" ]]; then
+        cert_block='{
+          "CertMode": "'"${cert_mode}"'",
+          "RejectUnknownSni": false,
+          "CertDomain": "'"${cert_domain}"'",
+          "CertFile": "'"${cert_file}"'",
+          "KeyFile": "'"${key_file}"'",
+          "Email": "admin@v2bx.com"
+        }'
     else
         cert_block='{ "CertMode": "none" }'
     fi
 
-    read -rp "请 输 入 该 节 点 监 听 端 口 (直接回车默认 20026)： " input_port
-    node_port=${input_port:-"20026"}
+    # 询问是否开启节点限速/动态限速 (LimitConfig)
+    local limit_block=""
+    read -rp "是否配置本节点的本地限速/动态限速 (LimitConfig)？(y/n，默认 n)： " limit_yn < /dev/tty
+    if [[ "$limit_yn" =~ ^[Yy]$ ]]; then
+        local speed_limit=0 dev_limit=0 conn_limit=0 dyn_yn="n"
+        read -rp "  静态单用户限速 (Mbps，0 为不限制，默认 0)： " speed_limit < /dev/tty
+        [[ -z "$speed_limit" ]] && speed_limit=0
+        read -rp "  单用户设备数上限 (0 为跟随面板，默认 0)： " dev_limit < /dev/tty
+        [[ -z "$dev_limit" ]] && dev_limit=0
+        read -rp "  单用户连接数上限 (0 为不限制，默认 0)： " conn_limit < /dev/tty
+        [[ -z "$conn_limit" ]] && conn_limit=0
+        read -rp "  是否启用动态触发式限速 (例如 60秒跑满1GB限速10Mbps)？(y/n，默认 n)： " dyn_yn < /dev/tty
+        local enable_dyn="false"
+        [[ "$dyn_yn" =~ ^[Yy]$ ]] && enable_dyn="true"
 
-    current_node='{
-"Core": "'"${core_type}"'", "ApiHost": "'"${api_host}"'", "ApiKey": "'"${api_key}"'", "NodeID": '"${node_id}"', "NodeType": "'"${node_type}"'",
-"Timeout": 30, "ListenIP": "::", "SendIP": "0.0.0.0", "Port": '"${node_port}"', "DeviceOnlineMinTraffic": 200, "MinReportTraffic": 0,
-"TCPFastOpen": true, "SniffEnabled": true, "CertConfig": '"${cert_block}"'
-}'
-
-    if [[ -z "$nodes_block" ]]; then
-        nodes_block="$current_node"
-    else
-        nodes_block="${nodes_block},${current_node}"
+        limit_block=',
+        "LimitConfig": {
+          "EnableRealtime": false,
+          "SpeedLimit": '"${speed_limit}"',
+          "DeviceLimit": '"${dev_limit}"',
+          "ConnLimit": '"${conn_limit}"',
+          "EnableDynamicSpeedLimit": '"${enable_dyn}"',
+          "DynamicSpeedLimitConfig": {
+            "Periodic": 60,
+            "Traffic": 1073741824,
+            "SpeedLimit": 10,
+            "ExpireTime": 600
+          }
+        }'
     fi
 
-    echo -e ""
-    read -rp "是 否 继 续 生 成 配 置 ？ (y/n) " continue_yn
-    if [[ "$continue_yn" != "y" && "$continue_yn" != "Y" ]]; then
-        break
+    # 根据内核拼接专属节点字段 (严格对齐 Shannon-x 发行文档)
+    if [[ "$core_type" == "xray" ]]; then
+        local dns_type="UseIPv4"
+        echo -e "请选择 Xray 节点 DNS 出站策略 (DNSType)："
+        echo -e "  1. UseIPv4 (默认推荐)  2. UseIPv6  3. UseIP (双栈)  4. AsIs"
+        read -rp "请输入 [1-4] (默认 1)： " dns_opt < /dev/tty
+        case "$dns_opt" in
+            2) dns_type="UseIPv6" ;; 3) dns_type="UseIP" ;; 4) dns_type="AsIs" ;; *) dns_type="UseIPv4" ;;
+        esac
+
+        current_node='{
+          "Core": "xray",
+          "ApiHost": "'"${api_host}"'",
+          "ApiKey": "'"${api_key}"'",
+          "NodeID": '"${node_id}"',
+          "NodeType": "'"${node_type}"'",
+          "Timeout": 30,
+          "ListenIP": "'"${listen_ip}"'",
+          "SendIP": "0.0.0.0",
+          "DeviceOnlineMinTraffic": 200,
+          "ReportMinTraffic": 0,
+          "EnableProxyProtocol": false,
+          "EnableUot": true,
+          "EnableTFO": true,
+          "DNSType": "'"${dns_type}"'",
+          "DisableSniffing": false,
+          "CertConfig": '"${cert_block}""${limit_block}"'
+        }'
+    elif [[ "$core_type" == "sing" ]]; then
+        current_node='{
+          "Core": "sing",
+          "ApiHost": "'"${api_host}"'",
+          "ApiKey": "'"${api_key}"'",
+          "NodeID": '"${node_id}"',
+          "NodeType": "'"${node_type}"'",
+          "Timeout": 30,
+          "ListenIP": "'"${listen_ip}"'",
+          "SendIP": "0.0.0.0",
+          "DeviceOnlineMinTraffic": 200,
+          "ReportMinTraffic": 0,
+          "EnableTFO": true,
+          "EnableSniff": true,
+          "SniffOverrideDestination": true,
+          "CertConfig": '"${cert_block}""${limit_block}"'
+        }'
+    elif [[ "$core_type" == "hysteria2" ]]; then
+        generate_hy2_yaml
+        current_node='{
+          "Core": "hysteria2",
+          "ApiHost": "'"${api_host}"'",
+          "ApiKey": "'"${api_key}"'",
+          "NodeID": '"${node_id}"',
+          "NodeType": "hysteria2",
+          "Hysteria2ConfigPath": "/etc/V2bX/hy2config.yaml",
+          "Timeout": 30,
+          "ListenIP": "",
+          "SendIP": "0.0.0.0",
+          "DeviceOnlineMinTraffic": 200,
+          "ReportMinTraffic": 0,
+          "CertConfig": '"${cert_block}""${limit_block}"'
+        }'
     fi
-done
+}
 
-# 🌟 精准修复：重构 Cores 拼装逻辑，优雅消除尾随逗号隐患
-cores_array=()
-if [ "$has_xray" = true ]; then
-    cores_array+=('{"Type": "xray", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}')
-fi
-if [ "$has_sing" = true ]; then
-    cores_array+=('{"Type": "sing", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}')
-fi
-if [ "$has_hysteria2" = true ]; then
-    cores_array+=('{"Type": "hysteria2", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json"}')
-fi
+# 🌟 功能 1：全新生成多节点配置 (覆盖模式)
+wizard_create_all() {
+    echo -e "\n${yellow}========== 1. 全新向导式配置创建 (多节点循环矩阵) ==========${plain}"
+    init_aux_files
+    load_or_ask_creds
 
-# 用逗号连接数组元素，保证绝对没有多余的尾巴逗号
-cores_block=$(IFS=,; echo "${cores_array[*]}")
+    nodes_block=""
+    has_xray=false
+    has_sing=false
+    has_hysteria2=false
+    node_count=0
 
-if [[ ! -f /etc/V2bX/sing_origin.json ]]; then
-    cat << 'EOF' > /etc/V2bX/sing_origin.json
-{ "outbounds": [ { "type": "direct", "tag": "direct" } ] }
-EOF
-fi
+    while true; do
+        ((node_count++))
+        collect_single_node "$node_count"
 
-# 🌟 精准排版：完美对接美化矩阵
-if command -v jq &>/dev/null; then
-    # 先做一层语法合法性验证，防止产生脏配置
+        if [[ -z "$nodes_block" ]]; then
+            nodes_block="$current_node"
+        else
+            nodes_block="${nodes_block},${current_node}"
+        fi
+
+        echo ""
+        read -rp "是否继续添加下一个节点？(y/n，默认 n)： " continue_yn < /dev/tty
+        if [[ ! "$continue_yn" =~ ^[Yy]$ ]]; then
+            break
+        fi
+    done
+
+    # 若包含 Xray 内核，询问性能调优档位
+    local hs=10 idle=300 up=2 down=4 buf=256
+    if [ "$has_xray" = true ]; then
+        echo -e "\n${cyan}请选择 Xray 连接池与内存性能参数档位 (XrayConnectionConfig)：${plain}"
+        echo -e "  ${green}1.${plain} 均衡通用档 (10/300/2/4/256)  — 适合常规 1GB 左右内存 VPS [默认]"
+        echo -e "  ${green}2.${plain} 大带宽高配 (15/600/5/10/512) — 适合大内存高并发机器"
+        echo -e "  ${green}3.${plain} 极限低内存 (4/60/1/2/32)     — 适合 512MB 及以下微型 NAT 小鸡"
+        read -rp "请选择档位 [1-3] (默认 1)： " perf_opt < /dev/tty
+        case "$perf_opt" in
+            2) hs=15; idle=600; up=5; down=10; buf=512 ;;
+            3) hs=4; idle=60; up=1; down=2; buf=32 ;;
+            *) hs=10; idle=300; up=2; down=4; buf=256 ;;
+        esac
+    fi
+
+    # 组装 Cores 数组
+    local cores_array=()
+    if [ "$has_xray" = true ]; then
+        cores_array+=("$(build_xray_core_json $hs $idle $up $down $buf)")
+    fi
+    if [ "$has_sing" = true ]; then
+        cores_array+=("$(build_sing_core_json)")
+    fi
+    if [ "$has_hysteria2" = true ]; then
+        cores_array+=("$(build_hy2_core_json)")
+    fi
+
+    local cores_block
+    cores_block=$(IFS=,; echo "${cores_array[*]}")
+
+    local raw_json
     raw_json=$(cat << EOF
 {
-"Log": { "Level": "none", "Output": "" },
-"Cores": [ ${cores_block} ],
-"Nodes": [ ${nodes_block} ]
-}
-EOF
-)
-    if echo "$raw_json" | jq . > /etc/V2bX/config.json 2>/dev/null; then
-        echo -e "${green}[成功] 共计 ${node_count} 个节点的合集矩阵已完成 jq 深度美化，并精准写入 /etc/V2bX/config.json${plain}"
-    else
-        # 即使 jq 解析失败，也留下有缩进的保底方案，不再缩成乱糟糟的一行
-        echo "$raw_json" > /etc/V2bX/config.json
-        echo -e "${yellow}[警告] jq 校验未通过，已写入标准原始配置，请检查参数合法性。${plain}"
-    fi
-else
-    cat << EOF > /etc/V2bX/config.json
-{
-  "Log": { "Level": "none", "Output": "" },
+  "Log": {
+    "Level": "error",
+    "Output": ""
+  },
   "Cores": [ ${cores_block} ],
   "Nodes": [ ${nodes_block} ]
 }
 EOF
-    echo -e "${green}[成功] 配置已成功落盘（由于未安装 jq，已进行标准预排版写入）。${plain}"
+)
+
+    if command -v jq &>/dev/null; then
+        if echo "$raw_json" | jq . > /etc/V2bX/config.json 2>/dev/null; then
+            echo -e "\n${green}[成功] 共计 ${node_count} 个节点的矩阵已完成 jq 校验与格式化，写入 /etc/V2bX/config.json！${plain}"
+        else
+            echo "$raw_json" > /etc/V2bX/config.json
+            echo -e "\n${yellow}[警告] jq 格式化异常，已写入原始配置，请检查输入字段是否有特殊字符。${plain}"
+        fi
+    else
+        echo "$raw_json" > /etc/V2bX/config.json
+        echo -e "\n${green}[成功] 配置已写入 /etc/V2bX/config.json！${plain}"
+    fi
+
+    restart_v2bx_service
+}
+
+# 🌟 功能 2：在现有配置基础上追加节点
+wizard_append_node() {
+    echo -e "\n${yellow}========== 2. 在现有配置上无缝追加新节点 ==========${plain}"
+    if [[ ! -f /etc/V2bX/config.json ]]; then
+        echo -e "${red}未检测到现有 /etc/V2bX/config.json，将自动转为全新创建模式...${plain}"
+        wizard_create_all
+        return
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        echo -e "${red}错误：追加模式依赖 jq 工具，请先安装 jq！${plain}"
+        return
+    fi
+
+    init_aux_files
+    load_or_ask_creds
+
+    has_xray=false; has_sing=false; has_hysteria2=false
+    local exist_count
+    exist_count=$(jq '.Nodes | length' /etc/V2bX/config.json 2>/dev/null || echo 0)
+
+    while true; do
+        ((exist_count++))
+        collect_single_node "$exist_count"
+
+        local tmp_json="/tmp/v2bx_append_${RANDOM}.json"
+        cp -f /etc/V2bX/config.json "$tmp_json"
+
+        # 检查并自动补充缺失的 Core
+        if [ "$has_xray" = true ] && ! jq -e '.Cores[] | select(.Type=="xray")' "$tmp_json" >/dev/null 2>&1; then
+            local xray_c
+            xray_c=$(build_xray_core_json 10 300 2 4 256)
+            jq --argjson c "$xray_c" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv "${tmp_json}.new" "$tmp_json"
+        fi
+        if [ "$has_sing" = true ] && ! jq -e '.Cores[] | select(.Type=="sing")' "$tmp_json" >/dev/null 2>&1; then
+            local sing_c
+            sing_c=$(build_sing_core_json)
+            jq --argjson c "$sing_c" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv "${tmp_json}.new" "$tmp_json"
+        fi
+        if [ "$has_hysteria2" = true ] && ! jq -e '.Cores[] | select(.Type=="hysteria2")' "$tmp_json" >/dev/null 2>&1; then
+            local hy2_c
+            hy2_c=$(build_hy2_core_json)
+            jq --argjson c "$hy2_c" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv "${tmp_json}.new" "$tmp_json"
+        fi
+
+        # 追加 Node
+        if jq --argjson n "$current_node" '.Nodes += [$n]' "$tmp_json" > /etc/V2bX/config.json 2>/dev/null; then
+            echo -e "${green}[成功] 第 ${exist_count} 个节点 (NodeID: ${node_id}) 已无缝追加至 /etc/V2bX/config.json！${plain}"
+        else
+            cp -f "$tmp_json" /etc/V2bX/config.json
+            echo -e "${red}[错误] 节点 JSON 合并失败，已回滚原配置！${plain}"
+        fi
+        rm -f "$tmp_json" "${tmp_json}.new"
+
+        echo ""
+        read -rp "是否继续追加下一个节点？(y/n，默认 n)： " continue_yn < /dev/tty
+        if [[ ! "$continue_yn" =~ ^[Yy]$ ]]; then
+            break
+        fi
+    done
+
+    restart_v2bx_service
+}
+
+# 🌟 功能 3：一键切换 Xray 内核性能档位
+switch_xray_profile() {
+    echo -e "\n${yellow}========== 3. 调整 Xray 内核连接池与内存参数 ==========${plain}"
+    if [[ ! -f /etc/V2bX/config.json ]] || ! command -v jq &>/dev/null; then
+        echo -e "${red}错误：未找到 /etc/V2bX/config.json 或系统未安装 jq！${plain}"
+        return
+    fi
+
+    echo -e "请选择要应用的 XrayConnectionConfig 性能档位："
+    echo -e "  ${green}1.${plain} 均衡通用档 (10 / 300 / 2 / 4 / 256) — 1GB 左右内存推荐"
+    echo -e "  ${green}2.${plain} 大带宽高配 (15 / 600 / 5 / 10 / 512) — 高并发大内存专用"
+    echo -e "  ${green}3.${plain} 低内存防爆 (4 / 60 / 1 / 2 / 32)     — 512MB 及以下小鸡专用"
+    read -rp "请输入选择 [1-3]： " p_num < /dev/tty
+
+    local hs=10 idle=300 up=2 down=4 buf=256
+    case "$p_num" in
+        1) hs=10; idle=300; up=2; down=4; buf=256 ;;
+        2) hs=15; idle=600; up=5; down=10; buf=512 ;;
+        3) hs=4; idle=60; up=1; down=2; buf=32 ;;
+        *) echo -e "${red}取消修改${plain}"; return ;;
+    esac
+
+    local tmp_f="/tmp/v2bx_perf_${RANDOM}.json"
+    if jq --argjson hs $hs --argjson idle $idle --argjson up $up --argjson down $down --argjson buf $buf \
+       '(.Cores[] | select(.Type=="xray") | .XrayConnectionConfig) = {"handshake":$hs,"connIdle":$idle,"uplinkOnly":$up,"downlinkOnly":$down,"bufferSize":$buf}' \
+       /etc/V2bX/config.json > "$tmp_f" 2>/dev/null; then
+        mv -f "$tmp_f" /etc/V2bX/config.json
+        echo -e "${green}[成功] Xray 性能档位已更新为: ${hs}/${idle}/${up}/${down}/${buf}${plain}"
+        restart_v2bx_service
+    else
+        rm -f "$tmp_f"
+        echo -e "${red}[失败] 修改未成功，请确认配置中包含 xray 内核。${plain}"
+    fi
+}
+
+# 🌟 功能 4：管理固定面板凭证与重置附属文件
+manage_creds_and_aux() {
+    echo -e "\n${yellow}========== 4. 面板凭证管理与附属配置重置 ==========${plain}"
+    if [[ -f "$saved_file" ]]; then
+        # shellcheck disable=SC1090
+        source "$saved_file" 2>/dev/null
+        echo -e "当前已固定的机场网址: ${green}${saved_host:-未设置}${plain}"
+        echo -e "当前已固定的 API Key: ${green}${saved_key:-未设置}${plain}"
+    else
+        echo -e "当前状态: ${yellow}尚未保存固定面板凭证${plain}"
+    fi
+
+    echo -e "--------------------------------------------"
+    echo -e "  ${green}1.${plain} 重新设置并锁定机场网址与 API Key"
+    echo -e "  ${green}2.${plain} 清除已保存的固定凭证"
+    echo -e "  ${green}3.${plain} 重新生成高性能 Hysteria2 配置 (/etc/V2bX/hy2config.yaml)"
+    echo -e "  ${green}4.${plain} 补齐/重置默认路由与 DNS 附属文件 (dns/route/sing_origin)"
+    echo -e "  ${green}0.${plain} 返回"
+    read -rp "请选择 [0-4]： " c_opt < /dev/tty
+
+    case "$c_opt" in
+        1)
+            rm -f "$saved_file"
+            load_or_ask_creds
+            ;;
+        2)
+            rm -f "$saved_file"
+            echo -e "${green}[成功] 已清除保存的面板凭证！${plain}"
+            ;;
+        3)
+            generate_hy2_yaml
+            echo -e "${green}[成功] /etc/V2bX/hy2config.yaml (16MB/32MB 窗口 + CN 屏蔽规则) 已重新生成！${plain}"
+            ;;
+        4)
+            rm -f /etc/V2bX/sing_origin.json /etc/V2bX/dns.json /etc/V2bX/custom_outbound.json /etc/V2bX/route.json
+            init_aux_files
+            echo -e "${green}[成功] 所有内核附属配置文件已重置为最新标准模板！${plain}"
+            ;;
+        *) return ;;
+    esac
+}
+
+# 🌟 功能 5：在线更新当前 xmm2 脚本
+update_self_script() {
+    echo -e "\n${cyan}正在从 GitHub 同步最新 xmm2 配置向导脚本...${plain}"
+    local tmp_new="/tmp/xmm2_update_${RANDOM}"
+    local urls=(
+        "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
+        "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
+    )
+
+    local dl_ok=false
+    for url in "${urls[@]}"; do
+        if wget -q --timeout=10 -O "$tmp_new" "$url" || curl -sL --connect-timeout 8 "$url" -o "$tmp_new"; then
+            if [[ -f "$tmp_new" && -s "$tmp_new" ]] && grep -q "sh_ver=" "$tmp_new"; then
+                dl_ok=true
+                break
+            fi
+        fi
+    done
+
+    if [ "$dl_ok" = true ]; then
+        local new_ver
+        new_ver=$(grep -m1 '^sh_ver=' "$tmp_new" | cut -d'"' -f2)
+        chmod +x "$tmp_new"
+        # 如果当前是通过本地文件执行，则覆盖原文件
+        if [[ -f "$0" ]]; then
+            cp -f "$tmp_new" "$0"
+            chmod +x "$0"
+        fi
+        cp -f "$tmp_new" /usr/local/bin/xmm2 2>/dev/null
+        chmod +x /usr/local/bin/xmm2 2>/dev/null
+        rm -f "$tmp_new"
+        echo -e "${green}[成功] xmm2 向导脚本已更新至 v${new_ver}！正在重新加载...${plain}"
+        sleep 1
+        exec bash "/usr/local/bin/xmm2"
+    else
+        rm -f "$tmp_new"
+        echo -e "${red}[错误] 无法连接到云端仓库 https://github.com/yunfeibuzai/xmm/blob/main/xmm2 ，更新失败！${plain}"
+    fi
+}
+
+# 🌟 交互式主菜单
+show_xmm2_menu() {
+    printf '\033[H\033[2J'
+    cat << EOF
+${green}====================================================${plain}
+   ${cyan}麦卖云 V2bX 节点配置向导引擎 (xmm2)${plain} v${sh_ver}
+   ${magenta}适配 Shannon-x 多内核规范 & Systemd/OpenRC 双模${plain}
+${green}====================================================${plain}
+  ${green}1.${plain} 🌟 全新生成节点配置 (多节点循环矩阵 / 覆盖模式)
+  ${green}2.${plain} ➕ 在现有配置上追加新节点 (无缝合并 Cores 与 Nodes)
+  ${green}3.${plain} ⚡ 切换 Xray 内核性能档位 (适配不同内存/带宽 VPS)
+  ${green}4.${plain} 🔑 管理固定面板凭证 (.saved_creds) 与附属配置文件
+  ${green}5.${plain} 🔄 更新当前向导脚本 (同步云端 xmm2 最新版)
+----------------------------------------------------
+  ${green}0.${plain} 🚪 退出向导 (返回上级菜单)
+${green}====================================================${plain}
+EOF
+}
+
+# 支持带参数直接运行（如 bash xmm2 1 直接进入全新生成），无参数则展示交互菜单
+if [[ "$1" == "1" ]]; then
+    wizard_create_all
+    exit 0
 fi
+
+while true; do
+    show_xmm2_menu
+    read -rp "请输入功能序号 [0-5] (默认 1)： " menu_num < /dev/tty
+    [[ -z "$menu_num" ]] && menu_num="1"
+    case "$menu_num" in
+        1) wizard_create_all ;;
+        2) wizard_append_node ;;
+        3) switch_xray_profile ;;
+        4) manage_creds_and_aux ;;
+        5) update_self_script ;;
+        0) echo -e "${green}已退出配置向导。${plain}"; exit 0 ;;
+        *) echo -e "${red}输入无效，请输入 0-5 之间的数字！${plain}" ;;
+    esac
+    echo ""
+    read -rp "按回车键返回向导菜单..." < /dev/tty
+done
