@@ -1,205 +1,430 @@
 #!/bin/bash
-# =================================================================
-# 麦卖云 V2bX 核心部署与更新引擎 (自适应全系统版)
-# 路径：all/xmm1and2
-# =================================================================
 
-red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
+# 麦卖云 V2bX 全新配置生成引擎 (xmm11_2)
+sh_ver="3.4.0-NodeGen"
 
-# 独立的服务控制器，兼容单/多进程与不同系统架构
-manage_service_local() {
-    local action=$1
-    if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
-        if command -v systemctl &>/dev/null; then
-            for f in /etc/V2bX/nodes/node_*.json; do
-                [[ ! -f "$f" ]] && continue
-                local inst; inst=$(basename "$f" .json)
-                systemctl "$action" "v2bx@${inst}" 2>/dev/null
-            done
-        elif command -v rc-service &>/dev/null; then
-            for init_f in /etc/init.d/v2bx.node_*; do
-                [[ ! -f "$init_f" ]] && continue
-                local svc; svc=$(basename "$init_f")
-                rc-service "$svc" "$action" 2>/dev/null
-            done
-        fi
-        return
-    fi
-    if command -v systemctl &>/dev/null; then
-        systemctl "$action" V2bX 2>/dev/null
-    elif command -v rc-service &>/dev/null; then
-        rc-service V2bX "$action" 2>/dev/null || rc-update $([[ "$action" == "enable" ]] && echo "add" || echo "del") V2bX default 2>/dev/null
+# 终端色彩与样式
+red='\033[31m'; green='\033[32m'; yellow='\033[33m'
+magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'
+dim='\033[2m'
+
+[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
+
+mkdir -p /etc/V2bX /etc/V2bX/nodes /var/log/V2bX
+saved_file="/etc/V2bX/.saved_creds"
+
+# ════════════════════ UI 组件库 ════════════════════
+ui_line() { echo -e "${dim}────────────────────────────────────────────────────────${plain}"; }
+
+detect_run_mode() {
+    if compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/V2bX.*" >/dev/null 2>&1; then
+        echo -e "${magenta}多进程隔离模式${plain}"
+    elif [[ -f /etc/V2bX/config.json ]]; then
+        echo -e "${green}单进程标准模式${plain}"
+    else
+        echo -e "${yellow}未配置${plain}"
     fi
 }
 
-# 🌟 将主要逻辑封装进函数，完美解决 local 变量作用域报错问题
-install_core() {
-    echo -e "${yellow}正在准备部署 V2bX 后端核心组件...${plain}"
-    echo -e "\n${cyan}====== 🛡️ 资源护卫限制策略选择 ======${plain}"
-    echo -e "  ${green}1.${plain} 原生态无锁版 (满血狂飙，适合高配小鸡或大流量节点)"
-    echo -e "  ${green}2.${plain} 标准防爆锁 (128M 内存锁 + 40% CPU 压制，推荐普通小鸡)"
-    echo -e "  ${green}3.${plain} 极致低配锁 (40M 内存锁 + 20% CPU 压制，适合极限清贫的 NAT 鸡)"
-    echo -e "  ${green}4.${plain} 自定义限额 (手动指定内存与 CPU 上限)"
-    read -rp "请选择限额策略 [1-4] (默认 1): " limit_opt < /dev/tty
-    [[ -z "$limit_opt" ]] && limit_opt=1
+ui_banner() {
+    printf '\033[H\033[2J'
+    echo -e "${cyan}${bold}╔══════════════════════════════════════════════════════╗${plain}"
+    echo -e "${cyan}${bold}║         麦卖云 V2bX 全新配置生成引擎 (xmm11_2)       ║${plain}"
+    echo -e "${cyan}${bold}║    多内核全协议矩阵 • 向导式创建 • 自动拆分自适应    ║${plain}"
+    echo -e "${cyan}${bold}╚══════════════════════════════════════════════════════╝${plain}"
+    echo -e " ${dim}版本: v${sh_ver}  |  当前模式: $(detect_run_mode)${plain}"
+    ui_line
+}
 
-    local mem_limit=""; local cpu_limit=""
-    if [ "$limit_opt" -eq 2 ]; then mem_limit=128; cpu_limit=40
-    elif [ "$limit_opt" -eq 3 ]; then mem_limit=40; cpu_limit=20
-    elif [ "$limit_opt" -eq 4 ]; then
-        read -rp "请输入允许核心使用的内存硬性上限 (单位 MiB, 例如 256): " mem_limit < /dev/tty
-        read -rp "请输入允许核心使用的最大 CPU 使用率 (单位 %, 例如 60): " cpu_limit < /dev/tty
-        [[ -z "$mem_limit" ]] && mem_limit=128; [[ -z "$cpu_limit" ]] && cpu_limit=40
-    fi
+ui_section() { echo -e "\n${cyan}${bold}▌ $1${plain}"; ui_line; }
+ui_step() { echo -e "\n${magenta}${bold}┌── [步骤 $1] $2${plain}"; }
 
-    # 停止旧服务并清理残余
-    manage_service_local stop
-    manage_service_local disable
-    killall -9 V2bX >/dev/null 2>&1
-    mkdir -p /usr/local/V2bX /etc/V2bX /var/log/V2bX
-    rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
+# ════════════════════ 依赖组件与重启逻辑 ════════════════════
+multi_split_configs() {
+    if [[ ! -f /etc/V2bX/config.json ]] || ! command -v jq &>/dev/null; then return 1; fi
+    local total_nodes
+    total_nodes=$(jq '.Nodes | length' /etc/V2bX/config.json 2>/dev/null || echo 0)
+    if [[ "$total_nodes" -eq 0 ]]; then return 1; fi
 
-    # 架构判定
-    local raw_arch=$(uname -m); local arch="linux-64"
-    case "${raw_arch}" in 
-        x86_64|amd64) arch="linux-64" ;; 
-        arm64|aarch64) arch="linux-arm64-v8a" ;; 
-        armv7*|armhf) arch="linux-arm32-v7a" ;; 
-        s390x) arch="linux-s390x" ;; 
-        riscv64) arch="linux-riscv64" ;;
-    esac
+    mkdir -p /etc/V2bX/nodes /var/log/V2bX
+    rm -f /etc/V2bX/nodes/node_*.json
 
-    local repo_owner="Shannon-x"
-    local urls=(
-        "https://ghp.ci/https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
-        "https://mirror.ghproxy.net/https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
-        "https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
-    )
+    echo -e " ${cyan}正在从主配置拆分 ${total_nodes} 个独立节点实例配置...${plain}"
+    for ((i=0; i<total_nodes; i++)); do
+        local nid ntype ncore inst_name out_file
+        nid=$(jq -r ".Nodes[$i].NodeID" /etc/V2bX/config.json)
+        ntype=$(jq -r ".Nodes[$i].NodeType" /etc/V2bX/config.json)
+        ncore=$(jq -r ".Nodes[$i].Core" /etc/V2bX/config.json)
+        inst_name="node_${nid}_${ntype}"
+        out_file="/etc/V2bX/nodes/${inst_name}.json"
 
-    local success=false
-    echo -e "${cyan}开始从云端拉取 V2bX 最新版核心 (架构: ${arch})...${plain}"
-    for url in "${urls[@]}"; do
-        local tmp_file="/tmp/v2bx_tmp_${RANDOM}.zip"
-        if wget -q --show-progress -O "$tmp_file" "$url" --timeout=15; then
-            if [[ -f "$tmp_file" && -s "$tmp_file" ]] && head -c 4 "$tmp_file" | grep -q 'PK\|ELF'; then
-                local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
-                mkdir -p "$tmp_dir"
-                unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1
-                
-                local b_target=""
-                [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
-                [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
-                [[ -z "$b_target" ]] && b_target=$(find "$tmp_dir" -type f -name "V2bX*" | head -n 1)
-                
-                if [[ -n "$b_target" && -f "$b_target" ]]; then
-                    mv -f "$b_target" /usr/local/V2bX/V2bX && success=true
-                elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
-                    mv -f "$tmp_file" /usr/local/V2bX/V2bX && success=true
-                fi
-                rm -rf "$tmp_dir"
-            fi
-        fi
-        rm -f "$tmp_file"
-        if [ "$success" = true ]; then
-            chmod +x /usr/local/V2bX/V2bX
-            echo -e "${green}[成功] 核心拉取成功！${plain}"
-            break
-        fi
+        jq --argjson idx "$i" --arg core "$ncore" --arg name "$inst_name" '
+        {
+          "Log": { "Level": (.Log.Level // "error"), "Output": "" },
+          "Cores": [
+            (
+              (.Cores[] | select(.Type == $core)) as $c |
+              if $core == "xray" then
+                $c | .Log.ErrorPath = ("/var/log/V2bX/error_" + $name + ".log") | .Log.AccessPath = ("/var/log/V2bX/access_" + $name + ".log")
+              else $c end
+            )
+          ],
+          "Nodes": [ .Nodes[$idx] ]
+        }' /etc/V2bX/config.json > "$out_file"
+        echo -e "   ├─ 已生成独立配置: ${green}${out_file}${plain} ${dim}(Core: ${ncore}, NodeID: ${nid})${plain}"
     done
+    return 0
+}
 
-    if [ "$success" = false ]; then
-        echo -e "${red}[错误] 所有拉取线路均失败，请检查服务器网络！${plain}"
-        exit 1
+multi_migrate_instances() {
+    multi_split_configs || return 1
+    local mem_env="" cpu_quota="" nice_val="" mem_high="" mem_max=""
+    if [[ -f /etc/systemd/system/V2bX.service ]]; then
+        mem_env=$(grep '^Environment="GOMEMLIMIT=' /etc/systemd/system/V2bX.service | head -n1)
+        cpu_quota=$(grep '^CPUQuota=' /etc/systemd/system/V2bX.service | head -n1)
+        nice_val=$(grep '^Nice=' /etc/systemd/system/V2bX.service | head -n1)
+        mem_high=$(grep '^MemoryHigh=' /etc/systemd/system/V2bX.service | head -n1)
+        mem_max=$(grep '^MemoryMax=' /etc/systemd/system/V2bX.service | head -n1)
+    elif [[ -f /etc/init.d/V2bX ]]; then
+        mem_env=$(grep 'GOMEMLIMIT=' /etc/init.d/V2bX | head -n1)
     fi
 
-    rm -f /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
+    if command -v systemctl &>/dev/null; then
+        systemctl stop V2bX 2>/dev/null
+        systemctl disable V2bX >/dev/null 2>&1
+        for old_srv in /etc/systemd/system/multi-user.target.wants/v2bx@*.service; do
+            [[ -e "$old_srv" ]] || continue
+            local srv_base; srv_base=$(basename "$old_srv")
+            systemctl stop "$srv_base" 2>/dev/null
+            systemctl disable "$srv_base" >/dev/null 2>&1
+        done
 
-    # 如果没有配置文件，提示使用 xmm2 创建
-    if [ ! -f /etc/V2bX/config.json ]; then
-        read -rp "未检测到配置文件，是否立即运行向导生成？(y/n) " ask_gen_config < /dev/tty
-        if [[ "$ask_gen_config" =~ ^[Yy]$ ]]; then
-            local tmp_xmm2="/tmp/xmm2_boot_${RANDOM}.sh"
-            if wget -q -O "$tmp_xmm2" "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"; then
-                chmod +x "$tmp_xmm2"
-                bash "$tmp_xmm2"
-                rm -f "$tmp_xmm2"
-            fi
-        fi
-    fi
-
-    # ==================== 写入守护服务 ====================
-    if [ -d /etc/systemd/system ]; then
-        cat << EOF > /etc/systemd/system/V2bX.service
+        cat << EOF > /etc/systemd/system/v2bx@.service
 [Unit]
-Description=V2bX Service - Adaptive Managed (Hot-Reload)
+Description=V2bX Isolated Node Instance (%i)
 After=network.target
-
 [Service]
-ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json -w
+ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/nodes/%i.json -w
 Restart=always
-RestartSec=10
+RestartSec=5
 User=root
 LimitNOFILE=1048576
 LimitNPROC=51200
 Environment="XRAY_DNS_PATH=/etc/V2bX/dns.json"
 Environment="SING_DNS_PATH=/etc/V2bX/sing_dns.json"
 EOF
-
-        if [ "$limit_opt" -ne 1 ]; then
-            local high_mark=$((mem_limit * 8 / 10))
-            cat << EOF >> /etc/systemd/system/V2bX.service
-Environment="GOMEMLIMIT=${mem_limit}MiB"
-Environment="GOGC=80"
-CPUQuota=${cpu_limit}%
-Nice=19
-MemoryHigh=${high_mark}M
-MemoryMax=${mem_limit}M
-MemorySwapMax=0
-OOMScoreAdjust=-100
-EOF
+        if [[ -n "$mem_env" ]]; then
+            {
+                echo "$mem_env"
+                echo 'Environment="GOGC=80"'
+                [[ -n "$cpu_quota" ]] && echo "$cpu_quota"
+                [[ -n "$nice_val" ]] && echo "$nice_val"
+                [[ -n "$mem_high" ]] && echo "$mem_high"
+                [[ -n "$mem_max" ]] && echo "$mem_max"
+                echo "MemorySwapMax=0"
+                echo "OOMScoreAdjust=-100"
+            } >> /etc/systemd/system/v2bx@.service
         fi
-
-        echo -e "[Install]\nWantedBy=multi-user.target" >> /etc/systemd/system/V2bX.service
+        echo -e "[Install]\nWantedBy=multi-user.target" >> /etc/systemd/system/v2bx@.service
         systemctl daemon-reload
-        [[ ! -f /etc/V2bX/nodes/.multi_enabled ]] && manage_service_local enable
-        
-    elif [ -d /etc/init.d ]; then
-        cat << EOF > /etc/init.d/V2bX
+
+        for nf in /etc/V2bX/nodes/node_*.json; do
+            [[ -f "$nf" ]] || continue
+            local inst; inst=$(basename "$nf" .json)
+            systemctl enable "v2bx@${inst}.service" >/dev/null 2>&1
+            systemctl restart "v2bx@${inst}.service"
+        done
+    elif command -v rc-service &>/dev/null; then
+        rc-service V2bX stop 2>/dev/null
+        rc-update del V2bX default >/dev/null 2>&1
+        for old_rc in /etc/init.d/V2bX.node_*; do
+            [[ -f "$old_rc" ]] || continue
+            local rc_base; rc_base=$(basename "$old_rc")
+            rc-service "$rc_base" stop 2>/dev/null
+            rc-update del "$rc_base" default >/dev/null 2>&1
+            rm -f "$old_rc"
+        done
+        for nf in /etc/V2bX/nodes/node_*.json; do
+            [[ -f "$nf" ]] || continue
+            local inst rc_file; inst=$(basename "$nf" .json); rc_file="/etc/init.d/V2bX.${inst}"
+            cat << EOF > "$rc_file"
 #!/sbin/openrc-run
-description="V2bX Alpine Service (Hot-Reload)"
+description="V2bX Isolated Node (${inst})"
 command="/usr/local/V2bX/V2bX"
-command_args="server -c /etc/V2bX/config.json -w"
+command_args="server -c /etc/V2bX/nodes/${inst}.json -w"
 command_background=true
-pidfile="/run/V2bX.pid"
-output_log="/var/log/v2bx_out.log"
-error_log="/var/log/v2bx_err.log"
+pidfile="/run/V2bX.${inst}.pid"
+output_log="/var/log/V2bX/out_${inst}.log"
+error_log="/var/log/V2bX/err_${inst}.log"
 command_env="XRAY_DNS_PATH=/etc/V2bX/dns.json SING_DNS_PATH=/etc/V2bX/sing_dns.json"
 EOF
+            [[ -n "$mem_env" ]] && echo "$mem_env" >> "$rc_file"
+            echo -e "depend() {\n    need net\n}" >> "$rc_file"
+            chmod +x "$rc_file"
+            rc-update add "V2bX.${inst}" default >/dev/null 2>&1
+            rc-service "V2bX.${inst}" restart
+        done
+    fi
+}
 
-        if [ "$limit_opt" -ne 1 ]; then
-            cat << EOF >> /etc/init.d/V2bX
-command_env="\$command_env GOMEMLIMIT=${mem_limit}MiB GOGC=80"
-start_stop_daemon_args="--nicelevel 19"
-EOF
+restart_v2bx_service() {
+    echo ""
+    ui_section "正在应用配置并重载服务"
+    if compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/V2bX.*" >/dev/null 2>&1; then
+        echo -e " ${cyan}ℹ 检测到当前处于【多进程隔离模式】，正在自动重新拆分并重启所有节点实例...${plain}"
+        multi_migrate_instances "quiet"
+        return
+    fi
+    if command -v systemctl &>/dev/null; then
+        if systemctl restart V2bX 2>/dev/null; then
+            echo -e " ${green}✔ Systemd: V2bX 服务已成功重启生效！${plain}"
         fi
-
-        cat << EOF >> /etc/init.d/V2bX
-
-depend() {
-    need net
+    elif command -v rc-service &>/dev/null; then
+        if rc-service V2bX restart 2>/dev/null; then
+            echo -e " ${green}✔ OpenRC: V2bX 服务已成功重启生效！${plain}"
+        fi
+    fi
 }
+
+init_aux_files() {
+    if [[ ! -f /etc/V2bX/sing_origin.json ]]; then
+        echo '{ "outbounds": [ { "type": "direct", "tag": "direct" } ] }' > /etc/V2bX/sing_origin.json
+    fi
+    if [[ ! -f /etc/V2bX/dns.json ]]; then
+        echo '{ "servers": [ "1.1.1.1", "8.8.8.8", "localhost" ], "tag": "dns_inbound" }' > /etc/V2bX/dns.json
+    fi
+    if [[ ! -f /etc/V2bX/custom_outbound.json ]]; then
+        echo '[ { "tag": "IPv4_out", "protocol": "freedom", "settings": { "domainStrategy": "UseIP" } }, { "tag": "block", "protocol": "blackhole" } ]' > /etc/V2bX/custom_outbound.json
+    fi
+    if [[ ! -f /etc/V2bX/route.json ]]; then
+        cat << 'EOF' > /etc/V2bX/route.json
+{ "domainStrategy": "AsIs", "rules": [ { "type": "field", "outboundTag": "block", "ip": [ "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "::1/128", "fc00::/7", "fe80::/10" ] }, { "type": "field", "outboundTag": "block", "protocol": [ "bittorrent" ] } ] }
 EOF
-        chmod +x /etc/init.d/V2bX
-        [[ ! -f /etc/V2bX/nodes/.multi_enabled ]] && manage_service_local enable
+    fi
+    [[ ! -f /etc/V2bX/hy2config.yaml ]] && generate_hy2_yaml
+}
+
+generate_hy2_yaml() {
+    cat << 'EOF' > /etc/V2bX/hy2config.yaml
+quic:
+  initStreamReceiveWindow: 16777216
+  maxStreamReceiveWindow: 16777216
+  initConnReceiveWindow: 33554432
+  maxConnReceiveWindow: 33554432
+  maxIdleTimeout: 90s
+  maxIncomingStreams: 4096
+  disablePathMTUDiscovery: false
+ignoreClientBandwidth: false
+disableUDP: false
+udpIdleTimeout: 120s
+resolver:
+  type: system
+masquerade:
+  type: 404
+EOF
+}
+
+load_or_ask_creds() {
+    local default_host="https://example.com"
+    local default_key=""
+
+    if [[ -f "$saved_file" ]]; then
+        source "$saved_file" 2>/dev/null
+        default_host=${saved_host:-"https://example.com"}
+        default_key=${saved_key:-""}
     fi
 
-    if [ -f /etc/V2bX/config.json ]; then
-        manage_service_local restart
-        echo -e "${green}V2bX 部署启动完成！热重载 (-w) 已生效。${plain}"
+    echo -e "${yellow}💡 基础对接配置 (支持自动记忆，下次无需重复输入)${plain}"
+    echo -e " 当前记忆面板: ${cyan}${saved_host:-未保存}${plain}"
+    
+    echo -ne " ${bold}▸ 请输入机场面板网址${plain} ${dim}[回车默认: ${default_host}]${plain}: "
+    read -r input_host < /dev/tty
+    api_host=${input_host:-"$default_host"}
+    
+    if [[ ! "$api_host" =~ ^https?:// ]]; then
+        api_host="https://${api_host}"
+    fi
+    api_host="${api_host%/}"
+
+    if [[ -n "$default_key" ]]; then
+        echo -ne " ${bold}▸ 请输入对接 API Key${plain} ${dim}[回车使用记忆 Key: ${default_key:0:4}****]${plain}: "
+        read -r input_key < /dev/tty
+        api_key=${input_key:-"$default_key"}
     else
-        echo -e "${yellow}V2bX 核心已就绪，请在主菜单配置 config.json 后启动。${plain}"
+        api_key=""
+        while [[ -z "$api_key" ]]; do
+            echo -ne " ${bold}▸ 请输入面板对接 API Key${plain}: "
+            read -r api_key < /dev/tty
+        done
+    fi
+
+    echo -ne " ${bold}▸ 是否固定保存此面板信息以便日后调用？${plain} [Y/n]: "
+    read -r save_yn < /dev/tty
+    [[ -z "$save_yn" ]] && save_yn="y"
+    if [[ "$save_yn" =~ ^[Yy]$ ]]; then
+        echo "saved_host=\"$api_host\"" > "$saved_file"
+        echo "saved_key=\"$api_key\"" >> "$saved_file"
+        chmod 600 "$saved_file"
+        echo -e " ${green}✔ 凭证已安全锁定于 ${saved_file}${plain}"
     fi
 }
 
-# 触发执行主逻辑
-install_core
+build_xray_core_json() {
+    local hs=${1:-10} idle=${2:-300} up=${3:-2} down=${4:-4} buf=${5:-256}
+    cat << EOF
+{ "Type": "xray", "Log": { "Level": "error", "AccessPath": "", "ErrorPath": "/etc/V2bX/error.log", "MaxSize": 100, "MaxBackups": 0, "MaxDays": 90, "Compress": true }, "AssetPath": "/etc/V2bX/", "DnsConfigPath": "/etc/V2bX/dns.json", "OutboundConfigPath": "/etc/V2bX/custom_outbound.json", "RouteConfigPath": "/etc/V2bX/route.json", "XrayConnectionConfig": { "handshake": ${hs}, "connIdle": ${idle}, "uplinkOnly": ${up}, "downlinkOnly": ${down}, "bufferSize": ${buf} } }
+EOF
+}
+
+build_sing_core_json() {
+    echo '{ "Type": "sing", "Log": { "Level": "error", "Timestamp": true }, "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 }, "OriginalPath": "/etc/V2bX/sing_origin.json" }'
+}
+
+build_hy2_core_json() {
+    echo '{ "Type": "hysteria2", "Log": { "Level": "error" } }'
+}
+
+collect_single_node() {
+    local idx="$1"
+    ui_section "配置第 ${idx} 个后端节点"
+
+    ui_step "1/4" "选择代理核心与传输协议"
+    echo -e "  ${cyan}[1]${plain} Xray      ${dim}(首选: Vless / Vmess / Reality / XHTTP / CDN)${plain}"
+    echo -e "  ${cyan}[2]${plain} Sing-box  ${dim}(首选: Shadowsocks / Trojan / Tuic / AnyTLS)${plain}"
+    echo -e "  ${cyan}[3]${plain} Hysteria2 ${dim}(官方专属高性能内核)${plain}"
+    
+    local core_num=""
+    while [[ ! "$core_num" =~ ^[1-3]$ ]]; do
+        echo -ne " ${bold}▸ 请选择内核引擎${plain} [1-3, 默认 1]: "
+        read -r core_num < /dev/tty
+        [[ -z "$core_num" ]] && core_num=1
+    done
+
+    case "$core_num" in 1) core_type="xray"; has_xray=true ;; 2) core_type="sing"; has_sing=true ;; 3) core_type="hysteria2"; has_hysteria2=true ;; esac
+
+    local protocol_num=""
+    if [[ "$core_type" == "hysteria2" ]]; then
+        node_type="hysteria2"; echo -e "  ${green}✔ 自动锁定协议: hysteria2${plain}"
+    elif [[ "$core_type" == "xray" ]]; then
+        echo -e "\n  ${cyan}[1]${plain} Vless  ${cyan}[2]${plain} Vmess  ${cyan}[3]${plain} Trojan  ${cyan}[4]${plain} Shadowsocks"
+        while [[ ! "$protocol_num" =~ ^[1-4]$ ]]; do
+            echo -ne " ${bold}▸ 请选择协议${plain} [1-4, 默认 1]: "; read -r protocol_num < /dev/tty; [[ -z "$protocol_num" ]] && protocol_num=1
+        done
+        case "$protocol_num" in 1) node_type="vless" ;; 2) node_type="vmess" ;; 3) node_type="trojan" ;; 4) node_type="shadowsocks" ;; esac
+    elif [[ "$core_type" == "sing" ]]; then
+        echo -e "\n  ${cyan}[1]${plain} Shadowsocks  ${cyan}[2]${plain} Trojan  ${cyan}[3]${plain} Tuic  ${cyan}[4]${plain} AnyTLS  ${cyan}[5]${plain} Hysteria"
+        while [[ ! "$protocol_num" =~ ^[1-5]$ ]]; do
+            echo -ne " ${bold}▸ 请选择协议${plain} [1-5, 默认 1]: "; read -r protocol_num < /dev/tty; [[ -z "$protocol_num" ]] && protocol_num=1
+        done
+        case "$protocol_num" in 1) node_type="shadowsocks" ;; 2) node_type="trojan" ;; 3) node_type="tuic" ;; 4) node_type="anytls" ;; 5) node_type="hysteria" ;; esac
+    fi
+
+    ui_step "2/4" "基础参数与监听网络"
+    node_id=""
+    while [[ ! "$node_id" =~ ^[0-9]+$ ]]; do
+        echo -ne " ${bold}▸ Node ID${plain} (纯数字): "; read -r node_id < /dev/tty
+    done
+    local listen_ip="0.0.0.0"
+    echo -ne " ${bold}▸ 监听 IP${plain} ${dim}[回车默认 0.0.0.0]${plain}: "; read -r input_listen < /dev/tty; [[ -n "$input_listen" ]] && listen_ip="$input_listen"
+
+    ui_step "3/4" "TLS 安全与证书模式"
+    local run_tls_flow=false; local reality_yn="n" tls_yn="n" cert_mode="none" cert_domain="" cf_token="" cert_file="" key_file=""
+    if [[ "$node_type" == "vless" ]]; then
+        echo -ne " ${bold}▸ 是否为 Reality 节点？${plain} [Y/n]: "; read -r reality_yn < /dev/tty; [[ -z "$reality_yn" ]] && reality_yn="y"
+        if [[ "$reality_yn" =~ ^[Yy]$ ]]; then echo -e "  ${green}✔ Reality 节点自动设为 none${plain}"; else run_tls_flow=true; fi
+    elif [[ "$node_type" == "hysteria2" || "$node_type" == "tuic" || "$node_type" == "hysteria" || "$node_type" == "trojan" ]]; then
+        run_tls_flow=true; echo -e "  ${yellow}ℹ 协议 [${node_type}] 必须配置 TLS 证书。${plain}"
+    else
+        echo -ne " ${bold}▸ 是否开启 TLS 证书？${plain} [y/N]: "; read -r tls_yn < /dev/tty; [[ "$tls_yn" =~ ^[Yy]$ ]] && run_tls_flow=true
+    fi
+
+    if [ "$run_tls_flow" = true ]; then
+        echo -e "  ${cyan}[1] HTTP 模式${plain}  ${cyan}[2] DNS 模式${plain}  ${cyan}[3] File 模式${plain}  ${cyan}[4] 本地自签${plain}"
+        local cert_mode_num=""
+        while [[ ! "$cert_mode_num" =~ ^[1-4]$ ]]; do echo -ne " ${bold}▸ 选择申请方式${plain} [1-4]: "; read -r cert_mode_num < /dev/tty; [[ -z "$cert_mode_num" ]] && cert_mode_num=1; done
+        case "$cert_mode_num" in
+            1) cert_mode="http"; while [[ -z "$cert_domain" ]]; do echo -ne " ${bold}▸ 绑定域名${plain}: "; read -r cert_domain < /dev/tty; done; cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem" ;;
+            2) cert_mode="dns"; while [[ -z "$cert_domain" ]]; do echo -ne " ${bold}▸ 绑定域名${plain}: "; read -r cert_domain < /dev/tty; done; while [[ -z "$cf_token" ]]; do echo -ne " ${bold}▸ Cloudflare Token${plain}: "; read -r cf_token < /dev/tty; done; cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem" ;;
+            3) cert_mode="file"; echo -ne " ${bold}▸ 节点域名${plain}: "; read -r cert_domain < /dev/tty; echo -ne " ${bold}▸ 公钥路径${plain} [/etc/V2bX/fullchain.cer]: "; read -r input_cert < /dev/tty; cert_file=${input_cert:-"/etc/V2bX/fullchain.cer"}; echo -ne " ${bold}▸ 私钥路径${plain} [/etc/V2bX/cert.key]: "; read -r input_key < /dev/tty; key_file=${input_key:-"/etc/V2bX/cert.key"} ;;
+            4) cert_mode="file"; echo -ne " ${bold}▸ 自签域名${plain} [cf.babymonster.cc.cd]: "; read -r input_sni < /dev/tty; cert_domain=${input_sni:-"cf.babymonster.cc.cd"}; cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem"; echo -e "  ${cyan}生成自签证书...${plain}"; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -keyout "$key_file" -out "$cert_file" -subj "/CN=${cert_domain}" >/dev/null 2>&1 ;;
+        esac
+    fi
+
+    local cert_block=""
+    if [[ "$cert_mode" == "dns" ]]; then cert_block='{ "CertMode": "dns", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "'"${cert_file}"'", "KeyFile": "'"${key_file}"'", "Email": "admin@v2bx.com", "Provider": "cloudflare", "DNSEnv": { "CF_DNS_API_TOKEN": "'"${cf_token}"'", "CLOUDFLARE_DNS_API_TOKEN": "'"${cf_token}"'" } }'
+    elif [[ "$cert_mode" =~ ^(http|file)$ ]]; then cert_block='{ "CertMode": "'"${cert_mode}"'", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "'"${cert_file}"'", "KeyFile": "'"${key_file}"'", "Email": "admin@v2bx.com" }'
+    else cert_block='{ "CertMode": "none" }'; fi
+
+    ui_step "4/4" "流量控制与网络优化"
+    local limit_block=""
+    echo -ne " ${bold}▸ 配置限速/设备锁？${plain} [y/N]: "; read -r limit_yn < /dev/tty
+    if [[ "$limit_yn" =~ ^[Yy]$ ]]; then
+        echo -ne "   └─ 限速(Mbps) [0]: "; read -r speed_limit < /dev/tty; [[ -z "$speed_limit" ]] && speed_limit=0
+        echo -ne "   └─ 设备限制 [0]: "; read -r dev_limit < /dev/tty; [[ -z "$dev_limit" ]] && dev_limit=0
+        echo -ne "   └─ TCP上限 [0]: "; read -r conn_limit < /dev/tty; [[ -z "$conn_limit" ]] && conn_limit=0
+        echo -ne "   └─ 暴流压制？[y/N]: "; read -r dyn_yn < /dev/tty; local enable_dyn="false"; [[ "$dyn_yn" =~ ^[Yy]$ ]] && enable_dyn="true"
+        limit_block=', "LimitConfig": { "EnableRealtime": false, "SpeedLimit": '"${speed_limit}"', "DeviceLimit": '"${dev_limit}"', "ConnLimit": '"${conn_limit}"', "EnableDynamicSpeedLimit": '"${enable_dyn}"', "DynamicSpeedLimitConfig": { "Periodic": 60, "Traffic": 1073741824, "SpeedLimit": 10, "ExpireTime": 600 } }'
+    fi
+
+    local dns_type="UseIPv4"
+    if [[ "$core_type" == "xray" ]]; then
+        echo -ne " ${bold}▸ 解析策略${plain} [1:IPv4 2:IPv6 3:双栈 4:AsIs]: "; read -r dns_opt < /dev/tty
+        case "$dns_opt" in 2) dns_type="UseIPv6" ;; 3) dns_type="UseIP" ;; 4) dns_type="AsIs" ;; esac
+        current_node='{ "Core": "xray", "ApiHost": "'"${api_host}"'", "ApiKey": "'"${api_key}"'", "NodeID": '"${node_id}"', "NodeType": "'"${node_type}"'", "Timeout": 30, "ListenIP": "'"${listen_ip}"'", "SendIP": "0.0.0.0", "DeviceOnlineMinTraffic": 200, "ReportMinTraffic": 0, "EnableProxyProtocol": false, "EnableUot": true, "EnableTFO": true, "DNSType": "'"${dns_type}"'", "DisableSniffing": false, "CertConfig": '"${cert_block}""${limit_block}"' }'
+    elif [[ "$core_type" == "sing" ]]; then
+        current_node='{ "Core": "sing", "ApiHost": "'"${api_host}"'", "ApiKey": "'"${api_key}"'", "NodeID": '"${node_id}"', "NodeType": "'"${node_type}"'", "Timeout": 30, "ListenIP": "'"${listen_ip}"'", "SendIP": "0.0.0.0", "DeviceOnlineMinTraffic": 200, "ReportMinTraffic": 0, "EnableTFO": true, "EnableSniff": true, "SniffOverrideDestination": true, "CertConfig": '"${cert_block}""${limit_block}"' }'
+    elif [[ "$core_type" == "hysteria2" ]]; then
+        current_node='{ "Core": "hysteria2", "ApiHost": "'"${api_host}"'", "ApiKey": "'"${api_key}"'", "NodeID": '"${node_id}"', "NodeType": "hysteria2", "Hysteria2ConfigPath": "/etc/V2bX/hy2config.yaml", "Timeout": 30, "ListenIP": "", "SendIP": "0.0.0.0", "DeviceOnlineMinTraffic": 200, "ReportMinTraffic": 0, "CertConfig": '"${cert_block}""${limit_block}"' }'
+    fi
+}
+
+main_create_all() {
+    ui_banner
+    init_aux_files
+    load_or_ask_creds
+
+    nodes_block=""
+    has_xray=false; has_sing=false; has_hysteria2=false; node_count=0
+
+    while true; do
+        ((node_count++))
+        collect_single_node "$node_count"
+        [[ -z "$nodes_block" ]] && nodes_block="$current_node" || nodes_block="${nodes_block},${current_node}"
+        echo -ne "\n ${bold}▸ 是否继续配置下一个节点？${plain} [y/N, 默认 N]: "; read -r continue_yn < /dev/tty
+        [[ ! "$continue_yn" =~ ^[Yy]$ ]] && break
+    done
+
+    local hs=10 idle=300 up=2 down=4 buf=256
+    if [ "$has_xray" = true ]; then
+        ui_section "Xray 引擎网络连接池性能档位"
+        echo -e "  ${cyan}[1] 均衡通用档${plain} (10/300/2/4/256)   ${cyan}[2] 极速高并发${plain}  ${cyan}[3] 极限低内存${plain}"
+        echo -ne " ${bold}▸ 请选择连接池档位${plain} [1-3, 默认 1]: "; read -r perf_opt < /dev/tty
+        case "$perf_opt" in 2) hs=15; idle=600; up=5; down=10; buf=512 ;; 3) hs=4; idle=60; up=1; down=2; buf=32 ;; esac
+    fi
+
+    local cores_array=()
+    [ "$has_xray" = true ] && cores_array+=("$(build_xray_core_json $hs $idle $up $down $buf)")
+    [ "$has_sing" = true ] && cores_array+=("$(build_sing_core_json)")
+    [ "$has_hysteria2" = true ] && cores_array+=("$(build_hy2_core_json)")
+
+    local cores_block; cores_block=$(IFS=,; echo "${cores_array[*]}")
+    local raw_json='{ "Log": { "Level": "error", "Output": "" }, "Cores": [ '"${cores_block}"' ], "Nodes": [ '"${nodes_block}"' ] }'
+
+    if command -v jq &>/dev/null; then
+        if echo "$raw_json" | jq . > /etc/V2bX/config.json 2>/dev/null; then
+            echo -e "\n ${green}✔ 成功生成包含 ${node_count} 个节点的标准化配置 (/etc/V2bX/config.json)${plain}"
+        else
+            echo "$raw_json" > /etc/V2bX/config.json
+            echo -e "\n ${yellow}⚠ 已写入原始配置 (jq 校验未通过)${plain}"
+        fi
+    else
+        echo "$raw_json" > /etc/V2bX/config.json
+        echo -e "\n ${green}✔ 配置已写入 /etc/V2bX/config.json${plain}"
+    fi
+    restart_v2bx_service
+}
+
+# 触发主函数
+main_create_all
