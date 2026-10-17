@@ -2,6 +2,7 @@
 # =================================================================
 # 麦卖云 Cloudflare Argo Tunnel 交互式管理引擎 (全系统/Alpine深度适配版)
 # 兼容：Alpine (OpenRC/BusyBox)、Debian/Ubuntu/CentOS/Fedora (Systemd)
+# 新增功能：无缝切换 QUIC ⇄ HTTP2 传输协议
 # =================================================================
 
 # 0. Alpine 运行环境自愈（若通过 sh 运行或缺少 bash，自动修补）
@@ -169,24 +170,31 @@ find_config_file() {
     echo ""
 }
 
-# 6. 可视化配置详情看板 (采用 POSIX awk 规则，兼容 BusyBox awk)
+# 6. 可视化配置详情看板
 inspect_tunnel_card() {
     local target="$1"
     local config="$2"
 
     get_tunnel_status "$target" "$config"
 
-    local tunnel_id cred_file hostnames forward_urls
-    # 采用 [ \t] 代替 [[:space:]]，确保 BusyBox awk 100% 正常解析
+    local tunnel_id cred_file hostnames forward_urls current_protocol
+    
     tunnel_id=$(grep -E '^[ \t]*tunnel:' "$config" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'")
     cred_file=$(grep -E '^[ \t]*credentials-file:' "$config" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'")
     hostnames=$(awk '/^[ \t]*-[ \t]*hostname:/ {print $NF}' "$config" 2>/dev/null | tr -d '"' | tr -d "'")
     forward_urls=$(awk '/^[ \t]*service:/ && !/http_status/ {print $2}' "$config" 2>/dev/null | tr -d '"' | tr -d "'")
+    
+    # 获取当前协议，若无则默认为 quic
+    current_protocol=$(awk '/^[ \t]*protocol:/ {print $2}' "$config" 2>/dev/null | tr -d '"' | tr -d "'")
+    if [[ -z "$current_protocol" ]]; then
+        current_protocol="quic (默认)"
+    fi
 
     echo -e "\n${cyan}┌─── 📋 隧道详情看板: ${bold}${target}${plain} ${cyan}─────────────────────────────${plain}"
     echo -e "${cyan}│${plain} 运行状态: ${STATUS_DESC}"
     echo -e "${cyan}│${plain} 配置文件: ${green}${config}${plain}"
     echo -e "${cyan}│${plain} 隧道 ID : ${yellow}${tunnel_id:-<未配置/未读取到>}${plain}"
+    echo -e "${cyan}│${plain} 传输协议: ${magenta}${current_protocol}${plain}"
 
     # 凭证检测
     if [[ -n "$cred_file" ]]; then
@@ -277,7 +285,6 @@ modify_hostname() {
     fi
 
     backup_config_file "$config"
-    # 采用通用 sed 替换，避免 BusyBox sed 参数报错
     sed -i "s|hostname:[ \t]*${old_host}|hostname: ${new_host}|g" "$config"
     echo -e "\n${green}✔ 域名修改完成！${plain}"
     echo -e "  原域名: ${red}${old_host}${plain}  ➔  新域名: ${green}${new_host}${plain}"
@@ -305,14 +312,13 @@ modify_tunnel_id() {
 
     backup_config_file "$config"
 
-    # 替换 tunnel: 行 (标准基本正则替换)
     if grep -q -E '^[ \t]*tunnel:' "$config"; then
         sed -i "s|^[ \t]*tunnel:.*|tunnel: ${new_id}|" "$config"
     else
-        sed -i "1i tunnel: ${new_id}" "$config"
+        # 兼容处理：如果没有 tunnel 节点则插入文件头部
+        awk -v id="${new_id}" 'NR==1{print "tunnel: " id} {print}' "$config" > "${config}.tmp" && mv -f "${config}.tmp" "$config"
     fi
 
-    # 联动检查 credentials-file 路径
     if [[ -n "$old_id" ]] && grep -q "$old_id" "$config"; then
         read -rp "检测到凭证文件名与旧 ID 关联，是否同步更新路径中的 UUID？[Y/n]: " sync_cred
         sync_cred=${sync_cred:-Y}
@@ -322,11 +328,10 @@ modify_tunnel_id() {
         fi
     fi
 
-    # 凭证丢失警示
     local new_cred_file
     new_cred_file=$(grep -E '^[ \t]*credentials-file:' "$config" | awk '{print $2}' | tr -d '"' | tr -d "'")
     if [[ -n "$new_cred_file" && ! -f "$new_cred_file" ]]; then
-        echo -e "\n${yellow}⚠️️ 提示：未在系统找到对应的密钥文件：${plain}${red}${new_cred_file}${plain}"
+        echo -e "\n${yellow}⚠ 提示：未在系统找到对应的密钥文件：${plain}${red}${new_cred_file}${plain}"
         echo -e "${yellow}👉 请将官方生成的 ${new_id}.json 存放到该路径，否则隧道将无法启动！${plain}"
     fi
 
@@ -334,7 +339,40 @@ modify_tunnel_id() {
     echo -e "  原 ID: ${red}${old_id}${plain}  ➔  新 ID: ${green}${new_id}${plain}"
 }
 
-# 10. 服务控制引擎 (完美兼容 OpenRC / Systemd)
+# 10. 切换传输协议 (QUIC <=> HTTP2)
+modify_protocol() {
+    local config="$1"
+    local current_protocol
+    current_protocol=$(awk '/^[ \t]*protocol:/ {print $2}' "$config" | tr -d '"' | tr -d "'")
+
+    local target_protocol="http2"
+    if [[ "$current_protocol" == "http2" ]]; then
+        target_protocol="quic"
+    elif [[ -z "$current_protocol" ]]; then
+        current_protocol="quic (默认)"
+    fi
+
+    echo -e "\n当前传输协议为: ${yellow}${current_protocol}${plain}"
+    echo -e " ${cyan}提示：如果服务器所在的网络/运营商对 UDP 进行了限制或 QoS，推荐切换至 http2。${plain}"
+    read -rp "是否将协议切换为 [${target_protocol}]？[Y/n]: " switch_ans
+    switch_ans=${switch_ans:-Y}
+
+    if [[ "$switch_ans" =~ ^[Yy]$ ]]; then
+        backup_config_file "$config"
+        if grep -q -E '^[ \t]*protocol:' "$config"; then
+            # 存在则直接替换
+            sed -i "s|^[ \t]*protocol:.*|protocol: ${target_protocol}|g" "$config"
+        else
+            # 不存在则使用 awk 在文件第一行优雅追加，避免 BusyBox sed "\n" 截断 bug
+            awk -v p="${target_protocol}" 'NR==1{print "protocol: " p} {print}' "$config" > "${config}.tmp" && mv -f "${config}.tmp" "$config"
+        fi
+        echo -e "\n${green}✔ 协议已成功切换为: ${target_protocol}${plain}"
+    else
+        echo -e "\n${yellow}已取消，保持当前协议。${plain}"
+    fi
+}
+
+# 11. 服务控制引擎 (完美兼容 OpenRC / Systemd)
 manage_service() {
     local target="$1"
     local action="$2" # start | stop | restart
@@ -387,7 +425,7 @@ manage_service() {
     echo -e "${yellow}未找到标准服务管理器（Systemd/OpenRC）。若为前台命令运行，请手动重启进程。${plain}"
 }
 
-# 11. 主程序交互入口
+# 12. 主程序交互入口
 main() {
     clear
     echo -e "${cyan}================================================================${plain}"
@@ -451,15 +489,16 @@ main() {
         echo -e "  ${green}1.${plain} 修改绑定的域名 (Hostname)"
         echo -e "  ${green}2.${plain} 修改隧道 ID (Tunnel UUID)"
         echo -e "  ${green}3.${plain} 同时修改 ID 与 域名"
-        echo -e "  ${green}4.${plain} 重启隧道服务 (Reload / Restart)"
+        echo -e "  ${green}4.${plain} 切换传输协议 (QUIC ⇄ HTTP2)  ${yellow}[防御 UDP 阻断]${plain}"
+        echo -e "  ${green}5.${plain} 重启隧道服务 (Reload / Restart)"
         if [[ $STATUS_RUNNING -eq 1 ]]; then
-            echo -e "  ${green}5.${plain} ${red}停止隧道服务 (Stop)${plain}"
+            echo -e "  ${green}6.${plain} ${red}停止隧道服务 (Stop)${plain}"
         else
-            echo -e "  ${green}5.${plain} ${green}启动隧道服务 (Start)${plain}"
+            echo -e "  ${green}6.${plain} ${green}启动隧道服务 (Start)${plain}"
         fi
         echo -e "  ${green}0.${plain} 保存并退出程序"
         echo ""
-        read -rp "请输入菜单选项 [0-5]: " opt
+        read -rp "请输入菜单选项 [0-6]: " opt
 
         case "$opt" in
             1)
@@ -480,9 +519,14 @@ main() {
                 [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart"
                 ;;
             4)
-                manage_service "$target_name" "restart"
+                modify_protocol "$config_file"
+                read -rp "是否立即重启隧道使新协议生效？[Y/n]: " r_ans
+                [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart"
                 ;;
             5)
+                manage_service "$target_name" "restart"
+                ;;
+            6)
                 if [[ $STATUS_RUNNING -eq 1 ]]; then
                     manage_service "$target_name" "stop"
                 else
