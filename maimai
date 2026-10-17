@@ -256,7 +256,7 @@ show_menu() {
     menu_text=$(cat <<EOF
 ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
 --- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---
-  ${green}0.${plain} 快捷修改主配置 (config.json)
+  ${green}0.${plain} 快捷修改节点配置 (自适应单/多进程)
 --------------------------------------------
   ${green}1.${plain} 安装 V2bX (Shannon-x 全协议核心 / 智能防爆版)
   ${green}2.${plain} 更新 V2bX 核心
@@ -530,13 +530,50 @@ process_run() {
     local num; read -rp "请输入选择 [0-23]: " num < /dev/tty
     case "$num" in
     0) 
-        if [ ! -f /etc/V2bX/config.json ]; then
-            echo -e "${yellow}配置文件不存在，请先执行向导生成配置！${plain}"
+        # 智能检测：如果存在多进程标志文件，或者独立节点配置且有注册服务，则进入【多进程编辑模式】
+        shopt -s nullglob
+        local node_files=(/etc/V2bX/nodes/node_*.json)
+        shopt -u nullglob
+
+        if [[ ${#node_files[@]} -gt 0 ]] && [[ -f /etc/V2bX/nodes/.multi_enabled || -d /etc/systemd/system/multi-user.target.wants || -d /etc/init.d ]]; then
+            echo -e "\n${cyan}=== 🛠️ 多进程节点配置编辑器 ===${plain}"
+            local i=1
+            for f in "${node_files[@]}"; do
+                echo -e "  ${green}${i}.${plain} $(basename "$f")"
+                ((i++))
+            done
+            echo -e "  ${dim}0. 取消 / 返回主菜单${plain}"
+            read -rp "请输入要编辑的独立节点序号 [0-$((i-1))]: " edit_idx < /dev/tty
+            
+            if [[ "$edit_idx" =~ ^[1-9][0-9]*$ ]] && [ "$edit_idx" -lt "$i" ]; then
+                local target_file="${node_files[$((edit_idx-1))]}"
+                local inst_name=$(basename "$target_file" .json)
+                
+                # 调用 nano 编辑指定的子节点配置
+                nano "$target_file"
+                
+                echo -e "\n${green}修改已保存。由于各节点是独立进程，只需重启该特定节点即可生效。${plain}"
+                read -rp "是否立即重启节点 [${inst_name}]？(y/n，默认 y): " ask_restart < /dev/tty
+                [[ -z "$ask_restart" ]] && ask_restart="y"
+                if [[ "$ask_restart" =~ ^[Yy]$ ]]; then
+                    if command -v systemctl &>/dev/null; then
+                        systemctl restart "v2bx@${inst_name}" 2>/dev/null
+                    elif command -v rc-service &>/dev/null; then
+                        rc-service "V2bX.${inst_name}" restart 2>/dev/null
+                    fi
+                    echo -e "${green}✔ 节点 ${inst_name} 已成功重启并应用新配置！${plain}"
+                fi
+            fi
         else
-            nano /etc/V2bX/config.json
-            echo -e "${green}V2bX 支持自动热重载，若修改了关键端口或启用了多进程模式，建议重启服务生效。${plain}"
-            read -rp "是否立即强制重启 V2bX 服务？(y/n，默认 n): " ask_restart < /dev/tty
-            [[ "$ask_restart" =~ ^[Yy]$ ]] && manage_service restart
+            # 未开启多进程，进入传统的【单进程模式编辑】
+            if [ ! -f /etc/V2bX/config.json ]; then
+                echo -e "${yellow}配置文件不存在，请先执行向导生成配置！${plain}"
+            else
+                nano /etc/V2bX/config.json
+                echo -e "${green}V2bX 支持自动热重载，若修改了关键端口或启用了多进程模式，建议重启服务生效。${plain}"
+                read -rp "是否立即强制重启 V2bX 服务？(y/n，默认 n): " ask_restart < /dev/tty
+                [[ "$ask_restart" =~ ^[Yy]$ ]] && manage_service restart
+            fi
         fi
         ;; 
     1|2) self_install_core ;; 
