@@ -2,7 +2,7 @@
 # =================================================================
 # 麦卖云 Cloudflare Argo Tunnel 交互式管理引擎 (全系统/Alpine深度适配版)
 # 兼容：Alpine (OpenRC/BusyBox)、Debian/Ubuntu/CentOS/Fedora (Systemd)
-# 新增功能：无缝切换 QUIC ⇄ HTTP2 传输协议
+# 修复：底层 YAML 盲审解析引擎容错升级，精准识别 Protocol/Hostname
 # =================================================================
 
 # 0. Alpine 运行环境自愈（若通过 sh 运行或缺少 bash，自动修补）
@@ -89,7 +89,7 @@ get_tunnel_status() {
         fi
     fi
 
-    # C. 兜底方案：直接穿透扫描 /proc 目录（免依赖 pgrep，完美兼容 Alpine Busybox）
+    # C. 兜底方案：直接穿透扫描 /proc 目录
     local cfg_name
     cfg_name=$(basename "$config" 2>/dev/null)
     for p in /proc/[0-9]*; do
@@ -110,11 +110,10 @@ get_tunnel_status() {
     done
 }
 
-# 4. 全局扫描本地所有隧道 (OpenRC / Systemd / 目录文件)
+# 4. 全局扫描本地所有隧道
 scan_all_local_tunnels() {
     local discovered=()
 
-    # 扫描 Systemd 服务
     if command -v systemctl &>/dev/null; then
         for f in /etc/systemd/system/cf-*.service; do
             [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//;s/\.service$//')")
@@ -122,7 +121,6 @@ scan_all_local_tunnels() {
         [[ -f "/etc/systemd/system/cloudflared.service" ]] && discovered+=("cloudflared")
     fi
 
-    # 扫描 Alpine OpenRC 服务
     if command -v rc-service &>/dev/null || [[ -d "/etc/init.d" ]]; then
         for f in /etc/init.d/cf-*; do
             [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//')")
@@ -130,7 +128,6 @@ scan_all_local_tunnels() {
         [[ -f "/etc/init.d/cloudflared" ]] && discovered+=("cloudflared")
     fi
 
-    # 扫描常规配置目录
     for dir in "/etc/cloudflared" "/root/.cloudflared"; do
         if [[ -d "$dir" ]]; then
             for yml in "$dir"/*.yml "$dir"/*.yaml; do
@@ -143,7 +140,6 @@ scan_all_local_tunnels() {
         fi
     done
 
-    # 数组去重并输出
     if [[ ${#discovered[@]} -gt 0 ]]; then
         echo "${discovered[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '
     fi
@@ -170,7 +166,7 @@ find_config_file() {
     echo ""
 }
 
-# 6. 可视化配置详情看板
+# 6. 可视化配置详情看板 (高容错解析引擎重构)
 inspect_tunnel_card() {
     local target="$1"
     local config="$2"
@@ -179,13 +175,14 @@ inspect_tunnel_card() {
 
     local tunnel_id cred_file hostnames forward_urls current_protocol
     
-    tunnel_id=$(grep -E '^[ \t]*tunnel:' "$config" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'")
-    cred_file=$(grep -E '^[ \t]*credentials-file:' "$config" 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'")
-    hostnames=$(awk '/^[ \t]*-[ \t]*hostname:/ {print $NF}' "$config" 2>/dev/null | tr -d '"' | tr -d "'")
-    forward_urls=$(awk '/^[ \t]*service:/ && !/http_status/ {print $2}' "$config" 2>/dev/null | tr -d '"' | tr -d "'")
+    # 彻底改用 [[:space:]] 规避 Alpine 的正则盲区，并用 sed 's/^[^:]*://' 纯净截取冒号后内容
+    tunnel_id=$(grep -iE '^[[:space:]]*tunnel[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    cred_file=$(grep -iE '^[[:space:]]*credentials-file[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    hostnames=$(grep -iE '^[[:space:]]*-[[:space:]]*hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    forward_urls=$(grep -iE '^[[:space:]]*service[[:space:]]*:' "$config" 2>/dev/null | grep -iv 'http_status' | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     
-    # 获取当前协议，若无则默认为 quic
-    current_protocol=$(awk '/^[ \t]*protocol:/ {print $2}' "$config" 2>/dev/null | tr -d '"' | tr -d "'")
+    current_protocol=$(grep -iE '^[[:space:]]*protocol[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
     if [[ -z "$current_protocol" ]]; then
         current_protocol="quic (默认)"
     fi
@@ -225,7 +222,6 @@ inspect_tunnel_card() {
     echo -e "${cyan}└────────────────────────────────────────────────────────${plain}"
 }
 
-# 7. 配置安全备份
 backup_config_file() {
     local config="$1"
     local bak="${config}.bak.$(date +%Y%m%d_%H%M%S)"
@@ -237,7 +233,7 @@ backup_config_file() {
 modify_hostname() {
     local config="$1"
     local current_hosts
-    current_hosts=$(awk '/^[ \t]*-[ \t]*hostname:/ {print $NF}' "$config" | tr -d '"' | tr -d "'")
+    current_hosts=$(grep -iE '^[[:space:]]*-[[:space:]]*hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
     if [[ -z "$current_hosts" ]]; then
         echo -e "${red}错误：配置文件中未找到 hostname 节点，无法自动替换。${plain}"
@@ -285,7 +281,7 @@ modify_hostname() {
     fi
 
     backup_config_file "$config"
-    sed -i "s|hostname:[ \t]*${old_host}|hostname: ${new_host}|g" "$config"
+    sed -i "s|hostname[[:space:]]*:[[:space:]]*${old_host}|hostname: ${new_host}|g" "$config"
     echo -e "\n${green}✔ 域名修改完成！${plain}"
     echo -e "  原域名: ${red}${old_host}${plain}  ➔  新域名: ${green}${new_host}${plain}"
 }
@@ -294,7 +290,7 @@ modify_hostname() {
 modify_tunnel_id() {
     local config="$1"
     local old_id
-    old_id=$(grep -E '^[ \t]*tunnel:' "$config" | awk '{print $2}' | tr -d '"' | tr -d "'")
+    old_id=$(grep -iE '^[[:space:]]*tunnel[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
     echo -e "\n当前 Tunnel ID (UUID) 为: ${yellow}${old_id:-未定义}${plain}"
     read -rp "请输入全新的 Tunnel UUID: " new_id
@@ -312,10 +308,9 @@ modify_tunnel_id() {
 
     backup_config_file "$config"
 
-    if grep -q -E '^[ \t]*tunnel:' "$config"; then
-        sed -i "s|^[ \t]*tunnel:.*|tunnel: ${new_id}|" "$config"
+    if grep -qiE '^[[:space:]]*tunnel[[:space:]]*:' "$config"; then
+        sed -i "s|^[[:space:]]*tunnel[[:space:]]*:.*|tunnel: ${new_id}|" "$config"
     else
-        # 兼容处理：如果没有 tunnel 节点则插入文件头部
         awk -v id="${new_id}" 'NR==1{print "tunnel: " id} {print}' "$config" > "${config}.tmp" && mv -f "${config}.tmp" "$config"
     fi
 
@@ -329,7 +324,7 @@ modify_tunnel_id() {
     fi
 
     local new_cred_file
-    new_cred_file=$(grep -E '^[ \t]*credentials-file:' "$config" | awk '{print $2}' | tr -d '"' | tr -d "'")
+    new_cred_file=$(grep -iE '^[[:space:]]*credentials-file[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     if [[ -n "$new_cred_file" && ! -f "$new_cred_file" ]]; then
         echo -e "\n${yellow}⚠ 提示：未在系统找到对应的密钥文件：${plain}${red}${new_cred_file}${plain}"
         echo -e "${yellow}👉 请将官方生成的 ${new_id}.json 存放到该路径，否则隧道将无法启动！${plain}"
@@ -343,7 +338,7 @@ modify_tunnel_id() {
 modify_protocol() {
     local config="$1"
     local current_protocol
-    current_protocol=$(awk '/^[ \t]*protocol:/ {print $2}' "$config" | tr -d '"' | tr -d "'")
+    current_protocol=$(grep -iE '^[[:space:]]*protocol[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
     local target_protocol="http2"
     if [[ "$current_protocol" == "http2" ]]; then
@@ -359,11 +354,9 @@ modify_protocol() {
 
     if [[ "$switch_ans" =~ ^[Yy]$ ]]; then
         backup_config_file "$config"
-        if grep -q -E '^[ \t]*protocol:' "$config"; then
-            # 存在则直接替换
-            sed -i "s|^[ \t]*protocol:.*|protocol: ${target_protocol}|g" "$config"
+        if grep -qiE '^[[:space:]]*protocol[[:space:]]*:' "$config"; then
+            sed -i "s|^[[:space:]]*protocol[[:space:]]*:.*|protocol: ${target_protocol}|g" "$config"
         else
-            # 不存在则使用 awk 在文件第一行优雅追加，避免 BusyBox sed "\n" 截断 bug
             awk -v p="${target_protocol}" 'NR==1{print "protocol: " p} {print}' "$config" > "${config}.tmp" && mv -f "${config}.tmp" "$config"
         fi
         echo -e "\n${green}✔ 协议已成功切换为: ${target_protocol}${plain}"
@@ -385,7 +378,6 @@ manage_service() {
     local svc_name="cf-${target}"
     [[ "$target" == "cloudflared" ]] && svc_name="cloudflared"
 
-    # A. Systemd 处理
     if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
         systemctl "$action" "$svc_name" 2>/dev/null || systemctl "$action" cloudflared 2>/dev/null
         sleep 1
@@ -401,7 +393,6 @@ manage_service() {
         return
     fi
 
-    # B. OpenRC (Alpine) 处理
     if command -v rc-service &>/dev/null; then
         local rc_target="$svc_name"
         [[ ! -f "/etc/init.d/$rc_target" && -f "/etc/init.d/cloudflared" ]] && rc_target="cloudflared"
@@ -474,7 +465,6 @@ main() {
         config_file=$(find_config_file "$target_name")
     fi
 
-    # 兜底文件检测
     if [[ -z "$config_file" || ! -f "$config_file" ]]; then
         echo -e "\n${yellow}未能自动定位 ${target_name} 的配置文件路径！${plain}"
         read -rp "请手动输入该配置文件的绝对路径 (如 /etc/cloudflared/${target_name}.yml): " config_file
