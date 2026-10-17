@@ -1,1 +1,200 @@
+#!/bin/bash
+# =================================================================
+# 麦卖云 V2bX 核心部署与更新引擎 (自适应全系统版)
+# 路径：all/xmm1and2
+# =================================================================
+
+red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
+
+# 独立的服务控制器，兼容单/多进程与不同系统架构
+manage_service_local() {
+    local action=$1
+    if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
+        if command -v systemctl &>/dev/null; then
+            for f in /etc/V2bX/nodes/node_*.json; do
+                [[ ! -f "$f" ]] && continue
+                local inst; inst=$(basename "$f" .json)
+                systemctl "$action" "v2bx@${inst}" 2>/dev/null
+            done
+        elif command -v rc-service &>/dev/null; then
+            for init_f in /etc/init.d/v2bx.node_*; do
+                [[ ! -f "$init_f" ]] && continue
+                local svc; svc=$(basename "$init_f")
+                rc-service "$svc" "$action" 2>/dev/null
+            done
+        fi
+        return
+    fi
+    if command -v systemctl &>/dev/null; then
+        systemctl "$action" V2bX 2>/dev/null
+    elif command -v rc-service &>/dev/null; then
+        rc-service V2bX "$action" 2>/dev/null || rc-update $([[ "$action" == "enable" ]] && echo "add" || echo "del") V2bX default 2>/dev/null
+    fi
+}
+
+echo -e "${yellow}正在准备部署 V2bX 后端核心组件...${plain}"
+echo -e "\n${cyan}====== 🛡️ 资源护卫限制策略选择 ======${plain}"
+echo -e "  ${green}1.${plain} 原生态无锁版 (满血狂飙，适合高配小鸡或大流量节点)"
+echo -e "  ${green}2.${plain} 标准防爆锁 (128M 内存锁 + 40% CPU 压制，推荐普通小鸡)"
+echo -e "  ${green}3.${plain} 极致低配锁 (40M 内存锁 + 20% CPU 压制，适合极限清贫的 NAT 鸡)"
+echo -e "  ${green}4.${plain} 自定义限额 (手动指定内存与 CPU 上限)"
+read -rp "请选择限额策略 [1-4] (默认 1): " limit_opt < /dev/tty
+[[ -z "$limit_opt" ]] && limit_opt=1
+
+local mem_limit=""; local cpu_limit=""
+if [ "$limit_opt" -eq 2 ]; then mem_limit=128; cpu_limit=40
+elif [ "$limit_opt" -eq 3 ]; then mem_limit=40; cpu_limit=20
+elif [ "$limit_opt" -eq 4 ]; then
+    read -rp "请输入允许核心使用的内存硬性上限 (单位 MiB, 例如 256): " mem_limit < /dev/tty
+    read -rp "请输入允许核心使用的最大 CPU 使用率 (单位 %, 例如 60): " cpu_limit < /dev/tty
+    [[ -z "$mem_limit" ]] && mem_limit=128; [[ -z "$cpu_limit" ]] && cpu_limit=40
+fi
+
+# 停止旧服务并清理残余
+manage_service_local stop
+manage_service_local disable
+killall -9 V2bX >/dev/null 2>&1
+mkdir -p /usr/local/V2bX /etc/V2bX /var/log/V2bX
+rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
+
+# 架构判定
+local raw_arch=$(uname -m); local arch="linux-64"
+case "${raw_arch}" in 
+    x86_64|amd64) arch="linux-64" ;; 
+    arm64|aarch64) arch="linux-arm64-v8a" ;; 
+    armv7*|armhf) arch="linux-arm32-v7a" ;; 
+    s390x) arch="linux-s390x" ;; 
+    riscv64) arch="linux-riscv64" ;;
+esac
+
+local repo_owner="Shannon-x"
+local urls=(
+    "https://ghp.ci/https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
+    "https://mirror.ghproxy.net/https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
+    "https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
+)
+
+local success=false
+echo -e "${cyan}开始从云端拉取 V2bX 最新版核心 (架构: ${arch})...${plain}"
+for url in "${urls[@]}"; do
+    local tmp_file="/tmp/v2bx_tmp_${RANDOM}.zip"
+    if wget -q --show-progress -O "$tmp_file" "$url" --timeout=15; then
+        if [[ -f "$tmp_file" && -s "$tmp_file" ]] && head -c 4 "$tmp_file" | grep -q 'PK\|ELF'; then
+            local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
+            mkdir -p "$tmp_dir"
+            unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1
+            
+            local b_target=""
+            [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
+            [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
+            [[ -z "$b_target" ]] && b_target=$(find "$tmp_dir" -type f -name "V2bX*" | head -n 1)
+            
+            if [[ -n "$b_target" && -f "$b_target" ]]; then
+                mv -f "$b_target" /usr/local/V2bX/V2bX && success=true
+            elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
+                mv -f "$tmp_file" /usr/local/V2bX/V2bX && success=true
+            fi
+            rm -rf "$tmp_dir"
+        fi
+    fi
+    rm -f "$tmp_file"
+    if [ "$success" = true ]; then
+        chmod +x /usr/local/V2bX/V2bX
+        echo -e "${green}[成功] 核心拉取成功！${plain}"
+        break
+    fi
+done
+
+if [ "$success" = false ]; then
+    echo -e "${red}[错误] 所有拉取线路均失败，请检查服务器网络！${plain}"
+    exit 1
+fi
+
+rm -f /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
+
+# 如果没有配置文件，提示使用 xmm2 创建
+if [ ! -f /etc/V2bX/config.json ]; then
+    read -rp "未检测到配置文件，是否立即运行向导生成？(y/n) " ask_gen_config < /dev/tty
+    if [[ "$ask_gen_config" =~ ^[Yy]$ ]]; then
+        local tmp_xmm2="/tmp/xmm2_boot_${RANDOM}.sh"
+        if wget -q -O "$tmp_xmm2" "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"; then
+            chmod +x "$tmp_xmm2"
+            bash "$tmp_xmm2"
+            rm -f "$tmp_xmm2"
+        fi
+    fi
+fi
+
+# ==================== 写入守护服务 ====================
+if [ -d /etc/systemd/system ]; then
+    cat << EOF > /etc/systemd/system/V2bX.service
+[Unit]
+Description=V2bX Service - Adaptive Managed (Hot-Reload)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/config.json -w
+Restart=always
+RestartSec=10
+User=root
+LimitNOFILE=1048576
+LimitNPROC=51200
+Environment="XRAY_DNS_PATH=/etc/V2bX/dns.json"
+Environment="SING_DNS_PATH=/etc/V2bX/sing_dns.json"
+EOF
+
+    if [ "$limit_opt" -ne 1 ]; then
+        local high_mark=$((mem_limit * 8 / 10))
+        cat << EOF >> /etc/systemd/system/V2bX.service
+Environment="GOMEMLIMIT=${mem_limit}MiB"
+Environment="GOGC=80"
+CPUQuota=${cpu_limit}%
+Nice=19
+MemoryHigh=${high_mark}M
+MemoryMax=${mem_limit}M
+MemorySwapMax=0
+OOMScoreAdjust=-100
+EOF
+    fi
+
+    echo -e "[Install]\nWantedBy=multi-user.target" >> /etc/systemd/system/V2bX.service
+    systemctl daemon-reload
+    [[ ! -f /etc/V2bX/nodes/.multi_enabled ]] && manage_service_local enable
+    
+elif [ -d /etc/init.d ]; then
+    cat << EOF > /etc/init.d/V2bX
+#!/sbin/openrc-run
+description="V2bX Alpine Service (Hot-Reload)"
+command="/usr/local/V2bX/V2bX"
+command_args="server -c /etc/V2bX/config.json -w"
+command_background=true
+pidfile="/run/V2bX.pid"
+output_log="/var/log/v2bx_out.log"
+error_log="/var/log/v2bx_err.log"
+command_env="XRAY_DNS_PATH=/etc/V2bX/dns.json SING_DNS_PATH=/etc/V2bX/sing_dns.json"
+EOF
+
+    if [ "$limit_opt" -ne 1 ]; then
+        cat << EOF >> /etc/init.d/V2bX
+command_env="\$command_env GOMEMLIMIT=${mem_limit}MiB GOGC=80"
+start_stop_daemon_args="--nicelevel 19"
+EOF
+    fi
+
+    cat << EOF >> /etc/init.d/V2bX
+
+depend() {
+    need net
+}
+EOF
+    chmod +x /etc/init.d/V2bX
+    [[ ! -f /etc/V2bX/nodes/.multi_enabled ]] && manage_service_local enable
+fi
+
+if [ -f /etc/V2bX/config.json ]; then
+    manage_service_local restart
+    echo -e "${green}V2bX 部署启动完成！热重载 (-w) 已生效。${plain}"
+else
+    echo -e "${yellow}V2bX 核心已就绪，请在主菜单配置 config.json 后启动。${plain}"
+fi
 
