@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 全新配置生成引擎 (xmm11_2)
-sh_ver="3.5.0-NodeGen"
+sh_ver="3.6.0-Ultimate"
 
 # 终端色彩与样式
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
@@ -31,7 +31,7 @@ ui_banner() {
     printf '\033[H\033[2J'
     echo -e "${cyan}${bold}╔══════════════════════════════════════════════════════╗${plain}"
     echo -e "${cyan}${bold}║         麦卖云 V2bX 全新配置生成引擎 (xmm11_2)       ║${plain}"
-    echo -e "${cyan}${bold}║    多内核全协议矩阵 • 向导式创建 • 自动拆分自适应    ║${plain}"
+    echo -e "${cyan}${bold}║    多内核协议矩阵 • 支持 XHTTP/Naive • 自动防爆重载  ║${plain}"
     echo -e "${cyan}${bold}╚══════════════════════════════════════════════════════╝${plain}"
     echo -e " ${dim}版本: v${sh_ver}  |  当前模式: $(detect_run_mode)${plain}"
     ui_line
@@ -189,18 +189,29 @@ restart_v2bx_service() {
 }
 
 init_aux_files() {
-    # 🌟 修复 1：强制覆盖文件，彻底消除 sing-box 1.12.0+ 因遗留字符串数组导致的崩溃
+    # 🌟 强制复写系统文件，完美避开 1.12.0+ 的配置报错以及 Xray 的自由策略警告
     echo '{ "outbounds": [ { "type": "direct", "tag": "direct" } ] }' > /etc/V2bX/sing_origin.json
     echo '{ "servers": [ {"address": "1.1.1.1"}, {"address": "8.8.8.8"}, {"address": "localhost"} ] }' > /etc/V2bX/dns.json
     
-    # 🌟 修复 2：强制覆盖自定义出站，消除 Xray 中满屏的 "freedom.domainStrategy" 黄字废弃警告
+    # 🌟 修复：补充生成 sing_dns.json，彻底消除 watch dns file error 崩溃！
+    echo '{ "servers": [ {"address": "1.1.1.1"}, {"address": "8.8.8.8"} ] }' > /etc/V2bX/sing_dns.json
+    
     echo '[ { "tag": "IPv4_out", "protocol": "freedom", "streamSettings": { "sockopt": { "domainStrategy": "UseIP" } } }, { "tag": "block", "protocol": "blackhole" } ]' > /etc/V2bX/custom_outbound.json
     
-    if [[ ! -f /etc/V2bX/route.json ]]; then
-        cat << 'EOF' > /etc/V2bX/route.json
+    cat << 'EOF' > /etc/V2bX/route.json
 { "domainStrategy": "AsIs", "rules": [ { "type": "field", "outboundTag": "block", "ip": [ "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "::1/128", "fc00::/7", "fe80::/10" ] }, { "type": "field", "outboundTag": "block", "protocol": [ "bittorrent" ] } ] }
 EOF
-    fi
+
+    # 🌟 自动下发面板 XHTTP (SplitHTTP) 配置模板
+    cat << 'EOF' > /etc/V2bX/xhttp_template.conf
+{
+  "mode": "auto",
+  "extra": {
+    "noEof": true
+  }
+}
+EOF
+
     [[ ! -f /etc/V2bX/hy2config.yaml ]] && generate_hy2_yaml
 }
 
@@ -290,7 +301,7 @@ collect_single_node() {
 
     ui_step "1/4" "选择代理核心与传输协议"
     echo -e "  ${cyan}[1]${plain} Xray      ${dim}(首选: Vless / Vmess / Reality / XHTTP / CDN)${plain}"
-    echo -e "  ${cyan}[2]${plain} Sing-box  ${dim}(首选: Shadowsocks / Trojan / Tuic / AnyTLS / Vless / Vmess)${plain}"
+    echo -e "  ${cyan}[2]${plain} Sing-box  ${dim}(首选: Shadowsocks / Trojan / Tuic / AnyTLS / Naive)${plain}"
     echo -e "  ${cyan}[3]${plain} Hysteria2 ${dim}(官方专属高性能内核)${plain}"
     
     local core_num=""
@@ -312,12 +323,12 @@ collect_single_node() {
         done
         case "$protocol_num" in 1) node_type="vless" ;; 2) node_type="vmess" ;; 3) node_type="trojan" ;; 4) node_type="shadowsocks" ;; esac
     elif [[ "$core_type" == "sing" ]]; then
-        # 🌟 修复 3：为 Sing 核心追加了 Vless 和 Vmess 的选择菜单
-        echo -e "\n  ${cyan}[1]${plain} Shadowsocks  ${cyan}[2]${plain} Trojan  ${cyan}[3]${plain} Tuic  ${cyan}[4]${plain} AnyTLS  ${cyan}[5]${plain} Hysteria  ${cyan}[6]${plain} Vless  ${cyan}[7]${plain} Vmess"
-        while [[ ! "$protocol_num" =~ ^[1-7]$ ]]; do
-            echo -ne " ${bold}▸ 请选择协议${plain} [1-7, 默认 1]: "; read -r protocol_num < /dev/tty; [[ -z "$protocol_num" ]] && protocol_num=1
+        # 🌟 修复：补齐所有 Sing-box 核心协议支持，并加入 Naive
+        echo -e "\n  ${cyan}[1]${plain} Shadowsocks  ${cyan}[2]${plain} Trojan  ${cyan}[3]${plain} Tuic  ${cyan}[4]${plain} AnyTLS  ${cyan}[5]${plain} Hysteria  ${cyan}[6]${plain} Vless  ${cyan}[7]${plain} Vmess  ${cyan}[8]${plain} Naive"
+        while [[ ! "$protocol_num" =~ ^[1-8]$ ]]; do
+            echo -ne " ${bold}▸ 请选择协议${plain} [1-8, 默认 1]: "; read -r protocol_num < /dev/tty; [[ -z "$protocol_num" ]] && protocol_num=1
         done
-        case "$protocol_num" in 1) node_type="shadowsocks" ;; 2) node_type="trojan" ;; 3) node_type="tuic" ;; 4) node_type="anytls" ;; 5) node_type="hysteria" ;; 6) node_type="vless" ;; 7) node_type="vmess" ;; esac
+        case "$protocol_num" in 1) node_type="shadowsocks" ;; 2) node_type="trojan" ;; 3) node_type="tuic" ;; 4) node_type="anytls" ;; 5) node_type="hysteria" ;; 6) node_type="vless" ;; 7) node_type="vmess" ;; 8) node_type="naive" ;; esac
     fi
 
     ui_step "2/4" "基础参数与监听网络"
@@ -333,7 +344,7 @@ collect_single_node() {
     if [[ "$node_type" == "vless" ]]; then
         echo -ne " ${bold}▸ 是否为 Reality 节点？${plain} [Y/n]: "; read -r reality_yn < /dev/tty; [[ -z "$reality_yn" ]] && reality_yn="y"
         if [[ "$reality_yn" =~ ^[Yy]$ ]]; then echo -e "  ${green}✔ Reality 节点自动设为 none${plain}"; else run_tls_flow=true; fi
-    elif [[ "$node_type" == "hysteria2" || "$node_type" == "tuic" || "$node_type" == "hysteria" || "$node_type" == "trojan" ]]; then
+    elif [[ "$node_type" == "hysteria2" || "$node_type" == "tuic" || "$node_type" == "hysteria" || "$node_type" == "trojan" || "$node_type" == "naive" ]]; then
         run_tls_flow=true; echo -e "  ${yellow}ℹ 协议 [${node_type}] 必须配置 TLS 证书。${plain}"
     else
         echo -ne " ${bold}▸ 是否开启 TLS 证书？${plain} [y/N]: "; read -r tls_yn < /dev/tty; [[ "$tls_yn" =~ ^[Yy]$ ]] && run_tls_flow=true
