@@ -1,8 +1,8 @@
 #!/bin/bash
 # =================================================================
-# 麦卖云 V2bX 核心部署与更新引擎 (自适应全系统版 - 终极修复)
+# 麦卖云 V2bX 核心部署与更新引擎 (自适应全系统版 - Xray防超时加固版)
 # 路径：all/xmm1and2
-# 升级：移除了全局非法 local，加入 sing_dns.json 占位防线
+# 升级：移除非法 local、集成 TCP DNS 防超时、双内核占位防崩防线
 # =================================================================
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
@@ -58,11 +58,53 @@ killall -9 V2bX >/dev/null 2>&1
 mkdir -p /usr/local/V2bX /etc/V2bX /var/log/V2bX
 rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
 
-# ==================== 防线加固 ====================
-# 提前创建 V2bX 的辅助文件，防止系统重启或核心读取时因文件不存在而导致崩溃。
-[[ ! -f /etc/V2bX/dns.json ]] && echo '{ "servers": [ {"address": "1.1.1.1"}, {"address": "8.8.8.8"} ] }' > /etc/V2bX/dns.json
-[[ ! -f /etc/V2bX/sing_dns.json ]] && echo '{ "servers": [ {"address": "1.1.1.1"}, {"address": "8.8.8.8"} ] }' > /etc/V2bX/sing_dns.json
-[[ ! -f /etc/V2bX/custom_outbound.json ]] && echo '[ { "tag": "IPv4_out", "protocol": "freedom", "streamSettings": { "sockopt": { "domainStrategy": "UseIP" } } }, { "tag": "block", "protocol": "blackhole" } ]' > /etc/V2bX/custom_outbound.json
+# ==================== 针对 Xray 与 Sing-box 的双防线初始化 ====================
+# 1. Xray 专用出站解析：注入 TCP DNS (防止 UDP 53 被截断导致客户端测试节点超时)
+cat << 'EOF' > /etc/V2bX/dns.json
+{
+  "servers": [
+    "tcp://8.8.8.8:53",
+    "tcp://1.1.1.1:53",
+    "8.8.8.8",
+    "1.1.1.1"
+  ]
+}
+EOF
+
+# 2. 补齐 Sing-box 占位文件 (即使当前跑 Xray，也彻底消除系统服务环境下的 watch 闪退)
+cat << 'EOF' > /etc/V2bX/sing_dns.json
+{
+  "servers": [
+    {
+      "address": "8.8.8.8"
+    },
+    {
+      "address": "1.1.1.1"
+    }
+  ]
+}
+EOF
+
+# 3. 规范化出站规则，规避 Xray freedom.domainStrategy 黄字废弃警告
+cat << 'EOF' > /etc/V2bX/custom_outbound.json
+[
+  {
+    "tag": "IPv4_out",
+    "protocol": "freedom",
+    "streamSettings": {
+      "sockopt": {
+        "domainStrategy": "UseIP"
+      }
+    }
+  },
+  {
+    "tag": "block",
+    "protocol": "blackhole"
+  }
+]
+EOF
+
+chmod 644 /etc/V2bX/dns.json /etc/V2bX/sing_dns.json /etc/V2bX/custom_outbound.json
 
 # 架构判定
 raw_arch=$(uname -m); arch="linux-64"
@@ -119,7 +161,7 @@ fi
 
 rm -f /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
 
-# 如果没有配置文件，提示使用 xmm2 创建
+# 如果没有配置文件，提示运行向导
 if [ ! -f /etc/V2bX/config.json ]; then
     read -rp "未检测到配置文件，是否立即运行向导生成？(y/n) " ask_gen_config < /dev/tty
     if [[ "$ask_gen_config" =~ ^[Yy]$ ]]; then
