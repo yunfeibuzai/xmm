@@ -1,7 +1,8 @@
 #!/bin/bash
 # =================================================================
-# 麦卖云 V2bX 核心部署与更新引擎 (自适应全系统版)
+# 麦卖云 V2bX 核心部署与更新引擎 (自适应全系统版 - 终极修复)
 # 路径：all/xmm1and2
+# 升级：移除了全局非法 local，加入 sing_dns.json 占位防线
 # =================================================================
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
@@ -41,7 +42,7 @@ echo -e "  ${green}4.${plain} 自定义限额 (手动指定内存与 CPU 上限)
 read -rp "请选择限额策略 [1-4] (默认 1): " limit_opt < /dev/tty
 [[ -z "$limit_opt" ]] && limit_opt=1
 
-local mem_limit=""; local cpu_limit=""
+mem_limit=""; cpu_limit=""
 if [ "$limit_opt" -eq 2 ]; then mem_limit=128; cpu_limit=40
 elif [ "$limit_opt" -eq 3 ]; then mem_limit=40; cpu_limit=20
 elif [ "$limit_opt" -eq 4 ]; then
@@ -57,8 +58,14 @@ killall -9 V2bX >/dev/null 2>&1
 mkdir -p /usr/local/V2bX /etc/V2bX /var/log/V2bX
 rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
 
+# ==================== 防线加固 ====================
+# 提前创建 V2bX 的辅助文件，防止系统重启或核心读取时因文件不存在而导致崩溃。
+[[ ! -f /etc/V2bX/dns.json ]] && echo '{ "servers": [ {"address": "1.1.1.1"}, {"address": "8.8.8.8"} ] }' > /etc/V2bX/dns.json
+[[ ! -f /etc/V2bX/sing_dns.json ]] && echo '{ "servers": [ {"address": "1.1.1.1"}, {"address": "8.8.8.8"} ] }' > /etc/V2bX/sing_dns.json
+[[ ! -f /etc/V2bX/custom_outbound.json ]] && echo '[ { "tag": "IPv4_out", "protocol": "freedom", "streamSettings": { "sockopt": { "domainStrategy": "UseIP" } } }, { "tag": "block", "protocol": "blackhole" } ]' > /etc/V2bX/custom_outbound.json
+
 # 架构判定
-local raw_arch=$(uname -m); local arch="linux-64"
+raw_arch=$(uname -m); arch="linux-64"
 case "${raw_arch}" in 
     x86_64|amd64) arch="linux-64" ;; 
     arm64|aarch64) arch="linux-arm64-v8a" ;; 
@@ -67,24 +74,24 @@ case "${raw_arch}" in
     riscv64) arch="linux-riscv64" ;;
 esac
 
-local repo_owner="Shannon-x"
-local urls=(
+repo_owner="Shannon-x"
+urls=(
     "https://ghp.ci/https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
     "https://mirror.ghproxy.net/https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
     "https://github.com/${repo_owner}/V2bX/releases/latest/download/V2bX-${arch}.zip"
 )
 
-local success=false
+success=false
 echo -e "${cyan}开始从云端拉取 V2bX 最新版核心 (架构: ${arch})...${plain}"
 for url in "${urls[@]}"; do
-    local tmp_file="/tmp/v2bx_tmp_${RANDOM}.zip"
+    tmp_file="/tmp/v2bx_tmp_${RANDOM}.zip"
     if wget -q --show-progress -O "$tmp_file" "$url" --timeout=15; then
         if [[ -f "$tmp_file" && -s "$tmp_file" ]] && head -c 4 "$tmp_file" | grep -q 'PK\|ELF'; then
-            local tmp_dir="/tmp/v2bx_extract_${RANDOM}"
+            tmp_dir="/tmp/v2bx_extract_${RANDOM}"
             mkdir -p "$tmp_dir"
             unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1
             
-            local b_target=""
+            b_target=""
             [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
             [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
             [[ -z "$b_target" ]] && b_target=$(find "$tmp_dir" -type f -name "V2bX*" | head -n 1)
@@ -116,7 +123,7 @@ rm -f /usr/local/V2bX/geoip.dat /usr/local/V2bX/geosite.dat
 if [ ! -f /etc/V2bX/config.json ]; then
     read -rp "未检测到配置文件，是否立即运行向导生成？(y/n) " ask_gen_config < /dev/tty
     if [[ "$ask_gen_config" =~ ^[Yy]$ ]]; then
-        local tmp_xmm2="/tmp/xmm2_boot_${RANDOM}.sh"
+        tmp_xmm2="/tmp/xmm2_boot_${RANDOM}.sh"
         if wget -q -O "$tmp_xmm2" "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"; then
             chmod +x "$tmp_xmm2"
             bash "$tmp_xmm2"
@@ -144,7 +151,7 @@ Environment="SING_DNS_PATH=/etc/V2bX/sing_dns.json"
 EOF
 
     if [ "$limit_opt" -ne 1 ]; then
-        local high_mark=$((mem_limit * 8 / 10))
+        high_mark=$((mem_limit * 8 / 10))
         cat << EOF >> /etc/systemd/system/V2bX.service
 Environment="GOMEMLIMIT=${mem_limit}MiB"
 Environment="GOGC=80"
@@ -197,4 +204,3 @@ if [ -f /etc/V2bX/config.json ]; then
 else
     echo -e "${yellow}V2bX 核心已就绪，请在主菜单配置 config.json 后启动。${plain}"
 fi
-
