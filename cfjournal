@@ -2,6 +2,7 @@
 # =================================================================
 # 麦卖云 Cloudflare Argo Tunnel 智能诊断引擎 (终极满血版)
 # 独创：全系统兼容底层探针、配置自动剖析、端口盲审避障
+# 修复：Windows CRLF 换行符导致的控制台乱码重叠问题
 # =================================================================
 
 # 1. 自动修补 Alpine 执行环境 (拦截 sh 执行或缺失 bash 的情境)
@@ -64,11 +65,19 @@ view_cf_tunnel_logs() {
         fi
     done
 
-    # 数组去重
+    # 【优化】安全的数组去重 (防御 `tr` 或 `sort` 在精简环境导致的中文字符乱码)
     local tunnels=()
-    if [[ ${#discovered_tunnels[@]} -gt 0 ]]; then
-        read -r -a tunnels <<< "$(echo "${discovered_tunnels[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
-    fi
+    for t in "${discovered_tunnels[@]}"; do
+        [[ -z "$t" ]] && continue
+        local is_duplicate=0
+        for exist in "${tunnels[@]}"; do
+            if [[ "$t" == "$exist" ]]; then
+                is_duplicate=1
+                break
+            fi
+        done
+        [[ $is_duplicate -eq 0 ]] && tunnels+=("$t")
+    done
 
     if [[ ${#tunnels[@]} -eq 0 ]]; then
         echo -e "\n${yellow}雷达未扫描到当前服务器存在任何部署的 CF 隧道实例！${plain}\n"
@@ -102,9 +111,9 @@ view_cf_tunnel_logs() {
     if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
         local p
         p=$(systemctl show -p MainPID "cf-${target}" 2>/dev/null | cut -d= -f2)
-        [[ "$p" != "0" ]] && pids+=("$p")
+        [[ -n "$p" && "$p" != "0" ]] && pids+=("$p")
         p=$(systemctl show -p MainPID "cloudflared" 2>/dev/null | cut -d= -f2)
-        [[ "$p" != "0" ]] && pids+=("$p")
+        [[ -n "$p" && "$p" != "0" ]] && pids+=("$p")
     fi
     for pf in "/run/cf-${target}.pid" "/var/run/cf-${target}.pid" "/run/cloudflared.pid" "/var/run/cloudflared.pid"; do
         [[ -f "$pf" ]] && pids+=("$(cat "$pf" 2>/dev/null)")
@@ -129,9 +138,9 @@ view_cf_tunnel_logs() {
     done
 
     if [[ -n "$active_pid" ]]; then
-        echo -e "核心动脉: ${green}● 正常起搏 (主进程 PID: ${active_pid})${plain}"
+        echo -e "核心动脉: ${green}[●] 正常起搏 (主进程 PID: ${active_pid})${plain}"
     else
-        echo -e "核心动脉: ${red}○ 心跳停止 (服务可能已停止或遭遇致命崩溃)${plain}"
+        echo -e "核心动脉: ${red}[○] 心跳停止 (服务可能已停止，或配置文件致命错误导致坠毁)${plain}"
     fi
 
     echo -e "\n${cyan}====== [ 🎯 阶段二：端口内网穿透盲审 ] ======${plain}"
@@ -144,7 +153,12 @@ view_cf_tunnel_logs() {
     done
 
     if [[ -f "$config_file" ]]; then
-        local forward_url; forward_url=$(awk '/^[ \t]*-[ \t]*service:/ && !/http_status/ {print $NF}' "$config_file" | head -n 1 | tr -d '"' | tr -d "'")
+        # 【核心修复】强力剥离 \r 回车符，并过滤内联注释 (#)。防止终端输出时光标被移到行首造成“重叠式乱码”
+        local forward_url
+        forward_url=$(grep -iE '^[[:space:]]*-[[:space:]]*service[[:space:]]*:' "$config_file" 2>/dev/null | \
+                      grep -iv 'http_status' | head -n 1 | \
+                      sed -e 's/^[[:space:]]*-[[:space:]]*service[[:space:]]*:[[:space:]]*//i' | \
+                      cut -d'#' -f1 | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/[[:space:]]*$//')
         
         if [[ -n "$forward_url" ]]; then
             local forward_port; forward_port=$(echo "$forward_url" | grep -oE '[0-9]+$')
@@ -154,9 +168,9 @@ view_cf_tunnel_logs() {
             if [[ -n "$forward_port" ]]; then
                 local listen_check=""
                 if command -v ss &>/dev/null; then
-                    listen_check=$(ss -tlnp | grep -E "(:| )${forward_port} ")
+                    listen_check=$(ss -tlnp 2>/dev/null | grep -E "(:| )${forward_port} ")
                 elif command -v netstat &>/dev/null; then
-                    listen_check=$(netstat -an | grep -E "LISTEN" | grep -E "(:|\.)${forward_port} ")
+                    listen_check=$(netstat -an 2>/dev/null | grep -E "LISTEN" | grep -E "(:|\.)${forward_port} ")
                 fi
 
                 if [[ -n "$listen_check" ]]; then
@@ -164,7 +178,7 @@ view_cf_tunnel_logs() {
                 else
                     echo -e "隧道闸口: ${red}❌ 幽灵断层！本地没有任何服务接管 ${forward_port} 端口！${plain}"
                     echo -e "          ${yellow}👉 致命结果：外网访问将 100% 触发 503 Service Unavailable！${plain}"
-                    echo -e "          ${yellow}👉 解决指南：请核对后端核心(如 V2bX)的 Listen 端口是否与隧道 ${forward_port} 匹配。${plain}"
+                    echo -e "          ${yellow}👉 解决指南：请核对后端核心(如 V2bX/Xray)的 Listen 端口是否为 ${forward_port}。${plain}"
                 fi
             else
                 echo -e "隧道闸口: ${yellow}解析失败，未能提取到纯数字端口，跳过监听检测。${plain}"
@@ -180,18 +194,19 @@ view_cf_tunnel_logs() {
     echo -e "${magenta}----------------------------------------------------------------${plain}"
     
     local log_found=0
+    # 【优化】同样剔除日志中可能存在的隐藏 CRLF 控制符导致排版错乱
     if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
         if systemctl list-unit-files "cf-${target}.service" &>/dev/null; then
-            journalctl -u "cf-${target}" -n 40 --no-pager && log_found=1
+            journalctl -u "cf-${target}" -n 40 --no-pager | tr -d '\r' && log_found=1
         elif systemctl list-unit-files "cloudflared.service" &>/dev/null; then
-            journalctl -u cloudflared -n 40 --no-pager && log_found=1
+            journalctl -u cloudflared -n 40 --no-pager | tr -d '\r' && log_found=1
         fi
     fi
 
     if [[ $log_found -eq 0 ]]; then
         for log_f in "/var/log/cf-${target}.log" "/var/log/cf-${target}_err.log" "/var/log/cloudflared.log" "/var/log/cloudflared_err.log" "/root/.cloudflared/${target}.log"; do
             if [[ -f "$log_f" ]]; then
-                tail -n 40 "$log_f"
+                tail -n 40 "$log_f" | tr -d '\r'
                 log_found=1
                 break
             fi
@@ -202,9 +217,9 @@ view_cf_tunnel_logs() {
     echo -e "${magenta}----------------------------------------------------------------${plain}"
     
     echo -e "\n${yellow}💡 【破壁指南】${plain}"
-    echo -e " 1. 拦截到 ${red}Failed to serve quic connection${plain} ? ${dim}➔ 阻断警报，请进入管理面切换传输协议为 http2。${plain}"
-    echo -e " 2. 拦截到 ${red}connection refused${plain} ? ${dim}➔ 端口脱节，说明你的后端挂了，或者隧道指路(端口)指错了。${plain}"
-    echo -e " 3. 拦截到 ${red}Unable to reach the origin service${plain} ? ${dim}➔ 证书核验翻车，配置时请加上 noTLSVerify: true 绕过。${plain}"
+    echo -e " 1. 拦截到 ${red}Failed to serve quic connection${plain} ? ${dim}➔ UDP 阻断，请去管理面板将协议切为 http2。${plain}"
+    echo -e " 2. 拦截到 ${red}connection refused${plain} ? ${dim}➔ 端口脱节，说明你的后端挂了，或隧道填错端口了。${plain}"
+    echo -e " 3. 拦截到 ${red}Unable to reach the origin service${plain} ? ${dim}➔ TLS证书验证失败，配置需加 noTLSVerify: true。${plain}"
     echo ""
 }
 
