@@ -3,9 +3,49 @@
 # 麦卖云 V2bX 核心部署与更新引擎 (自适应全系统版 - Xray防超时加固版)
 # 路径：all/xmm1and2
 # 升级：移除非法 local、集成 TCP DNS 防超时、双内核占位防崩防线
+# 优化：加入全自动依赖安装、Debian EOL废弃源自动修复、严格解压校验
 # =================================================================
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'; cyan='\033[36m'; plain='\033[0m'
+
+# 1. 强制 Root 权限检查
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${red}[错误] 必须使用 root 用户运行此脚本！请使用 sudo -i 切换后重试。${plain}"
+    exit 1
+fi
+
+# 2. 环境依赖自动检查与安装 (完美解决纯净版系统缺少 unzip 等问题)
+check_and_install_deps() {
+    local pkgs=()
+    command -v wget &>/dev/null || pkgs+=("wget")
+    command -v unzip &>/dev/null || pkgs+=("unzip")
+    command -v curl &>/dev/null || pkgs+=("curl")
+    command -v killall &>/dev/null || pkgs+=("psmisc")
+
+    if [ ${#pkgs[@]} -gt 0 ]; then
+        echo -e "${cyan}正在自动安装缺失的系统依赖: ${pkgs[*]} ...${plain}"
+        if command -v apt &>/dev/null; then
+            # 针对 Debian 11 等老系统 EOL 导致 apt update 报 404 的自动修复机制
+            if ! apt update -q &>/dev/null; then
+                echo -e "${yellow}检测到 apt 源可能已失效 (系统 EOL)，正在自动为您切换至 Archive 历史归档源...${plain}"
+                cp /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null
+                sed -i -E 's/(deb|security).debian.org/archive.debian.org/g' /etc/apt/sources.list
+                sed -i -E '/updates/d' /etc/apt/sources.list
+                echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
+                mkdir -p /root/apt_backup && mv /etc/apt/sources.list.d/*.list /root/apt_backup/ 2>/dev/null
+                rm -rf /var/lib/apt/lists/* && apt clean
+                apt update -q &>/dev/null
+            fi
+            apt install -y "${pkgs[@]}" >/dev/null 2>&1
+        elif command -v yum &>/dev/null; then
+            yum install -y epel-release >/dev/null 2>&1
+            yum install -y "${pkgs[@]}" >/dev/null 2>&1
+        elif command -v apk &>/dev/null; then
+            apk add --no-cache "${pkgs[@]}" >/dev/null 2>&1
+        fi
+    fi
+}
+check_and_install_deps
 
 # 独立的服务控制器，兼容单/多进程与不同系统架构
 manage_service_local() {
@@ -59,7 +99,6 @@ mkdir -p /usr/local/V2bX /etc/V2bX /var/log/V2bX
 rm -rf /usr/local/V2bX/V2bX /tmp/v2bx_tmp*
 
 # ==================== 针对 Xray 与 Sing-box 的双防线初始化 ====================
-# 1. Xray 专用出站解析：注入 TCP DNS (防止 UDP 53 被截断导致客户端测试节点超时)
 cat << 'EOF' > /etc/V2bX/dns.json
 {
   "servers": [
@@ -71,39 +110,25 @@ cat << 'EOF' > /etc/V2bX/dns.json
 }
 EOF
 
-# 2. 补齐 Sing-box 占位文件 (即使当前跑 Xray，也彻底消除系统服务环境下的 watch 闪退)
 cat << 'EOF' > /etc/V2bX/sing_dns.json
 {
   "servers": [
-    {
-      "address": "8.8.8.8"
-    },
-    {
-      "address": "1.1.1.1"
-    }
+    { "address": "8.8.8.8" },
+    { "address": "1.1.1.1" }
   ]
 }
 EOF
 
-# 3. 规范化出站规则，规避 Xray freedom.domainStrategy 黄字废弃警告
 cat << 'EOF' > /etc/V2bX/custom_outbound.json
 [
   {
     "tag": "IPv4_out",
     "protocol": "freedom",
-    "streamSettings": {
-      "sockopt": {
-        "domainStrategy": "UseIP"
-      }
-    }
+    "streamSettings": { "sockopt": { "domainStrategy": "UseIP" } }
   },
-  {
-    "tag": "block",
-    "protocol": "blackhole"
-  }
+  { "tag": "block", "protocol": "blackhole" }
 ]
 EOF
-
 chmod 644 /etc/V2bX/dns.json /etc/V2bX/sing_dns.json /etc/V2bX/custom_outbound.json
 
 # 架构判定
@@ -131,15 +156,17 @@ for url in "${urls[@]}"; do
         if [[ -f "$tmp_file" && -s "$tmp_file" ]] && head -c 4 "$tmp_file" | grep -q 'PK\|ELF'; then
             tmp_dir="/tmp/v2bx_extract_${RANDOM}"
             mkdir -p "$tmp_dir"
-            unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1
             
-            b_target=""
-            [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
-            [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
-            [[ -z "$b_target" ]] && b_target=$(find "$tmp_dir" -type f -name "V2bX*" | head -n 1)
-            
-            if [[ -n "$b_target" && -f "$b_target" ]]; then
-                mv -f "$b_target" /usr/local/V2bX/V2bX && success=true
+            # 加入严格解压校验
+            if unzip -q -o "$tmp_file" -d "$tmp_dir" >/dev/null 2>&1; then
+                b_target=""
+                [[ -f "$tmp_dir/V2bX" ]] && b_target="$tmp_dir/V2bX"
+                [[ -f "$tmp_dir/V2bX-${arch}" ]] && b_target="$tmp_dir/V2bX-${arch}"
+                [[ -z "$b_target" ]] && b_target=$(find "$tmp_dir" -type f -name "V2bX*" | head -n 1)
+                
+                if [[ -n "$b_target" && -f "$b_target" ]]; then
+                    mv -f "$b_target" /usr/local/V2bX/V2bX && success=true
+                fi
             elif head -c 4 "$tmp_file" | grep -q 'ELF'; then
                 mv -f "$tmp_file" /usr/local/V2bX/V2bX && success=true
             fi
@@ -149,13 +176,13 @@ for url in "${urls[@]}"; do
     rm -f "$tmp_file"
     if [ "$success" = true ]; then
         chmod +x /usr/local/V2bX/V2bX
-        echo -e "${green}[成功] 核心拉取成功！${plain}"
+        echo -e "${green}[成功] 核心拉取并解压成功！${plain}"
         break
     fi
 done
 
 if [ "$success" = false ]; then
-    echo -e "${red}[错误] 所有拉取线路均失败，请检查服务器网络！${plain}"
+    echo -e "${red}[错误] 所有拉取线路均失败或文件损坏，请检查服务器网络与存储空间！${plain}"
     exit 1
 fi
 
