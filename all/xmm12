@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 节点追加 + 体检 + 外置 ACME 证书管理中心 (all/xmm12)
-sh_ver="4.2.0-AllInOne"
+sh_ver="4.3.0-AllInOne"
 
 # 终端色彩与样式
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
@@ -53,7 +53,9 @@ ensure_tools() {
         elif command -v yum &>/dev/null; then
             yum install -y jq openssl socat cronie curl >/dev/null 2>&1
         elif command -v apk &>/dev/null; then
-            apk add --no-cache jq openssl socat dcron curl bash >/dev/null 2>&1
+            apk update >/dev/null 2>&1
+            apk add --no-cache jq openssl socat cronie curl bash coreutils >/dev/null 2>&1
+            rc-update add crond default 2>/dev/null && rc-service crond start >/dev/null 2>&1
         fi
     fi
 }
@@ -144,7 +146,7 @@ load_or_ask_creds() {
         source "$saved_file" 2>/dev/null
         default_host=${saved_host:-"https://example.com"}
         default_key=${saved_key:-""}
-    elif [[ -f "$config_file" ]]; then
+    elif [[ -f "$config_file" ]] && jq -e . "$config_file" >/dev/null 2>&1; then
         local extracted_host extracted_key
         extracted_host=$(jq -r '.Nodes[0].ApiHost // empty' "$config_file" 2>/dev/null)
         extracted_key=$(jq -r '.Nodes[0].ApiKey // empty' "$config_file" 2>/dev/null)
@@ -412,26 +414,30 @@ wizard_append_node() {
         collect_single_node "$exist_count"
 
         local tmp_json="/tmp/v2bx_append_${RANDOM}.json"
+        # 优化 JQ 安全合并机制 (先写入缓冲文件，再核对正确性)
         cp -f "$config_file" "$tmp_json"
 
         if [ "$has_xray" = true ] && ! jq -e '.Cores[] | select(.Type=="xray")' "$tmp_json" >/dev/null 2>&1; then
             local xc; xc=$(build_xray_core_json)
-            jq --argjson c "$xc" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv "${tmp_json}.new" "$tmp_json"
+            jq --argjson c "$xc" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv -f "${tmp_json}.new" "$tmp_json"
         fi
         if [ "$has_sing" = true ] && ! jq -e '.Cores[] | select(.Type=="sing")' "$tmp_json" >/dev/null 2>&1; then
             local sc; sc=$(build_sing_core_json)
-            jq --argjson c "$sc" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv "${tmp_json}.new" "$tmp_json"
+            jq --argjson c "$sc" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv -f "${tmp_json}.new" "$tmp_json"
         fi
         if [ "$has_hysteria2" = true ] && ! jq -e '.Cores[] | select(.Type=="hysteria2")' "$tmp_json" >/dev/null 2>&1; then
             local hc; hc=$(build_hy2_core_json)
-            jq --argjson c "$hc" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv "${tmp_json}.new" "$tmp_json"
+            jq --argjson c "$hc" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv -f "${tmp_json}.new" "$tmp_json"
         fi
 
-        if jq --argjson n "$current_node" '.Nodes += [$n]' "$tmp_json" > "$config_file" 2>/dev/null; then
+        jq --argjson n "$current_node" '.Nodes += [$n]' "$tmp_json" > "${tmp_json}.new" 2>/dev/null
+        
+        # 强制检验新生成的 JSON 是否合法，再覆盖配置，防爆
+        if jq -e . "${tmp_json}.new" >/dev/null 2>&1; then
+            mv -f "${tmp_json}.new" "$config_file"
             echo -e "\n ${green}✔ 节点 #${exist_count} (NodeID: ${node_id} / ${node_type}) 已成功追加！${plain}"
         else
-            cp -f "$tmp_json" "$config_file"
-            echo -e "\n ${red}✖ JSON 合并校验失败，已安全回滚原配置！${plain}"
+            echo -e "\n ${red}✖ JSON 合并致命校验失败，已安全回滚原配置！${plain}"
         fi
         rm -f "$tmp_json" "${tmp_json}.new"
 
@@ -450,7 +456,7 @@ traffic_light_health_check() {
     ui_section "🚦 面板对接与网络“红绿灯”全景体检中心"
 
     if [[ ! -f "$config_file" ]] || ! jq -e . "$config_file" >/dev/null 2>&1; then
-        echo -e " ${red}🔴 [红灯] /etc/V2bX/config.json 不存在或未安装 jq！${plain}"
+        echo -e " ${red}🔴 [红灯] /etc/V2bX/config.json 不存在或配置结构被破坏！${plain}"
         return
     fi
 
@@ -485,6 +491,7 @@ traffic_light_health_check() {
         local test_url="${c_host}/api/v1/server/UniProxy/config?node_id=${c_id}&node_type=${c_type}&token=${c_key}"
         local resp_file="/tmp/v2bx_diag_${RANDOM}.json"
         local http_code
+        # 优化探测：强制开启超时防拥塞锁
         http_code=$(curl -sL -w "%{http_code}" --connect-timeout 8 --max-time 12 -o "$resp_file" "$test_url" 2>/dev/null)
 
         echo -e "${cyan}${bold}┌── 节点 #$((i+1)) [NodeID: ${c_id} | 内核: ${c_core} | 协议: ${c_type}]${plain}"
@@ -495,7 +502,7 @@ traffic_light_health_check() {
             srv_port=$(jq -r '.server_port // .port // "动态下发"' "$resp_file" 2>/dev/null)
             echo -e "│ API 握手: 🟢 ${green}[绿灯正常] (HTTP 200) — 端口: ${srv_port}${plain}"
         elif [[ "$http_code" == "000" ]]; then
-            echo -e "│ API 握手: 🔴 ${red}[红灯断联] (连接超时/SSL失败)${plain}"
+            echo -e "│ API 握手: 🔴 ${red}[红灯断联] (网络完全不通或 SSL 阻断)${plain}"
         elif [[ "$http_code" == "401" || "$http_code" == "403" || "$http_code" == "500" ]]; then
             local err_msg
             err_msg=$(jq -r '.message // "密钥错误或 NodeID 不存在"' "$resp_file" 2>/dev/null | head -c 60)
@@ -672,8 +679,8 @@ external_acme_console() {
 remove_single_node() {
     ui_banner
     ui_section "🗑️ 现有节点精准管理与移除"
-    if [[ ! -f "$config_file" ]]; then
-        echo -e " ${red}✖ 配置文件不存在！${plain}"; return
+    if [[ ! -f "$config_file" ]] || ! jq -e . "$config_file" >/dev/null 2>&1; then
+        echo -e " ${red}✖ 配置文件不存在或损坏！${plain}"; return
     fi
     echo -e " 当前已挂载的节点列表："
     jq -r '.Nodes | to_entries[] | "  [\(.key + 1)] NodeID: \(.value.NodeID) | 内核: \(.value.Core) | 协议: \(.value.NodeType)"' "$config_file"
@@ -684,13 +691,18 @@ remove_single_node() {
 
     local tmp_d="/tmp/v2bx_del_${RANDOM}.json"
     if jq --argjson id "$del_id" 'del(.Nodes[] | select(.NodeID == $id))' "$config_file" > "$tmp_d" 2>/dev/null; then
-        mv -f "$tmp_d" "$config_file"
-        echo -e " ${green}✔ 已从配置中移除 NodeID: ${del_id}！${plain}"
-        restart_v2bx_service
+        # 强制检验新 JSON 是否有效，再覆盖
+        if jq -e . "$tmp_d" >/dev/null 2>&1; then
+            mv -f "$tmp_d" "$config_file"
+            echo -e " ${green}✔ 已从配置中安全移除 NodeID: ${del_id}！${plain}"
+            restart_v2bx_service
+        else
+            echo -e " ${red}✖ 移除逻辑导致配置毁损，已取消操作！${plain}"
+        fi
     else
-        rm -f "$tmp_d"
         echo -e " ${red}✖ 移除失败！${plain}"
     fi
+    rm -f "$tmp_d"
 }
 
 # ════════════════════ 5. 在线自更新 ════════════════════
@@ -698,6 +710,8 @@ update_self_script() {
     ui_banner
     ui_section "🔄 正在同步云端最新 all/xmm12 脚本"
     local tmp_new="/tmp/xmm12_update_${RANDOM}"
+    
+    # 引入智能多镜像下载引擎
     local urls=(
         "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm12"
         "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm12"
@@ -706,7 +720,7 @@ update_self_script() {
 
     local success=false
     for url in "${urls[@]}"; do
-        if wget -q --timeout=10 -O "$tmp_new" "$url" || curl -sL --connect-timeout 8 "$url" -o "$tmp_new"; then
+        if curl -sSfL --connect-timeout 8 "$url" -o "$tmp_new" || wget -q --timeout=10 -O "$tmp_new" "$url"; then
             if [[ -f "$tmp_new" && -s "$tmp_new" ]] && grep -q "sh_ver=" "$tmp_new"; then
                 success=true; break
             fi
@@ -717,9 +731,9 @@ update_self_script() {
         local new_ver; new_ver=$(grep -m1 '^sh_ver=' "$tmp_new" | cut -d'"' -f2)
         local real_me
         real_me=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
-        if [[ -f "$real_me" ]]; then
-            cp -f "$tmp_new" "$real_me"
-            chmod +x "$real_me"
+        if [[ -f "$real_me" && "$real_me" != "/usr/local/bin/xmm12" ]]; then
+            cp -f "$tmp_new" "$real_me" 2>/dev/null
+            chmod +x "$real_me" 2>/dev/null
         fi
         cp -f "$tmp_new" /usr/local/bin/xmm12 2>/dev/null
         chmod +x /usr/local/bin/xmm12 2>/dev/null
@@ -729,7 +743,7 @@ update_self_script() {
         exec bash "/usr/local/bin/xmm12"
     else
         rm -f "$tmp_new"
-        echo -e " ${red}✖ 更新失败！${plain}"
+        echo -e " ${red}✖ 更新失败，可能遭遇网络阻断，请稍后重试！${plain}"
     fi
 }
 
