@@ -4,7 +4,7 @@
 sh_ver="4.9.1-Pro"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
-magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'
+magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'; dim='\033[2m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
@@ -284,7 +284,8 @@ ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}20.${plain} 将现有 CDN 节点改为 CF 隧道
   ${green}21.${plain} 🔍 查看隧道日志 (排查超时)
   ${green}22.${plain} 🛠️ CF 隧道交互式管理 (改域名/ID/监控/启停)
-  ${green}23.${plain} 彻底退出脚本
+  ${green}23.${plain} 🌐 启动极简网络中转面板 (xmmzz)
+  ${green}24.${plain} 彻底退出脚本
 --------------------------------------------
 EOF
 )
@@ -361,7 +362,7 @@ update_shell() {
 }
 
 process_run() {
-    local num; read -rp "请输入选择 [0-23]: " num < /dev/tty
+    local num; read -rp "请输入选择 [0-24]: " num < /dev/tty
     case "$num" in
     0) 
         shopt -s nullglob
@@ -446,8 +447,9 @@ process_run() {
     20) run_remote_module "cf" "CDN 节点转 CF 隧道模块" ;;
     21) run_remote_module "cfjournal" "CF 隧道日志排查诊断" ;; 
     22) run_remote_module "cfmgr" "CF 隧道交互式管理控制台" ;;
-    23) exit 0 ;; 
-    *) echo -e "${red}未知序号，请输入 0-23 之间的数字${plain}" ;;
+    23) run_remote_module "xmmzz" "极简网络中转管理面板" ;;
+    24) exit 0 ;; 
+    *) echo -e "${red}未知序号，请输入 0-24 之间的数字${plain}" ;;
     esac
 }
 
