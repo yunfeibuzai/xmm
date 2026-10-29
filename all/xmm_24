@@ -1,7 +1,7 @@
 #!/bin/bash
-# 麦卖云 (Maimai Cloud) - SOCKS5 自动化落地脚本 (Pro Max 诊断版)
+# 麦卖云 (Maimai Cloud) - SOCKS5 自动化落地脚本 (Pro Max 日志修复版)
 # 适配: Debian/Ubuntu (Systemd) + Alpine (OpenRC)
-# 特色: V2bX 配置文件级深度体检、本地 S5 智能扫描、无痕卸载
+# 特色: V2bX 配置体检、本地隧道防冲突、日志安全退出(Ctrl+C拦截)
 # 更新地址: https://github.com/yunfeibuzai/xmm/blob/main/all/xmm_24
 
 RED='\033[0;31m'
@@ -459,14 +459,24 @@ except:
 view_logs() {
     echo -e "\n${CYAN}1) V2bX 日志  2) Redsocks 日志${NC}"
     read -p "请选择(1/2): " log_choice
-    if command -v journalctl >/dev/null 2>&1; then
-        [ "$log_choice" == "1" ] && journalctl -u V2bX -n 100 -f
-        [ "$log_choice" == "2" ] && journalctl -u redsocks -n 100 -f
-    else
-        echo -e "${YELLOW}当前为 Alpine OpenRC 环境：${NC}"
-        [ "$log_choice" == "1" ] && tail -f /var/log/V2bX* /etc/V2bX/*.log 2>/dev/null
-        [ "$log_choice" == "2" ] && tail -f /var/log/messages | grep redsocks
-    fi
+    
+    echo -e "${YELLOW}💡 提示：正在实时滚动日志，随时按 [Ctrl+C] 可安全退出查看并返回主菜单。${NC}\n"
+    
+    # 拦截 Ctrl+C 信号 (SIGINT)，防止直接退出整个脚本
+    trap '' INT
+    (
+        trap - INT
+        if command -v journalctl >/dev/null 2>&1; then
+            [ "$log_choice" == "1" ] && journalctl -u V2bX -n 100 -f
+            [ "$log_choice" == "2" ] && journalctl -u redsocks -n 100 -f
+        else
+            echo -e "${YELLOW}当前为 Alpine OpenRC 环境：${NC}"
+            [ "$log_choice" == "1" ] && tail -f /var/log/V2bX* /etc/V2bX/*.log 2>/dev/null
+            [ "$log_choice" == "2" ] && tail -f /var/log/messages | grep redsocks
+        fi
+    )
+    trap - INT
+    echo -e "\n${GREEN}✔ 已安全停止查阅日志。${NC}"
 }
 
 update_self() {
