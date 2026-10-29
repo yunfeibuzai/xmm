@@ -1,1 +1,511 @@
+#!/bin/bash
+# 麦卖云 (Maimai Cloud) - SOCKS5 自动化落地脚本 (Pro Max 诊断版)
+# 适配: Debian/Ubuntu (Systemd) + Alpine (OpenRC)
+# 特色: V2bX 配置文件级深度体检、本地 S5 智能扫描、无痕卸载
+# 更新地址: https://github.com/yunfeibuzai/xmm/blob/main/all/xmm_24
 
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+SCRIPT_URL="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm_24"
+
+if [ "$(id -u)" != "0" ]; then
+    echo -e "${RED}错误: 必须使用 root 权限运行！${NC}"
+    exit 1
+fi
+
+# ==================== 智能环境探测 ====================
+if command -v apt-get >/dev/null 2>&1; then
+    PKG_MAN="apt"
+elif command -v apk >/dev/null 2>&1; then
+    PKG_MAN="apk"
+else
+    echo -e "${RED}不支持的系统，仅支持 Debian/Ubuntu/Alpine${NC}"
+    exit 1
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+    SYS_MAN="systemd"
+elif command -v rc-service >/dev/null 2>&1; then
+    SYS_MAN="openrc"
+else
+    echo -e "${RED}无法识别服务管理器 (systemd/openrc)${NC}"
+    exit 1
+fi
+
+# 基础依赖自动补充
+command -v python3 >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get update && apt-get install -y python3 || apk add python3; }
+command -v iptables >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get update && apt-get install -y iptables || apk add iptables iptables-openrc; }
+command -v nano >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get install -y nano || apk add nano; }
+command -v ss >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get install -y iproute2 || apk add iproute2; }
+
+# ==================== 工具函数 ====================
+resolve_domain() {
+    python3 -c "import socket, sys; print(socket.gethostbyname(sys.argv[1]))" "$1" 2>/dev/null
+}
+
+get_panel_ip() {
+    python3 -c "
+import json, re
+try:
+    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
+    host = json.loads(content)['Nodes'][0]['ApiHost'].split('//')[-1].split('/')[0].split(':')[0]
+    import socket
+    print(socket.gethostbyname(host))
+except:
+    pass
+" 2>/dev/null
+}
+
+restart_service() {
+    local srv=$1
+    [ "$SYS_MAN" == "systemd" ] && systemctl restart "$srv" || rc-service "$srv" restart
+}
+
+enable_service() {
+    local srv=$1
+    [ "$SYS_MAN" == "systemd" ] && systemctl enable "$srv" || rc-update add "$srv" default
+}
+
+# ==================== 1. Xray 核心转发部署 ====================
+deploy_xray() {
+    echo -e "${CYAN}--- 开始配置 Xray 核心 S5 原生落地 ---${NC}"
+    
+    # 清洗历史 Sing 遗留规则，防止流量幽灵劫持断网
+    while iptables -t nat -D OUTPUT -p tcp -j REDSOCKS 2>/dev/null; do :; done
+    iptables -t nat -F REDSOCKS 2>/dev/null
+    iptables -t nat -X REDSOCKS 2>/dev/null
+    
+    if [ "$SYS_MAN" == "systemd" ]; then
+        systemctl stop redsocks 2>/dev/null
+        systemctl disable redsocks 2>/dev/null
+    else
+        rc-service redsocks stop 2>/dev/null
+        rc-update del redsocks default 2>/dev/null
+    fi
+    
+    cat << EOF > /etc/V2bX/custom_outbound.json
+[
+  {
+    "tag": "hkt-s5-out",
+    "protocol": "socks",
+    "settings": {
+      "servers": [
+        {
+          "address": "${S5_HOST}",
+          "port": ${S5_PORT},
+          "users": [{"user": "${S5_USER}", "pass": "${S5_PASS}"}]
+        }
+      ]
+    }
+  },
+  {
+    "tag": "block",
+    "protocol": "blackhole"
+  }
+]
+EOF
+
+    cat << 'EOF' > /etc/V2bX/route.json
+{
+  "domainStrategy": "AsIs",
+  "rules": [
+    {
+      "type": "field",
+      "outboundTag": "block",
+      "ip": [
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+        "127.0.0.0/8", "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"
+      ]
+    },
+    {
+      "type": "field",
+      "outboundTag": "hkt-s5-out",
+      "network": "tcp,udp"
+    }
+  ]
+}
+EOF
+
+    cp /etc/V2bX/config.json /etc/V2bX/config.json.bak
+
+    python3 -c "
+import json, sys, re
+try:
+    with open('/etc/V2bX/config.json', 'r') as f:
+        content = re.sub(r'(?<!:)//.*', '', f.read())
+    cfg = json.loads(content)
+    
+    for core in cfg.get('Cores', []):
+        if core.get('Type', '').lower() == 'xray':
+            core['OutboundConfigPath'] = '/etc/V2bX/custom_outbound.json'
+            core['RouteConfigPath'] = '/etc/V2bX/route.json'
+            core.pop('DnsConfigPath', None)
+            
+    for node in cfg.get('Nodes', []):
+        if node.get('Core', '').lower() == 'xray':
+            node['OutboundConfigPath'] = '/etc/V2bX/custom_outbound.json'
+            node['RouteConfigPath'] = '/etc/V2bX/route.json'
+            
+    with open('/etc/V2bX/config.json.tmp', 'w') as f:
+        json.dump(cfg, f, indent=2)
+except Exception as e:
+    print('配置生成失败:', e)
+    sys.exit(1)
+"
+    if [ $? -eq 0 ]; then
+        mv /etc/V2bX/config.json.tmp /etc/V2bX/config.json
+        restart_service "V2bX"
+        
+        if [ "$PKG_MAN" == "apt" ]; then
+            netfilter-persistent save 2>/dev/null
+        else
+            /etc/init.d/iptables save 2>/dev/null || rc-service iptables save 2>/dev/null
+        fi
+        
+        echo -e "${GREEN}✅ Xray 原生落地配置完毕，环境已净化，V2bX 已重启生效！${NC}"
+    else
+        echo -e "${RED}❌ Xray 配置写入失败，已中止。${NC}"
+    fi
+}
+
+# ==================== 2. Sing 核心 Redsocks 部署 ====================
+deploy_sing() {
+    echo -e "${CYAN}--- 开始配置 Sing 核心 Redsocks 透明代理 ---${NC}"
+    
+    S5_IP=$(resolve_domain "$S5_HOST")
+    if [ -z "$S5_IP" ]; then
+        echo -e "${RED}错误: 无法解析域名 ${S5_HOST}${NC}"
+        return 1
+    fi
+    
+    if [[ "$S5_IP" == "127.0.0"* ]]; then
+        echo -e "${YELLOW}⚠️ 检测到目标 S5 为本机内网 IP！透明代理可能会引发本地死循环。${NC}"
+        echo -e "${YELLOW}建议改用 Xray 核心进行原生落地，或者确保你的本地 S5 进程运行在非 root 用户下。${NC}"
+        read -p "确定要强行继续吗？(y/n): " force_local
+        [ "$force_local" != "y" ] && return
+    fi
+    
+    PANEL_IP=$(get_panel_ip)
+    
+    read -p "请输入当前 CDN 节点的入站端口 (如 443, 不清楚直接回车): " NODE_PORT
+    if [[ -z "$NODE_PORT" || ! "$NODE_PORT" =~ ^[0-9]+$ ]]; then
+        SPORT_ARGS="22"
+    else
+        SPORT_ARGS="22,${NODE_PORT}"
+    fi
+
+    if [ "$PKG_MAN" == "apt" ]; then
+        apt-get install -y redsocks iptables-persistent
+    else
+        apk add redsocks
+    fi
+
+    DAEMON_MODE="off"
+    [ "$SYS_MAN" == "openrc" ] && DAEMON_MODE="on"
+
+    cat << EOF > /etc/redsocks.conf
+base {
+    log_debug = off;
+    log_info = on;
+    log = "stderr";
+    daemon = ${DAEMON_MODE};
+    redirector = iptables;
+}
+redsocks {
+    local_ip = 127.0.0.1;
+    local_port = 12345;
+    ip = ${S5_IP};
+    port = ${S5_PORT};
+    type = socks5;
+    login = "${S5_USER}";
+    password = "${S5_PASS}";
+}
+EOF
+
+    if [ "$SYS_MAN" == "systemd" ]; then
+        cat << 'EOF' > /etc/systemd/system/redsocks.service
+[Unit]
+Description=Redsocks transparent proxy
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/sbin/redsocks -c /etc/redsocks.conf
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+    fi
+
+    enable_service "redsocks"
+    restart_service "redsocks"
+
+    # 清除旧规则
+    while iptables -t nat -D OUTPUT -p tcp -j REDSOCKS 2>/dev/null; do :; done
+    iptables -t nat -F REDSOCKS 2>/dev/null
+    iptables -t nat -X REDSOCKS 2>/dev/null
+
+    iptables -t nat -N REDSOCKS
+    iptables -t nat -A REDSOCKS -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A REDSOCKS -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A REDSOCKS -d ${S5_IP}/32 -j RETURN
+    [ -n "$PANEL_IP" ] && iptables -t nat -A REDSOCKS -d ${PANEL_IP}/32 -j RETURN
+
+    iptables -t nat -A REDSOCKS -p tcp -m multiport --sports ${SPORT_ARGS} -j RETURN
+    iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports 12345
+    iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
+
+    if [ "$PKG_MAN" == "apt" ]; then
+        netfilter-persistent save 2>/dev/null
+    else
+        /etc/init.d/iptables save 2>/dev/null || rc-service iptables save 2>/dev/null
+        rc-update add iptables default 2>/dev/null
+    fi
+    echo -e "${GREEN}✅ Sing 透明代理落地配置完毕！${NC}"
+}
+
+# ==================== 3. 深度体检与诊断 ====================
+diagnose_env() {
+    echo -e "\n${CYAN}===========================================${NC}"
+    echo -e "${YELLOW}🩺 正在深度体检 V2bX 配置与本地 S5 环境...${NC}"
+    echo -e "${CYAN}===========================================${NC}"
+    
+    # 1. 自动调用 Python 检查配置文件健康度
+    python3 -c "
+import json, os, re
+print('[\033[0;36m配置检查\033[0m] 分析 /etc/V2bX/config.json 依赖...')
+try:
+    if not os.path.exists('/etc/V2bX/config.json'):
+        print('  [\033[0;31m致命\033[0m] /etc/V2bX/config.json 不存在！')
+        exit(0)
+
+    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
+    cfg = json.loads(content)
+    
+    # 检查证书
+    for idx, node in enumerate(cfg.get('Nodes', [])):
+        cert = node.get('CertConfig', {})
+        cf = cert.get('CertFile')
+        kf = cert.get('KeyFile')
+        if cf:
+            if os.path.exists(cf): print(f'  [\033[0;32m正常\033[0m] TLS 证书存在: {cf}')
+            else: print(f'  [\033[0;31m致命\033[0m] TLS 证书丢失: {cf} (会导致V2bX直接崩溃)')
+        if kf:
+            if os.path.exists(kf): print(f'  [\033[0;32m正常\033[0m] TLS 私钥存在: {kf}')
+            else: print(f'  [\033[0;31m致命\033[0m] TLS 私钥丢失: {kf} (会导致V2bX直接崩溃)')
+            
+    # 检查无效路由文件
+    for core in cfg.get('Cores', []):
+        dp = core.get('DnsConfigPath')
+        if dp and not os.path.exists(dp):
+            print(f'  [\033[0;33m警告\033[0m] dns.json 路径无效: {dp} (推荐脚本部署时剔除)')
+
+except Exception as e:
+    print(f'  [\033[0;31m错误\033[0m] JSON解析失败: {e}')
+"
+    
+    echo -e "\n[\033[0;36m端口扫描\033[0m] 检测本地已知代理、S5 与隧道进程..."
+    # 探测代理软件端口占用
+    TUNNELS=$(ss -tulnp | grep -iE 'v2bx|xray|sing-box|gost|danted|microsocks|socat|sshd|redsocks')
+    
+    if [ -z "$TUNNELS" ]; then
+        echo -e "  ${GREEN}未检测到本地运行的其他代理隧道服务。${NC}"
+    else
+        printf "  ${CYAN}%-20s %-10s %-25s${NC}\n" "进程名称" "PID" "监听地址:端口"
+        echo "  --------------------------------------------------------"
+        echo "$TUNNELS" | while read -r line; do
+            port=$(echo "$line" | awk '{print $5}')
+            proc=$(echo "$line" | grep -o 'users:((".*"' | cut -d '"' -f2)
+            pid=$(echo "$line" | grep -o 'pid=[0-9]*' | cut -d '=' -f2 | head -n 1)
+            if [ -n "$proc" ]; then
+                printf "  ${GREEN}%-20s${NC} ${YELLOW}%-10s${NC} %-25s\n" "$proc" "$pid" "$port"
+            fi
+        done
+        echo "  --------------------------------------------------------"
+        echo -e "  ${YELLOW}💡 提示: 若你要用上表中的本地 S5 落地，请首选 Xray 核心处理。${NC}"
+    fi
+    echo -e "${CYAN}===========================================${NC}"
+}
+
+# ==================== 4. 一键卸载与无痕回滚 ====================
+uninstall_all() {
+    echo -e "\n${RED}⚠️ 警告: 这将彻底清除 S5 落地，将出口恢复为 VPS 原生机房直连。${NC}"
+    read -p "确定要继续吗？(y/n): " confirm
+    if [ "$confirm" != "y" ]; then
+        echo "已取消。"
+        return
+    fi
+    
+    echo -e "${YELLOW}正在剥离底层 iptables 劫持规则...${NC}"
+    while iptables -t nat -D OUTPUT -p tcp -j REDSOCKS 2>/dev/null; do :; done
+    iptables -t nat -F REDSOCKS 2>/dev/null
+    iptables -t nat -X REDSOCKS 2>/dev/null
+    
+    if [ "$PKG_MAN" == "apt" ]; then
+        netfilter-persistent save 2>/dev/null
+    else
+        /etc/init.d/iptables save 2>/dev/null || rc-service iptables save 2>/dev/null
+    fi
+
+    echo -e "${YELLOW}正在停止并禁用 Redsocks...${NC}"
+    if [ "$SYS_MAN" == "systemd" ]; then
+        systemctl stop redsocks 2>/dev/null
+        systemctl disable redsocks 2>/dev/null
+    else
+        rc-service redsocks stop 2>/dev/null
+        rc-update del redsocks default 2>/dev/null
+    fi
+    
+    echo -e "${YELLOW}正在剥离 V2bX 的外部出站路由设定...${NC}"
+    python3 -c "
+import json, re
+try:
+    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
+    cfg = json.loads(content)
+    for core in cfg.get('Cores', []):
+        core.pop('OutboundConfigPath', None)
+        core.pop('RouteConfigPath', None)
+    for node in cfg.get('Nodes', []):
+        node.pop('OutboundConfigPath', None)
+        node.pop('RouteConfigPath', None)
+    with open('/etc/V2bX/config.json', 'w') as f:
+        json.dump(cfg, f, indent=2)
+except:
+    pass
+" 2>/dev/null
+    restart_service "V2bX" 2>/dev/null
+
+    echo -e "${GREEN}✅ 清理完毕！你的 VPS 出口已完美回滚为原生机房直连。${NC}"
+}
+
+# ==================== 0. 手动修改配置 ====================
+edit_configs() {
+    echo -e "\n${YELLOW}=== 手动修改配置文件 ===${NC}"
+    echo "1) 修改 /etc/V2bX/config.json (主配置)"
+    echo "2) 修改 /etc/V2bX/custom_outbound.json (S5出站)"
+    echo "3) 修改 /etc/V2bX/route.json (路由配置)"
+    echo "4) 修改 /etc/redsocks.conf (Sing底层配置)"
+    echo "5) 返回主菜单"
+    read -p "请输入对应的数字: " edit_choice
+    
+    FILE=""
+    case $edit_choice in
+        1) FILE="/etc/V2bX/config.json" ;;
+        2) FILE="/etc/V2bX/custom_outbound.json" ;;
+        3) FILE="/etc/V2bX/route.json" ;;
+        4) FILE="/etc/redsocks.conf" ;;
+        5) return ;;
+        *) echo -e "${RED}输入错误！${NC}"; return ;;
+    esac
+
+    [ ! -f "$FILE" ] && touch "$FILE"
+    nano "$FILE"
+    
+    echo -e "\n${CYAN}保存完毕！是否立即重启相关服务使其生效？ (y/n)${NC}"
+    read -p "请选择: " r_choice
+    if [ "$r_choice" == "y" ]; then
+        restart_service "V2bX" 2>/dev/null
+        restart_service "redsocks" 2>/dev/null
+        echo -e "${GREEN}✅ 服务已重启。${NC}"
+    fi
+}
+
+# ==================== 主菜单调度 ====================
+setup_s5() {
+    if [ ! -f "/etc/V2bX/config.json" ]; then
+        echo -e "${RED}未检测到 /etc/V2bX/config.json${NC}"
+        return 1
+    fi
+
+    echo -e "${YELLOW}--- SOCKS5 落地配置 ---${NC}"
+    read -p "服务器(支持域名或IP, 本机S5填127.0.0.1): " S5_HOST
+    read -p "端口: " S5_PORT
+    read -p "用户名 (无则留空): " S5_USER
+    read -p "密码 (无则留空): " S5_PASS
+
+    CORE_TYPE=$(python3 -c "
+import json, re
+try:
+    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
+    print(json.loads(content)['Nodes'][0].get('Core', '').lower())
+except:
+    pass
+" 2>/dev/null)
+    
+    if [ "$CORE_TYPE" == "sing" ]; then
+        echo -e "\n${CYAN}智能识别 -> Sing 核心${NC}"
+        deploy_sing
+    elif [ "$CORE_TYPE" == "xray" ]; then
+        echo -e "\n${CYAN}智能识别 -> Xray 核心${NC}"
+        deploy_xray
+    else
+        echo -e "\n${RED}未自动识别到内核，请手动选择:${NC}"
+        echo "1) Xray (原生出站)"
+        echo "2) Sing (Redsocks 透明劫持)"
+        read -p "请输入(1/2): " core_opt
+        [ "$core_opt" == "1" ] && deploy_xray || deploy_sing
+    fi
+}
+
+view_logs() {
+    echo -e "\n${CYAN}1) V2bX 日志  2) Redsocks 日志${NC}"
+    read -p "请选择(1/2): " log_choice
+    if command -v journalctl >/dev/null 2>&1; then
+        [ "$log_choice" == "1" ] && journalctl -u V2bX -n 100 -f
+        [ "$log_choice" == "2" ] && journalctl -u redsocks -n 100 -f
+    else
+        echo -e "${YELLOW}当前为 Alpine OpenRC 环境：${NC}"
+        [ "$log_choice" == "1" ] && tail -f /var/log/V2bX* /etc/V2bX/*.log 2>/dev/null
+        [ "$log_choice" == "2" ] && tail -f /var/log/messages | grep redsocks
+    fi
+}
+
+update_self() {
+    echo -e "${YELLOW}正在更新脚本...${NC}"
+    wget -qO "$0" "$SCRIPT_URL"
+    if [ $? -eq 0 ]; then
+        chmod +x "$0"
+        echo -e "${GREEN}✅ 更新成功！重启中...${NC}"
+        sleep 1
+        exec bash "$0"
+    else
+        echo -e "${RED}更新失败！${NC}"
+    fi
+}
+
+# ==================== 入口 ====================
+while true; do
+    echo -e "\n${CYAN}===========================================${NC}"
+    echo -e "${GREEN}  Maimai Cloud - S5 落地智能路由 (Pro Max) ${NC}"
+    echo -e "  环境: ${YELLOW}${SYS_MAN^^}${NC} + ${YELLOW}${PKG_MAN^^}${NC}"
+    echo -e "${CYAN}===========================================${NC}"
+    echo "  0. 手动修改配置文件 (nano)"
+    echo "  1. 部署 S5 落地 (自适应识别内核)"
+    echo "  2. 查看服务运行日志"
+    echo "  3. 深度诊断 (配置体检 & 本地 S5 探针)"
+    echo "  4. 一键剥离 S5 落地 (无痕回退直连)"
+    echo "  8. 更新当前脚本"
+    echo "  9. 退出"
+    echo -e "${CYAN}===========================================${NC}"
+    read -p "请输入指令: " opt
+
+    case $opt in
+        0) edit_configs ;;
+        1) setup_s5 ;;
+        2) view_logs ;;
+        3) diagnose_env ;;
+        4) uninstall_all ;;
+        8) update_self ;;
+        9) exit 0 ;;
+        *) echo -e "${RED}无效输入！${NC}" ;;
+    esac
+done
