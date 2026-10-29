@@ -9,7 +9,7 @@
 if [ -z "$BASH_VERSION" ]; then
     if command -v apk >/dev/null 2>&1; then
         echo -e "\033[33m检测到 Alpine 环境，正在自愈加载 bash...\033[0m"
-        apk update >/dev/null 2>&1 && apk add --no-cache bash grep sed gawk net-tools >/dev/null 2>&1
+        apk update >/dev/null 2>&1 && apk add --no-cache bash grep sed gawk net-tools coreutils >/dev/null 2>&1
         exec bash "$0" "$@"
     else
         echo "错误：请使用 bash 执行脚本！"
@@ -19,7 +19,7 @@ fi
 
 # 2. 初始化标准控制台颜色
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
-magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'
+magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'; dim='\033[2m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
@@ -27,6 +27,11 @@ magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'
 check_pid_alive() {
     local pid="$1"
     [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# 清理字符串中所有不可见控制字符 (解决 CRLF 乱码重叠的核心函数)
+clean_string() {
+    echo "$1" | tr -d '\r' | tr -d '\000-\011\013-\037' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
 # 4. 主干逻辑
@@ -39,7 +44,7 @@ view_cf_tunnel_logs() {
     local discovered_tunnels=()
 
     # Systemd 层扫描
-    if command -v systemctl &>/dev/null; then
+    if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
         for f in /etc/systemd/system/cf-*.service; do
             [[ -f "$f" ]] && discovered_tunnels+=("$(basename "$f" | sed 's/^cf-//;s/\.service$//')")
         done
@@ -54,27 +59,35 @@ view_cf_tunnel_logs() {
         [[ -f "/etc/init.d/cloudflared" ]] && discovered_tunnels+=("cloudflared")
     fi
 
-    # 兜底文件扫描
+    # 兜底文件扫描 (跳过非配置 yml)
     for dir in "/etc/cloudflared" "/root/.cloudflared"; do
         if [[ -d "$dir" ]]; then
             for yml in "$dir"/*.yml "$dir"/*.yaml; do
                 [[ -f "$yml" ]] || continue
                 local base; base=$(basename "$yml" | sed 's/\.yml$//;s/\.yaml$//')
-                [[ "$base" != "cert" ]] && discovered_tunnels+=("$base")
+                [[ "$base" != "cert" && "$base" != "config" ]] && discovered_tunnels+=("$base")
             done
         fi
     done
 
-    # 【优化】安全的数组去重 (防御 `tr` 或 `sort` 在精简环境导致的中文字符乱码)
+    # 进程级扫描兜底
+    for p in /proc/[0-9]*/cmdline; do
+        [[ -f "$p" ]] || continue
+        local cmd; cmd=$(tr '\0' ' ' < "$p" 2>/dev/null)
+        if [[ "$cmd" == *"cloudflared "* ]]; then
+            if [[ "$cmd" =~ tunnel[[:space:]]+run[[:space:]]+([^[:space:]\-][^[:space:]]*) ]]; then
+                discovered_tunnels+=("${BASH_REMATCH[1]}")
+            fi
+        fi
+    done
+
+    # 极简安全的数组去重
     local tunnels=()
     for t in "${discovered_tunnels[@]}"; do
         [[ -z "$t" ]] && continue
         local is_duplicate=0
         for exist in "${tunnels[@]}"; do
-            if [[ "$t" == "$exist" ]]; then
-                is_duplicate=1
-                break
-            fi
+            [[ "$t" == "$exist" ]] && is_duplicate=1 && break
         done
         [[ $is_duplicate -eq 0 ]] && tunnels+=("$t")
     done
@@ -116,14 +129,14 @@ view_cf_tunnel_logs() {
         [[ -n "$p" && "$p" != "0" ]] && pids+=("$p")
     fi
     for pf in "/run/cf-${target}.pid" "/var/run/cf-${target}.pid" "/run/cloudflared.pid" "/var/run/cloudflared.pid"; do
-        [[ -f "$pf" ]] && pids+=("$(cat "$pf" 2>/dev/null)")
+        [[ -f "$pf" ]] && pids+=("$(cat "$pf" 2>/dev/null | tr -d '\r\n')")
     done
     for proc_dir in /proc/[0-9]*; do
         [[ -d "$proc_dir" ]] || continue
         local p="${proc_dir##*/}"
         [[ "$p" == "$$" ]] && continue
         local cmdline; cmdline=$(tr '\0' ' ' < "$proc_dir/cmdline" 2>/dev/null)
-        if [[ "$cmdline" =~ cloudflared ]] && [[ "$cmdline" =~ $target ]]; then
+        if [[ "$cmdline" == *"cloudflared"* && "$cmdline" == *"$target"* ]]; then
             pids+=("$p")
         fi
     done
@@ -153,12 +166,14 @@ view_cf_tunnel_logs() {
     done
 
     if [[ -f "$config_file" ]]; then
-        # 【核心修复】强力剥离 \r 回车符，并过滤内联注释 (#)。防止终端输出时光标被移到行首造成“重叠式乱码”
-        local forward_url
-        forward_url=$(grep -iE '^[[:space:]]*-[[:space:]]*service[[:space:]]*:' "$config_file" 2>/dev/null | \
-                      grep -iv 'http_status' | head -n 1 | \
-                      sed -e 's/^[[:space:]]*-[[:space:]]*service[[:space:]]*:[[:space:]]*//i' | \
-                      cut -d'#' -f1 | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/[[:space:]]*$//')
+        # 【防御核心】强制清理所有隐藏符，剥离注释，只取纯净的值
+        local forward_url_raw
+        forward_url_raw=$(grep -iE '^[[:space:]]*-[[:space:]]*service[[:space:]]*:' "$config_file" 2>/dev/null | \
+                          grep -iv 'http_status' | head -n 1 | \
+                          sed -e 's/^[[:space:]]*-[[:space:]]*service[[:space:]]*:[[:space:]]*//i' | \
+                          cut -d'#' -f1)
+        
+        local forward_url; forward_url=$(clean_string "$forward_url_raw")
         
         if [[ -n "$forward_url" ]]; then
             local forward_port; forward_port=$(echo "$forward_url" | grep -oE '[0-9]+$')
@@ -167,10 +182,11 @@ view_cf_tunnel_logs() {
 
             if [[ -n "$forward_port" ]]; then
                 local listen_check=""
+                # 兼容全系统的网络侦测引擎
                 if command -v ss &>/dev/null; then
-                    listen_check=$(ss -tlnp 2>/dev/null | grep -E "(:| )${forward_port} ")
+                    listen_check=$(ss -tlnp 2>/dev/null | awk '{print $4}' | grep -E "(:|\])${forward_port}$")
                 elif command -v netstat &>/dev/null; then
-                    listen_check=$(netstat -an 2>/dev/null | grep -E "LISTEN" | grep -E "(:|\.)${forward_port} ")
+                    listen_check=$(netstat -tlnp 2>/dev/null | awk '{print $4}' | grep -E "(:|\.)${forward_port}$")
                 fi
 
                 if [[ -n "$listen_check" ]]; then
@@ -187,18 +203,18 @@ view_cf_tunnel_logs() {
             echo -e "${yellow}配置探针未能嗅探到本地 service 转发信标 (Ingress 规则异常)。${plain}"
         fi
     else
-        echo -e "${yellow}未找到适配的 yml 配置文件，端口透扫跳过。${plain}"
+        echo -e "${yellow}未找到适配的 YAML 配置文件，端口透扫跳过。${plain}"
     fi
 
     echo -e "\n${cyan}====== [ 📜 阶段三：黑匣子解码 (最近日志输出) ] ======${plain}"
     echo -e "${magenta}----------------------------------------------------------------${plain}"
     
     local log_found=0
-    # 【优化】同样剔除日志中可能存在的隐藏 CRLF 控制符导致排版错乱
+    # 日志输出强制过滤 CRLF，防止系统日志残留 Windows 换行符
     if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
-        if systemctl list-unit-files "cf-${target}.service" &>/dev/null; then
+        if systemctl is-active "cf-${target}.service" &>/dev/null || systemctl is-failed "cf-${target}.service" &>/dev/null; then
             journalctl -u "cf-${target}" -n 40 --no-pager | tr -d '\r' && log_found=1
-        elif systemctl list-unit-files "cloudflared.service" &>/dev/null; then
+        elif systemctl is-active "cloudflared.service" &>/dev/null || systemctl is-failed "cloudflared.service" &>/dev/null; then
             journalctl -u cloudflared -n 40 --no-pager | tr -d '\r' && log_found=1
         fi
     fi
