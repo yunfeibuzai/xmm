@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =================================================================
 # 麦卖云 Cloudflare Argo Tunnel 交互式管理引擎 (全系统终极容错版)
-# 升级：精准识别 Protocol、智能去重隧道列表、进程状态强关联
+# 升级：绕过 Alpine sed 写入漏洞、多维探针解析协议、配置绝对强写
 # =================================================================
 
 if [ -z "$BASH_VERSION" ]; then
@@ -23,6 +23,17 @@ magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'; dim='\033[
 check_pid_alive() {
     local pid="$1"
     [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# 终极强悍的 YAML 解析引擎 (免疫各种奇葩缩进、空格、双引号)
+get_yaml_value() {
+    local key="$1"
+    local file="$2"
+    awk -F':' -v k="$key" 'tolower($1) ~ "^[ \t]*"tolower(k)"[ \t]*$" {
+        val=$0; sub(/^[^:]*:/, "", val);
+        gsub(/^[ \t\r\n\047"]+|[ \t\r\n\047"]+$/, "", val);
+        print val; exit
+    }' "$file"
 }
 
 get_tunnel_status() {
@@ -96,7 +107,6 @@ get_tunnel_status() {
 scan_all_local_tunnels() {
     local discovered=()
     
-    # 扫描服务
     if command -v systemctl &>/dev/null; then
         for f in /etc/systemd/system/cf-*.service; do
             [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//;s/\.service$//')")
@@ -110,7 +120,6 @@ scan_all_local_tunnels() {
         [[ -f "/etc/init.d/cloudflared" ]] && discovered+=("cloudflared")
     fi
     
-    # 扫描配置文件
     for dir in "/etc/cloudflared" "/root/.cloudflared"; do
         if [[ -d "$dir" ]]; then
             for yml in "$dir"/*.yml "$dir"/*.yaml; do
@@ -122,7 +131,6 @@ scan_all_local_tunnels() {
         fi
     done
     
-    # 扫描正在运行的进程 (提取具体隧道名，不盲目追加 process)
     for p in /proc/[0-9]*/cmdline; do
         [[ -f "$p" ]] || continue
         local cmd; cmd=$(tr '\0' ' ' < "$p" 2>/dev/null)
@@ -139,7 +147,6 @@ scan_all_local_tunnels() {
         fi
     done
 
-    # 智能去重并输出
     if [[ ${#discovered[@]} -gt 0 ]]; then
         echo "${discovered[@]}" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' '
     fi
@@ -212,19 +219,33 @@ inspect_tunnel_card() {
         return
     fi
 
-    local tunnel_id cred_file hostnames forward_urls current_protocol
-    tunnel_id=$(grep -iE '^[[:space:]]*tunnel[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
-    cred_file=$(grep -iE '^[[:space:]]*credentials-file[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
+    # 使用强化 awk 引擎解析
+    local tunnel_id cred_file hostnames forward_urls current_protocol=""
+    tunnel_id=$(get_yaml_value "tunnel" "$config")
+    cred_file=$(get_yaml_value "credentials-file" "$config")
     hostnames=$(grep -iE '^[[:space:]]*-[[:space:]]*hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
     forward_urls=$(grep -iE '^[[:space:]]*service[[:space:]]*:' "$config" 2>/dev/null | grep -iv 'http_status' | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
     
-    # 【修复重点】精准解析 Protocol (过滤空格/引号并强转小写)
-    current_protocol=$(grep -iE '^[[:space:]]*protocol[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t' | tr 'A-Z' 'a-z')
+    # ---------------- 协议探针引擎 (核心修复区) ----------------
+    # 探针 1：尝试从运行中的内存进程命令行嗅探协议 (最高优先级)
+    if [[ -n "$STATUS_PID" && -f "/proc/$STATUS_PID/cmdline" ]]; then
+        local cmd_proto
+        cmd_proto=$(tr '\0' ' ' < "/proc/$STATUS_PID/cmdline" | grep -ioE '--protocol[ =][a-zA-Z0-9]+' | sed -E 's/--protocol[ =]//i' | tr -d ' ' | tr 'A-Z' 'a-z')
+        [[ -n "$cmd_proto" ]] && current_protocol="$cmd_proto"
+    fi
+
+    # 探针 2：若进程中没指明，则从 YAML 配置文件中严谨提取
+    if [[ -z "$current_protocol" ]]; then
+        current_protocol=$(get_yaml_value "protocol" "$config" | tr 'A-Z' 'a-z')
+    fi
+
+    # 探针判断结果渲染
     if [[ -z "$current_protocol" ]]; then
         current_protocol="${yellow}quic (未配置, 默认值)${plain}"
     else
         current_protocol="${magenta}${current_protocol}${plain}"
     fi
+    # ------------------------------------------------------------
 
     echo -e "${cyan}│${plain} 配置文件: ${green}${config}${plain}"
     echo -e "${cyan}│${plain} 隧道 ID : ${yellow}${tunnel_id:-<未读取到>}${plain}"
@@ -285,19 +306,19 @@ modify_hostname() {
 
 modify_tunnel_id() {
     local config="$1"
-    local old_id; old_id=$(grep -iE '^[[:space:]]*tunnel[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
+    local old_id; old_id=$(get_yaml_value "tunnel" "$config")
     echo -e "\n当前 Tunnel ID (UUID) 为: ${yellow}${old_id:-未定义}${plain}"
     read -rp "请输入全新的 Tunnel UUID: " new_id; new_id=$(echo "$new_id" | xargs)
     if [[ -z "$new_id" ]]; then echo -e "${red}Tunnel ID 不能为空！${plain}"; return; fi
     if [[ "$new_id" == "$old_id" ]]; then echo -e "${yellow}新旧 ID 相同，跳过修改。${plain}"; return; fi
 
     backup_config_file "$config"
-    # 使用安全的 sed 匹配替换，避免影响其他字段
-    if grep -qiE '^[[:space:]]*tunnel[[:space:]]*:' "$config"; then
-        sed -i -e 's/^[[:space:]]*[tT][uU][nN][nN][eE][lL][[:space:]]*:.*/tunnel: '"$new_id"'/' "$config"
-    else
-        sed -i "1i tunnel: ${new_id}" "$config"
-    fi
+    
+    # 绝对兼容 Alpine 的写入方式
+    local tmp_cfg="${config}.tmp"
+    echo "tunnel: ${new_id}" > "$tmp_cfg"
+    grep -ivE '^[[:space:]]*tunnel[[:space:]]*:' "$config" >> "$tmp_cfg"
+    mv -f "$tmp_cfg" "$config"
 
     if [[ -n "$old_id" ]] && grep -q "$old_id" "$config"; then
         read -rp "检测到凭证文件名与旧 ID 关联，是否同步更新 UUID？[Y/n]: " sync_cred
@@ -312,8 +333,8 @@ modify_tunnel_id() {
 modify_protocol() {
     local config="$1"
     
-    # 提取当前协议值
-    local raw_protocol; raw_protocol=$(grep -iE '^[[:space:]]*protocol[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t' | tr 'A-Z' 'a-z')
+    # 精准提取当前协议
+    local raw_protocol; raw_protocol=$(get_yaml_value "protocol" "$config" | tr 'A-Z' 'a-z')
     
     local current_protocol_val="quic"
     [[ -n "$raw_protocol" ]] && current_protocol_val="$raw_protocol"
@@ -324,20 +345,28 @@ modify_protocol() {
     local display_proto="${raw_protocol}"
     [[ -z "$raw_protocol" ]] && display_proto="quic (默认未配置)"
 
-    echo -e "\n当前传输协议为: ${yellow}${display_proto}${plain}"
-    echo -e " ${cyan}提示：防御运营商 UDP 阻断或 QoS 降速，推荐切换至 http2。恢复性能可切回 quic。${plain}"
-    read -rp "是否将协议切换并写入为 [${target_protocol}]？[Y/n]: " switch_ans
+    echo -e "\n当前 YAML 配置文件内传输协议为: ${yellow}${display_proto}${plain}"
+    echo -e " ${cyan}提示：防御运营商 UDP 阻断或 QoS 降速，推荐强制切换至 http2。恢复性能可切回 quic。${plain}"
+    read -rp "是否将协议切换并物理写入为 [${target_protocol}]？[Y/n]: " switch_ans
     
     if [[ "${switch_ans:-Y}" =~ ^[Yy]$ ]]; then
         backup_config_file "$config"
         
-        # 【修复重点】无视大小写，直接安全删除旧的 protocol 配置行
-        sed -i -e '/^[[:space:]]*[pP][rR][oO][tT][oO][cC][oO][lL][[:space:]]*:/d' "$config"
+        # 【终极修复区】
+        # 放弃使用 Alpine 支持极差的 sed -i '1i' 模式，
+        # 改为安全的临时文件绝对重组写入模式，保证 100% 写入成功。
+        local tmp_cfg="${config}.tmp"
         
-        # 在第一行强行插入新协议，防止插在尾部导致 YAML 层级被 ingress 解析错乱
-        sed -i "1i protocol: ${target_protocol}" "$config"
+        # 将新协议强制写在文件绝对的头部
+        echo "protocol: ${target_protocol}" > "$tmp_cfg"
         
-        echo -e "\n${green}✔ 协议已成功切换并写入为: ${target_protocol}${plain}"
+        # 过滤掉原本的 protocol 字段，将剩余原配置安全追加到后方
+        grep -ivE '^[[:space:]]*protocol[[:space:]]*:' "$config" >> "$tmp_cfg"
+        
+        # 强行覆盖旧文件
+        mv -f "$tmp_cfg" "$config"
+        
+        echo -e "\n${green}✔ 协议已成功切换并强制写入为: ${target_protocol}${plain}"
     else
         echo -e "\n${yellow}已取消，保持当前协议。${plain}"
     fi
@@ -353,7 +382,6 @@ manage_service() {
 
     local service_handled=0
 
-    # Systemd 处理
     if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
         if systemctl list-unit-files "${svc_name}.service" &>/dev/null || systemctl list-unit-files "cloudflared.service" &>/dev/null; then
             systemctl "$action" "$svc_name" 2>/dev/null || systemctl "$action" cloudflared 2>/dev/null
@@ -361,7 +389,6 @@ manage_service() {
         fi
     fi
 
-    # OpenRC 处理
     if [[ $service_handled -eq 0 ]] && command -v rc-service &>/dev/null; then
         local rc_target="$svc_name"; [[ ! -f "/etc/init.d/$rc_target" && -f "/etc/init.d/cloudflared" ]] && rc_target="cloudflared"
         if [[ -f "/etc/init.d/$rc_target" ]]; then
@@ -372,7 +399,6 @@ manage_service() {
 
     sleep 1
     if [[ "$action" == "stop" ]]; then
-        # 兜底强制 Kill
         local pids=$(pgrep -f "cloudflared.*${target}")
         [[ -z "$pids" && "$target" == "cloudflared" ]] && pids=$(pgrep -x "cloudflared")
         if [[ -n "$pids" ]]; then
