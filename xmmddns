@@ -2,7 +2,7 @@
 # ====================================================
 # Project: Cloudflare DDNS Subsystem
 # Description: 自动更新 Cloudflare DNS 解析，支持 IPv4/IPv6，支持冗余清理
-# Author: YourName / YourProject
+# Author: Maimai Cloud / xmm
 # ====================================================
 
 SCRIPT_DIR="/root/relay_scripts"
@@ -24,21 +24,22 @@ install_dependencies() {
         if command -v apt-get >/dev/null 2>&1; then 
             apt-get update >/dev/null 2>&1 && apt-get install -y jq >/dev/null 2>&1
         elif command -v apk >/dev/null 2>&1; then 
-            apk update >/dev/null 2>&1 && apk add jq >/dev/null 2>&1
+            apk update >/dev/null 2>&1 && apk add --no-cache jq >/dev/null 2>&1
         elif command -v yum >/dev/null 2>&1; then 
             yum install -y epel-release >/dev/null 2>&1 && yum install -y jq >/dev/null 2>&1
         fi
     fi
 
-    # 检测并安装 crontab
+    # 检测并安装 crontab (兼容多系统服务管理)
     if ! command -v crontab &> /dev/null; then
         echo -e "${YELLOW}[*] 未检测到 crontab (定时任务)，正在自动安装...${PLAIN}"
         if command -v apt-get >/dev/null 2>&1; then 
             apt-get update >/dev/null 2>&1 && apt-get install -y cron >/dev/null 2>&1
             systemctl enable --now cron >/dev/null 2>&1
         elif command -v apk >/dev/null 2>&1; then 
-            apk update >/dev/null 2>&1 && apk add dcron >/dev/null 2>&1
-            rc-update add dcron >/dev/null 2>&1; crond
+            apk update >/dev/null 2>&1 && apk add --no-cache cronie >/dev/null 2>&1
+            rc-update add crond default >/dev/null 2>&1
+            rc-service crond start >/dev/null 2>&1
         elif command -v yum >/dev/null 2>&1; then 
             yum install -y crontabs >/dev/null 2>&1
             systemctl enable --now crond >/dev/null 2>&1
@@ -50,7 +51,7 @@ install_dependencies() {
 # 2. 配置并生成 DDNS 核心脚本
 # ====================================================
 setup_ddns() {
-    echo -e "\n${CYAN}--- 配置 Cloudflare DDNS ---${PLAIN}"
+    echo -e "\n${CYAN}--- ☁️ 配置 Cloudflare DDNS ---${PLAIN}"
     
     install_dependencies
 
@@ -61,48 +62,62 @@ setup_ddns() {
 
     RECORD_TYPE=$([ "$ddns_type" == "4" ] && echo "A" || echo "AAAA")
     
-    # 确保脚本存放目录存在
     mkdir -p "$SCRIPT_DIR"
     DDNS_SCRIPT="${SCRIPT_DIR}/cf_ddns.sh"
-    # 写入内部执行脚本 (Heredoc)
-    cat << 'EOF' > "$DDNS_SCRIPT"
+    
+    # 【优化1】分段写入：首先写入带有变量值的头部 (避免使用危险的 sed 替换)
+    cat > "$DDNS_SCRIPT" << EOF
 #!/bin/bash
-DOMAIN="MY_DOMAIN"
-IP_TYPE="MY_IP_TYPE"
-CF_TOKEN="MY_CF_TOKEN"
-ZONE_ID="MY_ZONE_ID"
-RECORD_TYPE="MY_RECORD_TYPE"
-LOG_FILE="MY_LOG_FILE"
+DOMAIN="${ddns_domain}"
+IP_TYPE="${ddns_type}"
+CF_TOKEN="${cf_token}"
+ZONE_ID="${cf_zone_id}"
+RECORD_TYPE="${RECORD_TYPE}"
+LOG_FILE="${DDNS_LOG}"
+EOF
+
+    # 【优化1】分段写入：追加写入纯代码逻辑块 (单引号 EOF 锁定内部符号)
+    cat >> "$DDNS_SCRIPT" << 'EOF'
 
 write_log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
-    # 仅保留最近30条日志，防止磁盘占满
-    tail -n 30 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+    # 防爆处理：文件存在时，仅保留最近40条，防止日志无限膨胀
+    if [ -f "$LOG_FILE" ]; then
+        tail -n 40 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+    fi
 }
 
-# 1. 获取本地公网 IP
-CURRENT_IP=$([ "$IP_TYPE" == "4" ] && curl -s4 https://api.ipify.org || curl -s6 https://api64.ipify.org)
-[ -z "$CURRENT_IP" ] && { write_log "❌ 获取本地 IP 失败"; exit 1; }
+# 【优化2】IP 探针增强：双节点备用，防止单节点假死或被墙 (加入超时机制 -m 8)
+if [ "$IP_TYPE" == "4" ]; then
+    CURRENT_IP=$(curl -s4m8 https://api.ipify.org || curl -s4m8 https://ipv4.icanhazip.com)
+else
+    CURRENT_IP=$(curl -s6m8 https://api64.ipify.org || curl -s6m8 https://ipv6.icanhazip.com)
+fi
 
-# 2. 从 Cloudflare 获取当前解析记录
-RECORD_INFO=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=${RECORD_TYPE}&name=${DOMAIN}" \
-    -H "Authorization: Bearer ${CF_TOKEN}" \
-    -H "Content-Type: application/json")
-
-# 检查 API 是否请求成功
-API_SUCCESS=$(echo "$RECORD_INFO" | jq -r '.success // false')
-if [ "$API_SUCCESS" != "true" ]; then
-    write_log "❌ 请求 CF API 失败，请检查 Token 或 Zone ID"
+# 【优化3】防投毒/防HTML返回报错：严格正则校验提取结果是否为纯 IP 字符
+if [[ ! "$CURRENT_IP" =~ ^[0-9a-fA-F:\.]+$ ]]; then
+    write_log "❌ 致命：未能获取到有效的本地 IP (可能网络异常或被阻断)。"
     exit 1
 fi
 
-# 3. 统计记录数量，清理冗余记录
+# 2. 从 Cloudflare 获取当前解析记录 (增加超时 -m 10 防拥塞死锁)
+RECORD_INFO=$(curl -s -m 10 -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=${RECORD_TYPE}&name=${DOMAIN}" \
+    -H "Authorization: Bearer ${CF_TOKEN}" \
+    -H "Content-Type: application/json")
+
+API_SUCCESS=$(echo "$RECORD_INFO" | jq -r '.success // false')
+if [ "$API_SUCCESS" != "true" ]; then
+    write_log "❌ 请求 CF API 失败，请检查 Token 或 Zone ID 是否正确！"
+    exit 1
+fi
+
+# 3. 统计记录数量，清理冗余同名记录
 RECORD_COUNT=$(echo "$RECORD_INFO" | jq -r '.result | length')
 
 if [ "$RECORD_COUNT" -gt 1 ]; then
-    write_log "⚠️ 发现多条同名解析记录，正在自动清理冗余..."
+    write_log "⚠️ 发现 [${RECORD_COUNT}] 条同名记录，触发自动清理冗余..."
     for id in $(echo "$RECORD_INFO" | jq -r '.result[].id'); do
-        curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${id}" \
+        curl -s -m 10 -X DELETE "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${id}" \
             -H "Authorization: Bearer ${CF_TOKEN}" \
             -H "Content-Type: application/json" >/dev/null
     done
@@ -115,45 +130,40 @@ if [ "$RECORD_COUNT" -eq 1 ]; then
     OLD_IP=$(echo "$RECORD_INFO" | jq -r '.result[0].content')
 
     if [ "$CURRENT_IP" != "$OLD_IP" ]; then
-        RESULT=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${RECORD_ID}" \
+        RESULT=$(curl -s -m 10 -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${RECORD_ID}" \
             -H "Authorization: Bearer ${CF_TOKEN}" \
             -H "Content-Type: application/json" \
             --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
-        echo "$RESULT" | jq -e '.success' >/dev/null && write_log "✅ 更新 IP -> $CURRENT_IP" || write_log "❌ 更新失败"
+        echo "$RESULT" | jq -e '.success' >/dev/null && write_log "✅ 更新 IP ➔ $CURRENT_IP" || write_log "❌ 更新记录失败"
     else
-        write_log "ℹ️ IP 未改变 ($CURRENT_IP)"
+        write_log "ℹ️ IP 未发生改变 ($CURRENT_IP)"
     fi
 elif [ "$RECORD_COUNT" -eq 0 ]; then
-    RESULT=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+    RESULT=$(curl -s -m 10 -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
         -H "Authorization: Bearer ${CF_TOKEN}" \
         -H "Content-Type: application/json" \
         --data "{\"type\":\"${RECORD_TYPE}\",\"name\":\"${DOMAIN}\",\"content\":\"${CURRENT_IP}\",\"ttl\":60,\"proxied\":false}")
-    echo "$RESULT" | jq -e '.success' >/dev/null && write_log "✅ 新建解析 -> $CURRENT_IP" || write_log "❌ 新建失败"
+    echo "$RESULT" | jq -e '.success' >/dev/null && write_log "✅ 新建解析 ➔ $CURRENT_IP" || write_log "❌ 新建解析失败"
 fi
 EOF
 
-    # 替换变量占位符
-    sed -i "s|MY_DOMAIN|${ddns_domain}|g; s|MY_IP_TYPE|${ddns_type}|g; s|MY_CF_TOKEN|${cf_token}|g; s|MY_ZONE_ID|${cf_zone_id}|g; s|MY_RECORD_TYPE|${RECORD_TYPE}|g; s|MY_LOG_FILE|${DDNS_LOG}|g" "$DDNS_SCRIPT"
     chmod +x "$DDNS_SCRIPT"
-    
-    # 预先创建 Crontab 缓存目录（针对 Alpine 等精简系统的兼容处理）
     mkdir -p /root/.cache 2>/dev/null
 
-    echo -e "${YELLOW}[*] 尝试首次同步...${PLAIN}"
+    echo -e "${YELLOW}[*] 正在执行初次握手同步，请稍候...${PLAIN}"
     bash "$DDNS_SCRIPT"
     
-    # 检测运行结果并写入定时任务
     if tail -n 1 "$DDNS_LOG" | grep -qE "✅|ℹ️"; then
-        echo -e "${GREEN}[+] DDNS 配置成功！准备加入定时任务...${PLAIN}"
+        echo -e "${GREEN}[+] 首通测试完毕，配置成功！准备加入守护阵列...${PLAIN}"
         if command -v crontab &> /dev/null; then
-            # 移除旧的同名任务，添加新的任务 (每 5 分钟执行一次)
+            # 精确剔除旧任务，植入新任务
             (crontab -l 2>/dev/null | grep -v "$DDNS_SCRIPT"; echo "*/5 * * * * bash $DDNS_SCRIPT >/dev/null 2>&1") | crontab -
-            echo -e "${GREEN}[+] 定时任务已成功添加！(每5分钟同步一次)${PLAIN}"
+            echo -e "${GREEN}[+] 定时任务守护激活！(每5分钟巡检一次)${PLAIN}"
         else
-            echo -e "${RED}[-] 添加定时任务失败：crontab 环境异常。${PLAIN}"
+            echo -e "${RED}[-] 添加定时任务失败：crontab 环境异常，请手动配置。${PLAIN}"
         fi
     else
-        echo -e "${RED}[-] 测试失败，请检查参数配置或日志。${PLAIN}"
+        echo -e "${RED}[-] 失败：请核对 CF Token、Zone ID 等参数。相关输出请查阅日志。${PLAIN}"
     fi
     
     echo -e "\n按回车键返回..." && read -r
@@ -163,23 +173,21 @@ EOF
 # 3. 日志查看功能
 # ====================================================
 view_logs() {
-    echo -e "\n${CYAN}=== DDNS 日志 ===${PLAIN}"
+    echo -e "\n${CYAN}=== 📜 麦卖云 DDNS 同步日志 ===${PLAIN}"
     if [ -f "$DDNS_LOG" ]; then
         cat "$DDNS_LOG"
     else
-        echo -e "${RED}暂无记录。${PLAIN}"
+        echo -e "${RED}当前暂无同步记录。${PLAIN}"
     fi
-    echo -e "${CYAN}=================${PLAIN}"
+    echo -e "${CYAN}===================================${PLAIN}"
     echo -e "\n按回车键返回..." && read -r
 }
 
 # ====================================================
-# 4. 主程序入口
+# 4. 路由分发器
 # ====================================================
 if [ -n "$1" ]; then
-    # 允许通过参数直接调用函数，如 ./xmmddns.sh setup_ddns
     "$1"
 else
-    # 如果没有传参，可以直接展示一个简易菜单或提示
     echo "Usage: $0 {setup_ddns|view_logs}"
 fi
