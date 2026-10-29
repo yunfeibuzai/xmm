@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="4.9.1-Pro"
+sh_ver="4.9.2-Pro"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'; dim='\033[2m'
@@ -285,7 +285,8 @@ ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}21.${plain} 🔍 查看隧道日志 (排查超时)
   ${green}22.${plain} 🛠️ CF 隧道交互式管理 (改域名/ID/监控/启停)
   ${green}23.${plain} 🌐 启动极简网络中转面板 (xmmzz)
-  ${green}24.${plain} 彻底退出脚本
+  ${green}24.${plain} 🔀 部署 S5 落地智能路由 (xmm_24)
+  ${green}25.${plain} 彻底退出脚本
 --------------------------------------------
 EOF
 )
@@ -362,7 +363,7 @@ update_shell() {
 }
 
 process_run() {
-    local num; read -rp "请输入选择 [0-24]: " num < /dev/tty
+    local num; read -rp "请输入选择 [0-25]: " num < /dev/tty
     case "$num" in
     0) 
         shopt -s nullglob
@@ -448,8 +449,9 @@ process_run() {
     21) run_remote_module "cfjournal" "CF 隧道日志排查诊断" ;; 
     22) run_remote_module "cfmgr" "CF 隧道交互式管理控制台" ;;
     23) run_remote_module "xmmzz" "极简网络中转管理面板" ;;
-    24) exit 0 ;; 
-    *) echo -e "${red}未知序号，请输入 0-24 之间的数字${plain}" ;;
+    24) run_remote_module "all/xmm_24" "S5 落地智能路由 (Pro Max)" ;;
+    25) exit 0 ;; 
+    *) echo -e "${red}未知序号，请输入 0-25 之间的数字${plain}" ;;
     esac
 }
 
