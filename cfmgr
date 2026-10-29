@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =================================================================
 # 麦卖云 Cloudflare Argo Tunnel 交互式管理引擎 (全系统终极容错版)
-# 升级：修复 Protocol 精准识别、新增隧道级联删除、进程内存探针
+# 升级：精准识别 Protocol、智能去重隧道列表、进程状态强关联
 # =================================================================
 
 if [ -z "$BASH_VERSION" ]; then
@@ -32,47 +32,62 @@ get_tunnel_status() {
     STATUS_PID=""
     STATUS_DESC="${red}○ 已停止${plain}"
 
+    # 1. Systemd 状态检查
     if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
         local svc=""
         if systemctl list-unit-files "cf-${target}.service" &>/dev/null; then svc="cf-${target}"
         elif systemctl list-unit-files "cloudflared.service" &>/dev/null; then svc="cloudflared"
         fi
         if [[ -n "$svc" ]]; then
-            local pid; pid=$(systemctl show -p MainPID "$svc" 2>/dev/null | cut -d= -f2)
-            if check_pid_alive "$pid"; then
-                STATUS_RUNNING=1; STATUS_PID="$pid"; STATUS_DESC="${green}● 运行中 (PID: ${pid} | Systemd)${plain}"
+            if systemctl is-active "$svc" &>/dev/null; then
+                local pid; pid=$(systemctl show -p MainPID "$svc" 2>/dev/null | cut -d= -f2)
+                if [[ -n "$pid" && "$pid" -ne 0 ]]; then
+                    STATUS_RUNNING=1; STATUS_PID="$pid"; STATUS_DESC="${green}● 运行中 (PID: ${pid} | Systemd)${plain}"
+                else
+                    STATUS_RUNNING=1; STATUS_DESC="${green}● 运行中 (Systemd 托管)${plain}"
+                fi
                 return
             fi
         fi
     fi
 
+    # 2. OpenRC 状态检查
     if command -v rc-service &>/dev/null; then
         local rc_svc="cf-${target}"
         [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" ]] && rc_svc="cloudflared"
         if [[ -f "/etc/init.d/${rc_svc}" ]]; then
-            local pid=""
-            [[ -f "/run/${rc_svc}.pid" ]] && pid=$(cat "/run/${rc_svc}.pid" 2>/dev/null)
-            if check_pid_alive "$pid"; then
-                STATUS_RUNNING=1; STATUS_PID="$pid"; STATUS_DESC="${green}● 运行中 (PID: ${pid} | OpenRC)${plain}"
-                return
-            fi
             if rc-service "$rc_svc" status 2>/dev/null | grep -qiE 'started|running'; then
-                STATUS_RUNNING=1; STATUS_DESC="${green}● 运行中 (OpenRC 托管)${plain}"
+                local pid=""
+                [[ -f "/run/${rc_svc}.pid" ]] && pid=$(cat "/run/${rc_svc}.pid" 2>/dev/null)
+                if check_pid_alive "$pid"; then
+                    STATUS_RUNNING=1; STATUS_PID="$pid"; STATUS_DESC="${green}● 运行中 (PID: ${pid} | OpenRC)${plain}"
+                else
+                    STATUS_RUNNING=1; STATUS_DESC="${green}● 运行中 (OpenRC 托管)${plain}"
+                fi
                 return
             fi
         fi
     fi
 
+    # 3. 独立进程深度探针兜底
     local cfg_name; cfg_name=$(basename "$config" 2>/dev/null)
-    for p in /proc/[0-9]*; do
-        [[ -d "$p" ]] || continue
-        local pid="${p##*/}"
-        [[ "$pid" == "$$" ]] && continue
-        local cmdline; cmdline=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-        if [[ "$cmdline" =~ cloudflared ]] && ([[ -n "$target" && "$cmdline" =~ $target ]] || [[ -n "$cfg_name" && "$cmdline" =~ $cfg_name ]]); then
-            if check_pid_alive "$pid"; then
-                STATUS_RUNNING=1; STATUS_PID="$pid"; STATUS_DESC="${green}● 运行中 (PID: ${pid} | 独立进程)${plain}"
-                return
+    for p in /proc/[0-9]*/cmdline; do
+        [[ -f "$p" ]] || continue
+        local cmdline; cmdline=$(tr '\0' ' ' < "$p" 2>/dev/null)
+        if [[ "$cmdline" == *"cloudflared "* ]]; then
+            local is_match=0
+            if [[ "$target" == "Token_Managed_Tunnel" && "$cmdline" == *"--token "* ]]; then is_match=1
+            elif [[ -n "$target" && "$target" != "cloudflared" && "$cmdline" =~ tunnel[[:space:]]+run[[:space:]]+${target} ]]; then is_match=1
+            elif [[ -n "$cfg_name" && "$cmdline" == *"$cfg_name"* ]]; then is_match=1
+            elif [[ "$target" == "cloudflared" && "$cmdline" =~ tunnel[[:space:]]+run ]]; then is_match=1
+            fi
+            
+            if [[ $is_match -eq 1 ]]; then
+                local pid; pid=$(echo "$p" | awk -F'/' '{print $3}')
+                if check_pid_alive "$pid"; then
+                    STATUS_RUNNING=1; STATUS_PID="$pid"; STATUS_DESC="${green}● 运行中 (PID: ${pid} | 独立进程)${plain}"
+                    return
+                fi
             fi
         fi
     done
@@ -80,6 +95,8 @@ get_tunnel_status() {
 
 scan_all_local_tunnels() {
     local discovered=()
+    
+    # 扫描服务
     if command -v systemctl &>/dev/null; then
         for f in /etc/systemd/system/cf-*.service; do
             [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//;s/\.service$//')")
@@ -92,33 +109,39 @@ scan_all_local_tunnels() {
         done
         [[ -f "/etc/init.d/cloudflared" ]] && discovered+=("cloudflared")
     fi
+    
+    # 扫描配置文件
     for dir in "/etc/cloudflared" "/root/.cloudflared"; do
         if [[ -d "$dir" ]]; then
             for yml in "$dir"/*.yml "$dir"/*.yaml; do
                 [[ -f "$yml" ]] || continue
                 local base; base=$(basename "$yml" | sed 's/\.yml$//;s/\.yaml$//')
-                [[ "$base" == "cert" ]] && continue
+                [[ "$base" == "cert" || "$base" == "config" ]] && continue
                 discovered+=("$base")
             done
         fi
     done
     
-    for p in /proc/[0-9]*; do
-        [[ -d "$p" ]] || continue
-        local cmd; cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-        if [[ "$cmd" =~ cloudflared[[:space:]]+tunnel ]]; then
-            if [[ "$cmd" =~ --token ]]; then
+    # 扫描正在运行的进程 (提取具体隧道名，不盲目追加 process)
+    for p in /proc/[0-9]*/cmdline; do
+        [[ -f "$p" ]] || continue
+        local cmd; cmd=$(tr '\0' ' ' < "$p" 2>/dev/null)
+        if [[ "$cmd" == *"cloudflared "* ]]; then
+            if [[ "$cmd" == *"--token "* ]]; then
                 discovered+=("Token_Managed_Tunnel")
-            elif [[ "$cmd" =~ run[[:space:]]+([^[:space:]\-][^[:space:]]*) ]]; then
+            elif [[ "$cmd" =~ tunnel[[:space:]]+run[[:space:]]+([^[:space:]\-][^[:space:]]*) ]]; then
                 discovered+=("${BASH_REMATCH[1]}")
-            else
-                discovered+=("cloudflared_process")
+            elif [[ "$cmd" =~ --config[[:space:]=]+([^[:space:]]+) ]]; then
+                local cfg="${BASH_REMATCH[1]}"
+                local base; base=$(basename "$cfg" | sed 's/\.yml$//;s/\.yaml$//')
+                [[ "$base" != "config" && "$base" != "cert" ]] && discovered+=("$base")
             fi
         fi
     done
 
+    # 智能去重并输出
     if [[ ${#discovered[@]} -gt 0 ]]; then
-        echo "${discovered[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '
+        echo "${discovered[@]}" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' '
     fi
 }
 
@@ -127,7 +150,7 @@ check_if_token_tunnel() {
     for p in /proc/[0-9]*; do
         [[ -d "$p" ]] || continue
         local cmd; cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-        if [[ "$cmd" =~ cloudflared && "$cmd" =~ --token ]]; then return 0; fi
+        if [[ "$cmd" == *"cloudflared "* && "$cmd" == *"--token "* ]]; then return 0; fi
     done
     local svc_files=("/etc/systemd/system/cf-${target}.service" "/etc/systemd/system/cloudflared.service" "/etc/init.d/cf-${target}" "/etc/init.d/cloudflared")
     for sf in "${svc_files[@]}"; do
@@ -146,10 +169,10 @@ find_config_file() {
         fi
     done
     
-    for p in /proc/[0-9]*; do
-        [[ -d "$p" ]] || continue
-        local cmd; cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-        if [[ "$cmd" =~ cloudflared && "$cmd" =~ $target ]]; then
+    for p in /proc/[0-9]*/cmdline; do
+        [[ -f "$p" ]] || continue
+        local cmd; cmd=$(tr '\0' ' ' < "$p" 2>/dev/null)
+        if [[ "$cmd" == *"cloudflared "* && "$cmd" == *"$target"* ]]; then
             if [[ "$cmd" =~ --config[[:space:]]+([^[:space:]]+) || "$cmd" =~ --config=([^[:space:]]+) ]]; then
                 if [[ -f "${BASH_REMATCH[1]}" ]]; then echo "${BASH_REMATCH[1]}"; return; fi
             fi
@@ -190,13 +213,13 @@ inspect_tunnel_card() {
     fi
 
     local tunnel_id cred_file hostnames forward_urls current_protocol
-    tunnel_id=$(grep -iE '^[[:space:]]*tunnel[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    cred_file=$(grep -iE '^[[:space:]]*credentials-file[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    hostnames=$(grep -iE '^[[:space:]]*-[[:space:]]*hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    forward_urls=$(grep -iE '^[[:space:]]*service[[:space:]]*:' "$config" 2>/dev/null | grep -iv 'http_status' | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    tunnel_id=$(grep -iE '^[[:space:]]*tunnel[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
+    cred_file=$(grep -iE '^[[:space:]]*credentials-file[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
+    hostnames=$(grep -iE '^[[:space:]]*-[[:space:]]*hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
+    forward_urls=$(grep -iE '^[[:space:]]*service[[:space:]]*:' "$config" 2>/dev/null | grep -iv 'http_status' | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
     
-    # 精准识别 Protocol
-    current_protocol=$(grep -iE '^[[:space:]]*protocol[[:space:]]*:' "$config" 2>/dev/null | sed -e 's/^[[:space:]]*protocol[[:space:]]*:[[:space:]]*//i' | tr -d '"' | tr -d "'" | tr -d '\r' | tr 'A-Z' 'a-z')
+    # 【修复重点】精准解析 Protocol (过滤空格/引号并强转小写)
+    current_protocol=$(grep -iE '^[[:space:]]*protocol[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t' | tr 'A-Z' 'a-z')
     if [[ -z "$current_protocol" ]]; then
         current_protocol="${yellow}quic (未配置, 默认值)${plain}"
     else
@@ -235,7 +258,7 @@ backup_config_file() {
 
 modify_hostname() {
     local config="$1"
-    local current_hosts; current_hosts=$(grep -iE '^[[:space:]]*-[[:space:]]*hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local current_hosts; current_hosts=$(grep -iE '^[[:space:]]*-[[:space:]]*hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
     if [[ -z "$current_hosts" ]]; then echo -e "${red}错误：配置文件中未找到 hostname 节点。${plain}"; return; fi
     local old_host=""; local count; count=$(echo "$current_hosts" | grep -c .)
     if [[ $count -eq 1 ]]; then
@@ -262,15 +285,16 @@ modify_hostname() {
 
 modify_tunnel_id() {
     local config="$1"
-    local old_id; old_id=$(grep -iE '^[[:space:]]*tunnel[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d '"' | tr -d "'" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    local old_id; old_id=$(grep -iE '^[[:space:]]*tunnel[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
     echo -e "\n当前 Tunnel ID (UUID) 为: ${yellow}${old_id:-未定义}${plain}"
     read -rp "请输入全新的 Tunnel UUID: " new_id; new_id=$(echo "$new_id" | xargs)
     if [[ -z "$new_id" ]]; then echo -e "${red}Tunnel ID 不能为空！${plain}"; return; fi
     if [[ "$new_id" == "$old_id" ]]; then echo -e "${yellow}新旧 ID 相同，跳过修改。${plain}"; return; fi
 
     backup_config_file "$config"
+    # 使用安全的 sed 匹配替换，避免影响其他字段
     if grep -qiE '^[[:space:]]*tunnel[[:space:]]*:' "$config"; then
-        sed -i "s|^[[:space:]]*tunnel[[:space:]]*:.*|tunnel: ${new_id}|" "$config"
+        sed -i -e 's/^[[:space:]]*[tT][uU][nN][nN][eE][lL][[:space:]]*:.*/tunnel: '"$new_id"'/' "$config"
     else
         sed -i "1i tunnel: ${new_id}" "$config"
     fi
@@ -287,27 +311,32 @@ modify_tunnel_id() {
 
 modify_protocol() {
     local config="$1"
-    local raw_protocol; raw_protocol=$(grep -iE '^[[:space:]]*protocol[[:space:]]*:' "$config" 2>/dev/null | sed -e 's/^[[:space:]]*protocol[[:space:]]*:[[:space:]]*//i' | tr -d '"' | tr -d "'" | tr -d '\r' | tr 'A-Z' 'a-z')
+    
+    # 提取当前协议值
+    local raw_protocol; raw_protocol=$(grep -iE '^[[:space:]]*protocol[[:space:]]*:' "$config" 2>/dev/null | head -n 1 | sed 's/^[^:]*://' | tr -d ' "\047\r\t' | tr 'A-Z' 'a-z')
+    
+    local current_protocol_val="quic"
+    [[ -n "$raw_protocol" ]] && current_protocol_val="$raw_protocol"
     
     local target_protocol="http2"
-    if [[ "$raw_protocol" == "http2" ]]; then
-        target_protocol="quic"
-    fi
+    [[ "$current_protocol_val" == "http2" ]] && target_protocol="quic"
 
     local display_proto="${raw_protocol}"
     [[ -z "$raw_protocol" ]] && display_proto="quic (默认未配置)"
 
     echo -e "\n当前传输协议为: ${yellow}${display_proto}${plain}"
-    echo -e " ${cyan}提示：防御运营商 UDP 阻断或 QoS，推荐切换至 http2。${plain}"
-    read -rp "是否将协议切换或写入为 [${target_protocol}]？[Y/n]: " switch_ans
+    echo -e " ${cyan}提示：防御运营商 UDP 阻断或 QoS 降速，推荐切换至 http2。恢复性能可切回 quic。${plain}"
+    read -rp "是否将协议切换并写入为 [${target_protocol}]？[Y/n]: " switch_ans
     
     if [[ "${switch_ans:-Y}" =~ ^[Yy]$ ]]; then
         backup_config_file "$config"
-        if grep -qiE '^[[:space:]]*protocol[[:space:]]*:' "$config"; then
-            sed -i "s|^[[:space:]]*protocol[[:space:]]*:.*|protocol: ${target_protocol}|gi" "$config"
-        else
-            echo -e "\nprotocol: ${target_protocol}" >> "$config"
-        fi
+        
+        # 【修复重点】无视大小写，直接安全删除旧的 protocol 配置行
+        sed -i -e '/^[[:space:]]*[pP][rR][oO][tT][oO][cC][oO][lL][[:space:]]*:/d' "$config"
+        
+        # 在第一行强行插入新协议，防止插在尾部导致 YAML 层级被 ingress 解析错乱
+        sed -i "1i protocol: ${target_protocol}" "$config"
+        
         echo -e "\n${green}✔ 协议已成功切换并写入为: ${target_protocol}${plain}"
     else
         echo -e "\n${yellow}已取消，保持当前协议。${plain}"
@@ -341,11 +370,11 @@ manage_service() {
         fi
     fi
 
-    # 结果验证与裸进程兜底 (核心修复)
     sleep 1
     if [[ "$action" == "stop" ]]; then
-        # 兜底强制 Kill (防止服务卸载后进程还在)
+        # 兜底强制 Kill
         local pids=$(pgrep -f "cloudflared.*${target}")
+        [[ -z "$pids" && "$target" == "cloudflared" ]] && pids=$(pgrep -x "cloudflared")
         if [[ -n "$pids" ]]; then
             kill $pids 2>/dev/null
         fi
@@ -371,10 +400,8 @@ delete_tunnel() {
     read -rp "是否确认停止并卸载该隧道服务？ [y/N]: " confirm_del
     [[ ! "$confirm_del" =~ ^[Yy]$ ]] && echo -e "${yellow}已取消删除操作。${plain}" && return 1
 
-    # 1. 停止服务及进程
     manage_service "$target" "stop"
 
-    # 2. 移除服务注册
     local removed_svc=0
     if command -v systemctl &>/dev/null; then
         systemctl disable "$svc_name" 2>/dev/null
@@ -394,7 +421,6 @@ delete_tunnel() {
 
     [[ $removed_svc -eq 1 ]] && echo -e "${green}✔ 系统服务文件已卸载。${plain}"
 
-    # 3. 处理配置文件及凭证
     if [[ -n "$config" && -f "$config" ]]; then
         read -rp "是否一并删除关联的 YAML 配置文件及 JSON 密钥凭证？[y/N]: " del_cfg
         if [[ "$del_cfg" =~ ^[Yy]$ ]]; then
@@ -413,7 +439,6 @@ delete_tunnel() {
     echo -e "\n${green}🎉 隧道实例 [${target}] 清理完成！按回车键重新加载面板...${plain}"
     read -r
     
-    # 强制重启脚本重载状态
     exec bash "$0" "$@"
 }
 
@@ -487,7 +512,7 @@ main() {
         echo -e "  ${green}5.${plain} 重启隧道服务 (Reload / Restart)"
         if [[ $STATUS_RUNNING -eq 1 ]]; then echo -e "  ${green}6.${plain} ${yellow}停止隧道服务 (Stop)${plain}"
         else echo -e "  ${green}6.${plain} ${green}启动隧道服务 (Start)${plain}"; fi
-        echo -e "  ${green}7.${plain} ${red}删除当前隧道 (卸载服务/配置文件)${plain}"
+        echo -e "  ${green}7.${plain} ${red}彻底删除隧道 (卸载服务/配置文件)${plain}"
         echo -e "  ${green}0.${plain} 退出程序"
         echo ""
         read -rp "请输入菜单选项 [0-7]: " opt
