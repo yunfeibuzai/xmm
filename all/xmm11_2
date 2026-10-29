@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 麦卖云 V2bX 全新配置生成引擎 (xmm11_2)
-sh_ver="3.6.0-Ultimate"
+sh_ver="3.7.0-Ultimate"
 
 # 终端色彩与样式
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
@@ -13,11 +13,28 @@ dim='\033[2m'
 mkdir -p /etc/V2bX /etc/V2bX/nodes /var/log/V2bX
 saved_file="/etc/V2bX/.saved_creds"
 
+# ════════════════════ 依赖组件安全补齐 ════════════════════
+ensure_tools() {
+    if ! command -v jq &>/dev/null || ! command -v openssl &>/dev/null; then
+        echo -e " ${yellow}正在自动补齐核心运行组件 (jq / openssl)...${plain}"
+        if command -v apt-get &>/dev/null; then
+            apt-get update -y -q >/dev/null 2>&1
+            apt-get install -y --no-install-recommends jq openssl curl >/dev/null 2>&1
+        elif command -v yum &>/dev/null; then
+            yum install -y jq openssl curl >/dev/null 2>&1
+        elif command -v apk &>/dev/null; then
+            apk update >/dev/null 2>&1
+            apk add --no-cache jq openssl curl bash coreutils >/dev/null 2>&1
+        fi
+    fi
+}
+ensure_tools
+
 # ════════════════════ UI 组件库 ════════════════════
 ui_line() { echo -e "${dim}────────────────────────────────────────────────────────${plain}"; }
 
 detect_run_mode() {
-    if compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
+    if [[ -f /etc/V2bX/nodes/.multi_enabled ]] || compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
        compgen -G "/etc/init.d/V2bX.*" >/dev/null 2>&1; then
         echo -e "${magenta}多进程隔离模式${plain}"
     elif [[ -f /etc/V2bX/config.json ]]; then
@@ -74,6 +91,9 @@ multi_split_configs() {
         }' /etc/V2bX/config.json > "$out_file"
         echo -e "   ├─ 已生成独立配置: ${green}${out_file}${plain} ${dim}(Core: ${ncore}, NodeID: ${nid})${plain}"
     done
+    
+    # 强制打上多进程标记以兼容主控脚本识别
+    touch /etc/V2bX/nodes/.multi_enabled
     return 0
 }
 
@@ -158,12 +178,15 @@ pidfile="/run/V2bX.${inst}.pid"
 output_log="/var/log/V2bX/out_${inst}.log"
 error_log="/var/log/V2bX/err_${inst}.log"
 command_env="XRAY_DNS_PATH=/etc/V2bX/dns.json SING_DNS_PATH=/etc/V2bX/sing_dns.json"
+
+depend() {
+    need net
+}
 EOF
             [[ -n "$mem_env" ]] && echo "$mem_env" >> "$rc_file"
-            echo -e "depend() {\n    need net\n}" >> "$rc_file"
             chmod +x "$rc_file"
             rc-update add "V2bX.${inst}" default >/dev/null 2>&1
-            rc-service "V2bX.${inst}" restart
+            rc-service "V2bX.${inst}" restart 2>/dev/null
         done
     fi
 }
@@ -171,12 +194,12 @@ EOF
 restart_v2bx_service() {
     echo ""
     ui_section "正在应用配置并重载服务"
-    if compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
-       compgen -G "/etc/init.d/V2bX.*" >/dev/null 2>&1; then
+    if [[ -f /etc/V2bX/nodes/.multi_enabled ]] || compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || compgen -G "/etc/init.d/V2bX.*" >/dev/null 2>&1; then
         echo -e " ${cyan}ℹ 检测到当前处于【多进程隔离模式】，正在自动重新拆分并重启所有节点实例...${plain}"
         multi_migrate_instances "quiet"
         return
     fi
+    
     if command -v systemctl &>/dev/null; then
         if systemctl restart V2bX 2>/dev/null; then
             echo -e " ${green}✔ Systemd: V2bX 服务已成功重启生效！${plain}"
@@ -268,6 +291,9 @@ load_or_ask_creds() {
             read -r api_key < /dev/tty
         done
     fi
+    
+    # 强制安全转义双引号，防止后续 JSON 生成断裂
+    api_key=$(echo "$api_key" | sed 's/"/\\"/g')
 
     echo -ne " ${bold}▸ 是否固定保存此面板信息以便日后调用？${plain} [Y/n]: "
     read -r save_yn < /dev/tty
@@ -323,7 +349,6 @@ collect_single_node() {
         done
         case "$protocol_num" in 1) node_type="vless" ;; 2) node_type="vmess" ;; 3) node_type="trojan" ;; 4) node_type="shadowsocks" ;; esac
     elif [[ "$core_type" == "sing" ]]; then
-        # 🌟 修复：补齐所有 Sing-box 核心协议支持，并加入 Naive
         echo -e "\n  ${cyan}[1]${plain} Shadowsocks  ${cyan}[2]${plain} Trojan  ${cyan}[3]${plain} Tuic  ${cyan}[4]${plain} AnyTLS  ${cyan}[5]${plain} Hysteria  ${cyan}[6]${plain} Vless  ${cyan}[7]${plain} Vmess  ${cyan}[8]${plain} Naive"
         while [[ ! "$protocol_num" =~ ^[1-8]$ ]]; do
             echo -ne " ${bold}▸ 请选择协议${plain} [1-8, 默认 1]: "; read -r protocol_num < /dev/tty; [[ -z "$protocol_num" ]] && protocol_num=1
@@ -422,16 +447,15 @@ main_create_all() {
     local cores_block; cores_block=$(IFS=,; echo "${cores_array[*]}")
     local raw_json='{ "Log": { "Level": "error", "Output": "" }, "Cores": [ '"${cores_block}"' ], "Nodes": [ '"${nodes_block}"' ] }'
 
-    if command -v jq &>/dev/null; then
-        if echo "$raw_json" | jq . > /etc/V2bX/config.json 2>/dev/null; then
-            echo -e "\n ${green}✔ 成功生成包含 ${node_count} 个节点的标准化配置 (/etc/V2bX/config.json)${plain}"
-        else
-            echo "$raw_json" > /etc/V2bX/config.json
-            echo -e "\n ${yellow}⚠ 已写入原始配置 (jq 校验未通过)${plain}"
-        fi
+    # 安全的 JSON 校验与原子替换，防爆
+    local tmp_json="/etc/V2bX/config.json.tmp"
+    if echo "$raw_json" | jq . > "$tmp_json" 2>/dev/null; then
+        mv -f "$tmp_json" /etc/V2bX/config.json
+        echo -e "\n ${green}✔ 成功生成包含 ${node_count} 个节点的标准化配置 (/etc/V2bX/config.json)${plain}"
     else
         echo "$raw_json" > /etc/V2bX/config.json
-        echo -e "\n ${green}✔ 配置已写入 /etc/V2bX/config.json${plain}"
+        echo -e "\n ${yellow}⚠ 已写入原始配置 (当前环境可能缺少 jq 或者语法校验未通过)${plain}"
+        rm -f "$tmp_json"
     fi
     restart_v2bx_service
 }
