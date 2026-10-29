@@ -1,72 +1,122 @@
 #!/bin/bash
 # ====================================================
-# 项目名称: 极简网络中转管理面板 (主控模块)
-# 项目版本: v2.1.0 (模块化重构优化版)
+# 项目名称: 极简网络中转管理面板 (主控模块 终极优化版)
+# 项目版本: v2.2.0 (全网镜像防阻断 + Alpine自适应版)
 # ====================================================
 
-GITHUB_REPO_URL="https://raw.githubusercontent.com/yunfeibuzai/xmm/main"
+# 1. 自动修补 Alpine 执行环境 (拦截 sh 执行或缺失 bash/curl 的情境)
+if [ -z "$BASH_VERSION" ]; then
+    if command -v apk >/dev/null 2>&1; then
+        apk update >/dev/null 2>&1 && apk add --no-cache bash curl >/dev/null 2>&1
+        exec bash "$0" "$@"
+    else
+        echo "错误：请使用 bash 执行脚本！"
+        exit 1
+    fi
+fi
+
+GITHUB_BASE="https://raw.githubusercontent.com/yunfeibuzai/xmm/main"
 SCRIPT_DIR="/root/relay_scripts"
 
 # 定义主面板和子模块的文件名
-MAIN_PANEL_NAME="xmmzz" # 请确保这与你 GitHub 仓库中的主控脚本名字一致
+MAIN_PANEL_NAME="xmmzz"
 RELAY_MODULE="${SCRIPT_DIR}/xmmrelay"
 DDNS_MODULE="${SCRIPT_DIR}/xmmddns"
 
-GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; PLAIN='\033[0m'
+GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; PLAIN='\033[0m'; MAGENTA='\033[0;35m'
 
+# ==========================================
+# 核心网络引擎：智能多镜像拉取 (防墙防断联)
+# ==========================================
+smart_download() {
+    local target_file="$1"
+    local save_path="$2"
+    
+    local urls=(
+        "https://ghp.ci/${GITHUB_BASE}/${target_file}"
+        "https://mirror.ghproxy.net/${GITHUB_BASE}/${target_file}"
+        "${GITHUB_BASE}/${target_file}"
+    )
+
+    for url in "${urls[@]}"; do
+        if curl -sSfL --connect-timeout 8 -m 15 "$url" -o "$save_path"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ==========================================
 # 0. 环境与模块初始化
+# ==========================================
 init_env() {
     ulimit -n 65535 2>/dev/null
     mkdir -p "$SCRIPT_DIR"
 
-    # 面板命令注入
-    if [ ! -f "/usr/local/bin/xmm" ]; then
-        cp "$0" /usr/local/bin/xmm 2>/dev/null || cp "$0" /usr/bin/xmm
-        chmod +x /usr/local/bin/xmm 2>/dev/null || chmod +x /usr/bin/xmm
-        echo -e "${GREEN}[+] 快捷控制台面板已注入！输入快捷键：${YELLOW}xmm${GREEN} 即可唤醒。${PLAIN}"
-        sleep 1.5
+    # 面板命令注入 (防死循环修复)
+    local target_bin="/usr/local/bin/xmm"
+    mkdir -p /usr/local/bin
+    if [[ -f "$0" ]]; then
+        local current_abs_path
+        current_abs_path=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
+        if [[ "$current_abs_path" != "$target_bin" && "$0" != "xmm" ]]; then
+            cp -f "$current_abs_path" "$target_bin" 2>/dev/null || cp -f "$current_abs_path" /usr/bin/xmm 2>/dev/null
+            chmod +x "$target_bin" 2>/dev/null || chmod +x /usr/bin/xmm 2>/dev/null
+            echo -e "${GREEN}[+] 快捷控制台面板已注入！以后随地输入 ${YELLOW}xmm${GREEN} 即可唤醒。${PLAIN}"
+            sleep 1.5
+        fi
     fi
 
-    # 动态拉取子模块
+    # 动态拉取子模块 (应用智能下载引擎)
     if [ ! -f "$RELAY_MODULE" ]; then
-        curl -sSfL --retry 3 "${GITHUB_REPO_URL}/xmmrelay" -o "$RELAY_MODULE" && chmod +x "$RELAY_MODULE"
+        echo -e "${CYAN}[*] 正在拉取中转引擎模块...${PLAIN}"
+        smart_download "xmmrelay" "$RELAY_MODULE" && chmod +x "$RELAY_MODULE"
     fi
     if [ ! -f "$DDNS_MODULE" ]; then
-        curl -sSfL --retry 3 "${GITHUB_REPO_URL}/xmmddns" -o "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
+        echo -e "${CYAN}[*] 正在拉取 DDNS 引擎模块...${PLAIN}"
+        smart_download "xmmddns" "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
     fi
 }
 
 # 模块调用包装器
 call_relay() {
-    [ -f "$RELAY_MODULE" ] && bash "$RELAY_MODULE" "$1" || echo -e "${RED}[-] 中转模块缺失，请检查网络或执行更新！${PLAIN}"
+    [ -f "$RELAY_MODULE" ] && bash "$RELAY_MODULE" "$1" || echo -e "${RED}[-] 中转模块缺失，请检查网络或执行面板更新 [选项7]！${PLAIN}"
 }
 
 call_ddns() {
-    [ -f "$DDNS_MODULE" ] && bash "$DDNS_MODULE" "$1" || echo -e "${RED}[-] DDNS模块缺失，请检查网络或执行更新！${PLAIN}"
+    [ -f "$DDNS_MODULE" ] && bash "$DDNS_MODULE" "$1" || echo -e "${RED}[-] DDNS 模块缺失，请检查网络或执行面板更新 [选项7]！${PLAIN}"
 }
 
-# 一键更新功能
+# ==========================================
+# 一键全局更新功能
+# ==========================================
 update_all_scripts() {
-    echo -e "\n${CYAN}[*] 正在从 GitHub 同步所有模块代码...${PLAIN}"
+    echo -e "\n${CYAN}[*] 正在通过智能镜像网络同步所有模块代码...${PLAIN}"
     
-    # 增加 --retry 参数增强下载稳定性
-    curl -sSfL --retry 3 "${GITHUB_REPO_URL}/${MAIN_PANEL_NAME}" -o /tmp/${MAIN_PANEL_NAME}.tmp
-    curl -sSfL --retry 3 "${GITHUB_REPO_URL}/xmmrelay" -o /tmp/xmmrelay.tmp
-    curl -sSfL --retry 3 "${GITHUB_REPO_URL}/xmmddns" -o /tmp/xmmddns.tmp
+    local dl_main=false; local dl_relay=false; local dl_ddns=false
 
-    # 效验下载是否成功
-    if grep -q "#!/bin/bash" /tmp/${MAIN_PANEL_NAME}.tmp; then
-        mv /tmp/${MAIN_PANEL_NAME}.tmp /usr/local/bin/xmm && chmod +x /usr/local/bin/xmm
-        mv /tmp/xmmrelay.tmp "$RELAY_MODULE" && chmod +x "$RELAY_MODULE"
+    smart_download "${MAIN_PANEL_NAME}" "/tmp/${MAIN_PANEL_NAME}.tmp" && dl_main=true
+    smart_download "xmmrelay" "/tmp/xmmrelay.tmp" && dl_relay=true
+    smart_download "xmmddns" "/tmp/xmmddns.tmp" && dl_ddns=true
+
+    # 效验下载完整性
+    if [ "$dl_main" = true ] && grep -q "#!/bin/bash" "/tmp/${MAIN_PANEL_NAME}.tmp"; then
+        mv "/tmp/${MAIN_PANEL_NAME}.tmp" "/usr/local/bin/xmm" && chmod +x "/usr/local/bin/xmm"
         
-        # 兼容处理 DDNS 模块（防止因未创建该文件而报错）
-        [ -f /tmp/xmmddns.tmp ] && grep -q "#!/bin/bash" /tmp/xmmddns.tmp && mv /tmp/xmmddns.tmp "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
+        if [ "$dl_relay" = true ] && grep -q "#!/bin/bash" "/tmp/xmmrelay.tmp"; then
+            mv "/tmp/xmmrelay.tmp" "$RELAY_MODULE" && chmod +x "$RELAY_MODULE"
+        fi
+        
+        if [ "$dl_ddns" = true ] && grep -q "#!/bin/bash" "/tmp/xmmddns.tmp"; then
+            mv "/tmp/xmmddns.tmp" "$DDNS_MODULE" && chmod +x "$DDNS_MODULE"
+        fi
         
         rm -f /tmp/*.tmp
-        echo -e "${GREEN}[+] 所有模块升级成功！正在重新载入...${PLAIN}"
-        sleep 1; exec bash /usr/local/bin/xmm
+        echo -e "${GREEN}[+] 核心面板及所有子模块升级成功！正在重新载入...${PLAIN}"
+        sleep 1
+        exec bash /usr/local/bin/xmm
     else
-        echo -e "${RED}[-] 下载失败，可能遭遇网络波动，请稍后再试。${PLAIN}"
+        echo -e "${RED}[-] 下载完整性校验失败，可能遭遇极度恶劣的网络波动，请稍后再试。${PLAIN}"
         rm -f /tmp/${MAIN_PANEL_NAME}.tmp /tmp/xmmrelay.tmp /tmp/xmmddns.tmp
     fi
     echo -e "\n按回车键返回..." && read -r
@@ -79,20 +129,20 @@ init_env
 
 while true; do
     clear
-    echo "======================================================"
-    echo -e "    ${GREEN}极简网络中转管理面板${PLAIN} ${CYAN}(模块化核心) v2.1.0${PLAIN}"
-    echo "======================================================"
-    echo -e "  ${GREEN}1.${PLAIN} 安装中转依赖 (Realm/Socat)"
-    echo -e "  ${GREEN}2.${PLAIN} 追加新中转配置"
-    echo -e "  ${GREEN}3.${PLAIN} 重置并全新配置 (清理旧规则)"
-    echo -e "  ${GREEN}4.${PLAIN} 手动修改中转配置 (热重启)"
-    echo "------------------------------------------------------"
-    echo -e "  ${GREEN}5.${PLAIN} 配置 Cloudflare DDNS 同步"
-    echo -e "  ${GREEN}6.${PLAIN} 查看 DDNS 运行日志"
-    echo "------------------------------------------------------"
-    echo -e "  ${GREEN}7.${PLAIN} 一键更新面板与所有模块"
-    echo -e "  ${GREEN}0.${PLAIN} 退出"
-    echo "======================================================"
+    echo -e "${CYAN}======================================================${PLAIN}"
+    echo -e "      ${GREEN}极简网络中转管理面板${PLAIN} ${MAGENTA}(模块化核心) v2.2.0${PLAIN}"
+    echo -e "${CYAN}======================================================${PLAIN}"
+    echo -e "  ${GREEN}1.${PLAIN} 📦 安装中转依赖 (Realm/Socat)"
+    echo -e "  ${GREEN}2.${PLAIN} ➕ 追加新中转配置"
+    echo -e "  ${GREEN}3.${PLAIN} 🔄 重置并全新配置 (清理旧规则)"
+    echo -e "  ${GREEN}4.${PLAIN} 📝 手动修改中转配置 (热重启)"
+    echo -e "${CYAN}------------------------------------------------------${PLAIN}"
+    echo -e "  ${GREEN}5.${PLAIN} ☁️ 配置 Cloudflare DDNS 同步"
+    echo -e "  ${GREEN}6.${PLAIN} 🔍 查看 DDNS 运行日志"
+    echo -e "${CYAN}------------------------------------------------------${PLAIN}"
+    echo -e "  ${GREEN}7.${PLAIN} 🚀 一键更新面板与所有模块"
+    echo -e "  ${GREEN}0.${PLAIN} 彻底退出面板"
+    echo -e "${CYAN}======================================================${PLAIN}"
     read -p "请输入选项 [0-7]: " choice
 
     case "$choice" in
@@ -104,6 +154,6 @@ while true; do
         6) call_ddns view_logs ;;
         7) update_all_scripts ;;
         0) echo -e "${GREEN}[+] 退出面板！${PLAIN}"; exit 0 ;;
-        *) echo -e "${RED}[-] 输入错误。${PLAIN}"; sleep 1 ;;
+        *) echo -e "${RED}[-] 无效的输入序号。${PLAIN}"; sleep 1 ;;
     esac
 done
