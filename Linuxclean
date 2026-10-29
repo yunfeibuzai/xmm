@@ -1,68 +1,122 @@
 #!/bin/bash
+# ====================================================
+# 麦卖云 Linux 系统级物理内存与 Swap 深度净化引擎
+# 优化版：精准读取、碎片整理、防负数展示、防 OOM 坠毁
+# ====================================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;36m'
+CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
 # 权限检查
 if [ "$EUID" -ne 0 ]; then
-  echo -e "${RED}错误：请以 root 用户运行此脚本！${plain}"
+  echo -e "${RED}错误：请以 root 用户运行此脚本！${PLAIN}"
   exit 1
 fi
 
+# 核心数据抓取函数 (直读内核文件，100% 兼容 Alpine/Debian/CentOS)
+get_mem_stats() {
+    local mem_total mem_free mem_buff mem_cache swap_total swap_free mem_available
+    
+    mem_total=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+    mem_free=$(awk '/MemFree/ {print int($2/1024)}' /proc/meminfo)
+    mem_buff=$(awk '/Buffers/ {print int($2/1024)}' /proc/meminfo)
+    mem_cache=$(awk '/^Cached/ {print int($2/1024)}' /proc/meminfo)
+    swap_total=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo)
+    swap_free=$(awk '/SwapFree/ {print int($2/1024)}' /proc/meminfo)
+    mem_available=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+
+    # 兼容远古老旧内核无 MemAvailable 字段的情况
+    if [ -z "$mem_available" ] || [ "$mem_available" -eq 0 ]; then
+        mem_available=$((mem_free + mem_buff + mem_cache))
+    fi
+
+    CACHE_VAL=$((mem_buff + mem_cache))
+    MEM_VAL=$((mem_total - mem_available))
+    
+    # 兼容未开启 Swap 的机器
+    if [ -n "$swap_total" ] && [ "$swap_total" -gt 0 ]; then
+        SWAP_VAL=$((swap_total - swap_free))
+    else
+        SWAP_VAL=0
+    fi
+    
+    AVAILABLE_VAL=$mem_available
+}
+
 clear
-echo -e "${GREEN}=================================================${PLAIN}"
-echo -e "${GREEN}      Linux 系统级物理内存与 Swap 深度净化引擎    ${PLAIN}"
-echo -e "${GREEN}=================================================${PLAIN}"
+echo -e "${CYAN}=================================================${PLAIN}"
+echo -e "${CYAN}   🚀 Linux 物理内存与 Swap 深度净化引擎 (进阶版) ${PLAIN}"
+echo -e "${CYAN}=================================================${PLAIN}"
 
-# 1. 净化前的数据抓取
-MEM_BEFORE=$(free -m | awk '/^Mem:/{print $3}')
-CACHE_BEFORE=$(free -m | awk '/^Mem:/{print $6}')
-SWAP_BEFORE=$(free -m | awk '/^Swap:/{print $3}')
+# 1. 抓取净化前的快照
+get_mem_stats
+MEM_BEFORE=$MEM_VAL
+CACHE_BEFORE=$CACHE_VAL
+SWAP_BEFORE=$SWAP_VAL
+AVAILABLE_BEFORE=$AVAILABLE_VAL
 
-echo -e "${BLUE}[1/4] 当前系统资源快照：${PLAIN}"
+echo -e "${GREEN}[1/4] 当前系统资源快照：${PLAIN}"
 echo -e "      -> 物理内存已用: ${YELLOW}${MEM_BEFORE} MB${PLAIN}"
 echo -e "      -> 系统页面缓存: ${YELLOW}${CACHE_BEFORE} MB${PLAIN}"
 echo -e "      -> Swap 交换已用: ${YELLOW}${SWAP_BEFORE} MB${PLAIN}"
-echo "-------------------------------------------------"
+echo -e "${CYAN}-------------------------------------------------${PLAIN}"
 
-# 2. 物理内存 Cache 净化
-echo -e "${YELLOW}[2/4] 正在将内存脏数据同步到磁盘并释页面缓存...${PLAIN}"
-# 先同步，防止数据丢失；再释放 pagecache、dentries 和 inodes
-sync && sleep 1
+# 2. 物理内存与缓存清理
+echo -e "${YELLOW}[2/4] 正在强制落盘并释放系统页面缓存...${PLAIN}"
+# 三重 sync 确保脏页绝对写回磁盘，防止数据损坏
+sync; sync; sync; sleep 1
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-echo -e "${GREEN}      物理内存 Buff/Cache 净化完毕。${PLAIN}"
+echo -e "${GREEN}      ✔ Buff/Cache 缓存垃圾清理完毕。${PLAIN}"
 
-# 3. 智能 Swap 净化 (核心优化点：不重复，且极具实用价值)
-echo -e "${YELLOW}[3/4] 正在检测并优化 Swap 交换分区...${PLAIN}"
-if [ -n "$SWAP_BEFORE" ] && [ "$SWAP_BEFORE" -gt 0 ]; then
-    MEM_AVAILABLE=$(free -m | awk '/^Mem:/{print $7}')
-    # 安全锁：只有当剩余物理内存大于 Swap 已用内存时，才触发回刷，防止 OOM
-    if [ "$MEM_AVAILABLE" -gt "$SWAP_BEFORE" ]; then
-        echo -e "${BLUE}      检测到 Swap 存在积压数据，正在安全回刷至物理内存...${PLAIN}"
-        swapoff -a && swapon -a
-        echo -e "${GREEN}      Swap 垃圾碎片深度净化完毕。${PLAIN}"
-    else
-        echo -e "${RED}      剩余物理内存不足，跳过 Swap 回刷以确保系统稳定。${PLAIN}"
-    fi
+# 3. 内存碎片整理 (小鸡防爆核心技)
+echo -e "${YELLOW}[3/4] 正在触发底层内核内存碎片整理...${PLAIN}"
+if [ -f /proc/sys/vm/compact_memory ]; then
+    echo 1 > /proc/sys/vm/compact_memory 2>/dev/null
+    echo -e "${GREEN}      ✔ 物理内存碎片重组完毕，大块内存分配能力恢复。${PLAIN}"
 else
-    echo -e "${GREEN}      Swap 分区很干净，无需额外回刷。${PLAIN}"
+    echo -e "${YELLOW}      ⚠ 当前内核不支持手动内存碎片整理，已跳过。${PLAIN}"
 fi
 
-# 4. 净化后的效果看板
-MEM_AFTER=$(free -m | awk '/^Mem:/{print $3}')
-CACHE_AFTER=$(free -m | awk '/^Mem:/{print $6}')
-SWAP_AFTER=$(free -m | awk '/^Swap:/{print $3}')
+# 4. 智能 Swap 净化 (安全锁)
+echo -e "${YELLOW}[4/4] 正在检测并优化 Swap 交换分区...${PLAIN}"
+get_mem_stats # 重新获取清理后的余量以做安全评估
 
-# 计算战果
+if [ "$SWAP_BEFORE" -gt 0 ]; then
+    # 留出 30MB 缓冲，防止刚好够回刷，但在回刷途中系统突发申请导致 OOM
+    if [ "$AVAILABLE_VAL" -gt $((SWAP_BEFORE + 30)) ]; then
+        echo -e "${CYAN}      检测到 Swap 存在积压，物理内存充足，正在安全回刷...${PLAIN}"
+        if swapoff -a && swapon -a; then
+            echo -e "${GREEN}      ✔ Swap 垃圾碎片深度净化完毕。${PLAIN}"
+        else
+            echo -e "${RED}      ❌ Swap 回刷失败，可能是挂载点异常，已中止该步。${PLAIN}"
+        fi
+    else
+        echo -e "${RED}      ⚠ 警告：剩余物理可用内存 (${AVAILABLE_VAL} MB) 极度吃紧！${PLAIN}"
+        echo -e "${RED}      ⚠ 强行回刷将导致系统 OOM 崩溃坠毁，已主动放弃 Swap 清理以保命。${PLAIN}"
+    fi
+else
+    echo -e "${GREEN}      ✔ Swap 分区清爽无碎片，无需额外操作。${PLAIN}"
+fi
+
+# 5. 二次抓取核算战果
+get_mem_stats
+MEM_AFTER=$MEM_VAL
+CACHE_AFTER=$CACHE_VAL
+SWAP_AFTER=$SWAP_VAL
+
+# 战果安全计算 (防止清理期间有应用大量申请内存导致出现负数)
 MEM_SAVED=$((MEM_BEFORE - MEM_AFTER))
-CACHE_SAVED=$((CACHE_BEFORE - CACHE_AFTER))
+[[ $MEM_SAVED -lt 0 ]] && MEM_SAVED=0
 
-echo "-------------------------------------------------"
-echo -e "${GREEN}[4/4] 净化任务圆满完成！战果统计：${PLAIN}"
-echo -e "      -> 物理内存腾出: ${GREEN}${MEM_SAVED} MB${PLAIN} (当前已用: ${MEM_AFTER} MB)"
-echo -e "      -> 页面缓存释放: ${GREEN}${CACHE_SAVED} MB${PLAIN} (当前残留: ${CACHE_AFTER} MB)"
+CACHE_SAVED=$((CACHE_BEFORE - CACHE_AFTER))
+[[ $CACHE_SAVED -lt 0 ]] && CACHE_SAVED=0
+
+echo -e "${CYAN}-------------------------------------------------${PLAIN}"
+echo -e "${GREEN}[★] 净化任务圆满完成！战果核算：${PLAIN}"
+echo -e "      -> 物理内存腾出: ${GREEN}${MEM_SAVED} MB${PLAIN} (当前真实已用: ${MEM_AFTER} MB)"
+echo -e "      -> 页面缓存释放: ${GREEN}${CACHE_SAVED} MB${PLAIN} (当前系统保留: ${CACHE_AFTER} MB)"
 echo -e "      -> 最终 Swap 占用: ${GREEN}${SWAP_AFTER} MB${PLAIN}"
-echo -e "${GREEN}=================================================${PLAIN}"
+echo -e "${CYAN}=================================================${PLAIN}"
