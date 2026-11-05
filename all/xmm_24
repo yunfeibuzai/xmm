@@ -1,5 +1,5 @@
 #!/bin/sh
-# 麦卖云 (Maimai Cloud) - SOCKS5 自动化调度主脚本 (工业稳定版)
+# 麦卖云 (Maimai Cloud) - SOCKS5 自动化调度主脚本 (修复版)
 # 适配: Alpine Linux (OpenRC/BusyBox) + Debian 11/12 / Ubuntu (Systemd)
 # 更新地址: https://github.com/yunfeibuzai/xmm/blob/main/all/xmm_24
 
@@ -71,7 +71,7 @@ restart_service() {
     if [ "$SYS_MAN" = "systemd" ]; then
         systemctl restart "$srv"
     elif [ "$SYS_MAN" = "openrc" ]; then
-        rc-service "$srv" restart 2>/dev/null \vert{}\vert{} /etc/init.d/"$srv" restart
+        rc-service "$srv" restart 2>/dev/null || /etc/init.d/"$srv" restart
     elif [ -x "/etc/init.d/$srv" ]; then
         /etc/init.d/"$srv" restart
     else
@@ -79,14 +79,13 @@ restart_service() {
     fi
 }
 
-# ==================== 1. 动态调取远程 S5 模块 ====================
+# ==================== 1. 动态调取远程 S5 模块 (内存直接执行) ====================
 setup_s5() {
-    echo -e "${CYAN}--- 正在连接 GitHub 获取 S5 独立落地模块 ---${NC}" export SYS_MAN PKG_MAN TMP_SCRIPT="/tmp/xmm24_1_$$.sh"
-    
-    if curl -fsSL "$S5_REMOTE_URL" -o "$TMP_SCRIPT" || wget -qO "$TMP_SCRIPT" "$S5_REMOTE_URL"; then
-        chmod +x "$TMP_SCRIPT"
-        bash "$TMP_SCRIPT"
-        rm -f "$TMP_SCRIPT"
+    echo -e "${CYAN}--- 正在连接 GitHub 获取 S5 独立落地模块 ---${NC}"
+    export SYS_MAN PKG_MAN
+    REMOTE_CODE=$(curl -fsSL "$S5_REMOTE_URL" || wget -qO- "$S5_REMOTE_URL")
+    if [ -n "$REMOTE_CODE" ]; then
+        bash -c "$REMOTE_CODE"
     else
         echo -e "${RED}拉取失败！请检查网络或 GitHub 仓库地址。${NC}"
     fi
@@ -115,7 +114,7 @@ edit_configs() {
     
     echo -e "\n${CYAN}保存完毕！是否立即重启 V2bX 使其生效？ (y/n)${NC}"
     read -p "请选择: " r_choice
-    if [ "$r_choice" = "y" ] \vert{}\vert{} [ "$r_choice" = "Y" ]; then
+    if [ "$r_choice" = "y" ] || [ "$r_choice" = "Y" ]; then
         restart_service "V2bX" 2>/dev/null
         echo -e "${GREEN}✅ 服务已重启。${NC}"
     fi
@@ -136,8 +135,10 @@ try:
         exit(0)
 
     raw = open('/etc/V2bX/config.json', encoding='utf-8').read()
-    try: cfg = json.loads(raw)
-    except: cfg = json.loads(re.sub(r'(?<!:)//.*', '', raw))
+    try:
+        cfg = json.loads(raw)
+    except:
+        cfg = json.loads(re.sub(r'(?<!:)//.*', '', raw))
 
     for idx, node in enumerate(cfg.get('Nodes', [])):
         nid = node.get('NodeID', '未知')
@@ -165,13 +166,13 @@ except Exception as e:
     if [ -z "$TUNNELS" ]; then
         echo -e "  ${GREEN}未检测到冲突的本地代理进程。${NC}"
     else
-        printf "  ${CYAN}\%-20s \%-10s \%-25s${NC}\n" "进程名称" "PID" "监听地址:端口"
+        printf "  ${CYAN}%-20s %-10s %-25s${NC}\n" "进程名称" "PID" "监听地址:端口"
         echo "  --------------------------------------------------------"
         echo "$TUNNELS" | while read -r line; do
             port=$(echo "$line" | awk '{print $5}')
             proc=$(echo "$line" | grep -o 'users:((".*"' | cut -d '"' -f2)
             pid=$(echo "$line" | grep -o 'pid=[0-9]*' | cut -d '=' -f2 | head -n 1)
-            [ -n "$proc" ] && printf "  ${GREEN}%-20s${NC}${YELLOW}%-10s${NC} \%-25s\n" "$proc" "$pid" "$port"
+            [ -n "$proc" ] && printf "  ${GREEN}%-20s${NC} ${YELLOW}%-10s${NC} %-25s\n" "$proc" "$pid" "$port"
         done
         echo "  --------------------------------------------------------"
     fi
@@ -223,7 +224,7 @@ update_self() {
 while true; do
     echo -e "\n${CYAN}===========================================${NC}"
     echo -e "${GREEN}  Maimai Cloud - S5 落地调度器 (Pro 稳定版) ${NC}"
-    echo -e "  内核系统: ${YELLOW}${SYS_MAN^^}${NC} \vert{} 包管理器: ${YELLOW}${PKG_MAN^^}${NC}"
+    echo -e "  内核系统: ${YELLOW}${SYS_MAN^^}${NC} | 包管理器: ${YELLOW}${PKG_MAN^^}${NC}"
     echo -e "${CYAN}===========================================${NC}"
     echo "  0. 手动修改配置文件 (nano)"
     echo "  1. 部署 S5 落地 (自适应识别多节点 - 远程)"
