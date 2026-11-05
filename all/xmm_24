@@ -1,6 +1,6 @@
-#!/bin/bash
-# 麦卖云 (Maimai Cloud) - SOCKS5 自动化调度主脚本
-# 适配: Debian/Ubuntu (Systemd) + Alpine (OpenRC)
+#!/bin/sh
+# 麦卖云 (Maimai Cloud) - SOCKS5 自动化调度主脚本 (工业稳定版)
+# 适配: Alpine Linux (OpenRC/BusyBox) + Debian 11/12 / Ubuntu (Systemd)
 # 更新地址: https://github.com/yunfeibuzai/xmm/blob/main/all/xmm_24
 
 RED='\033[0;31m'
@@ -17,59 +17,79 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
-# ==================== 智能环境探测 ====================
-if command -v apt-get >/dev/null 2>&1; then
-    PKG_MAN="apt"
-elif command -v apk >/dev/null 2>&1; then
+# ==================== 1. 包管理器与环境自动愈合 ====================
+if command -v apk >/dev/null 2>&1; then
     PKG_MAN="apk"
+elif command -v apt-get >/dev/null 2>&1; then
+    PKG_MAN="apt"
 else
     echo -e "${RED}不支持的系统，仅支持 Debian/Ubuntu/Alpine${NC}"
     exit 1
 fi
 
+# 确保 Alpine 具备基础环境并切换至 Bash
+if [ -z "$BASH_VERSION" ]; then
+    if [ "$PKG_MAN" = "apk" ]; then
+        command -v bash >/dev/null 2>&1 || apk add --no-cache bash
+    elif [ "$PKG_MAN" = "apt" ]; then
+        command -v bash >/dev/null 2>&1 || { apt-get update -y && apt-get install -y bash; }
+    fi
+    if command -v bash >/dev/null 2>&1 && [ -f "$0" ]; then
+        exec bash "$0" "$@"
+    fi
+fi
+
+# ==================== 2. 服务管理与依赖补全 ====================
 if command -v systemctl >/dev/null 2>&1; then
     SYS_MAN="systemd"
 elif command -v rc-service >/dev/null 2>&1; then
     SYS_MAN="openrc"
+elif [ -f /etc/init.d/V2bX ]; then
+    SYS_MAN="sysvinit"
 else
-    echo -e "${RED}无法识别服务管理器 (systemd/openrc)${NC}"
-    exit 1
+    SYS_MAN="generic"
 fi
 
-# 基础依赖补充
-command -v curl >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get update && apt-get install -y curl || apk add curl; }
-command -v python3 >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get update && apt-get install -y python3 || apk add python3; }
-command -v nano >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get update && apt-get install -y nano || apk add nano; }
-command -v ss >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get update && apt-get install -y iproute2 || apk add iproute2; }
+if [ "$PKG_MAN" = "apk" ]; then
+    command -v curl >/dev/null 2>&1 || apk add --no-cache curl
+    command -v python3 >/dev/null 2>&1 || apk add --no-cache python3
+    command -v nano >/dev/null 2>&1 || apk add --no-cache nano
+    command -v ss >/dev/null 2>&1 || apk add --no-cache iproute2
+    [ -d /etc/ssl/certs ] || apk add --no-cache ca-certificates
+    apk add --no-cache grep >/dev/null 2>&1
+elif [ "$PKG_MAN" = "apt" ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    command -v curl >/dev/null 2>&1 || { apt-get update -y && apt-get install -y curl; }
+    command -v python3 >/dev/null 2>&1 || apt-get install -y python3
+    command -v nano >/dev/null 2>&1 || apt-get install -y nano
+    command -v ss >/dev/null 2>&1 || apt-get install -y iproute2
+    [ -d /etc/ssl/certs ] || apt-get install -y ca-certificates
+fi
 
-# ==================== 通用工具函数 ====================
 restart_service() {
     local srv=$1
-    [ "$SYS_MAN" == "systemd" ] && systemctl restart "$srv" || rc-service "$srv" restart
+    if [ "$SYS_MAN" = "systemd" ]; then
+        systemctl restart "$srv"
+    elif [ "$SYS_MAN" = "openrc" ]; then
+        rc-service "$srv" restart 2>/dev/null \vert{}\vert{} /etc/init.d/"$srv" restart
+    elif [ -x "/etc/init.d/$srv" ]; then
+        /etc/init.d/"$srv" restart
+    else
+        pkill -f "$srv" && /usr/local/bin/"$srv" server &
+    fi
 }
 
-# ==================== 1. 动态调用远程 S5 模块 ====================
+# ==================== 1. 动态调取远程 S5 模块 ====================
 setup_s5() {
-    echo -e "${CYAN}--- 正在从 GitHub 调取 S5 落地安装模块 ---${NC}"
-    export SYS_MAN PKG_MAN
-    bash <(curl -fsSL "$S5_REMOTE_URL" || wget -qO- "$S5_REMOTE_URL")
-}
-
-# ==================== 2. 查看 S5 落地日志 ====================
-view_s5_logs() {
-    echo -e "\n${YELLOW}💡 正在实时滚动 S5 (Redsocks) 运行日志，按 [Ctrl+C] 可安全返回主菜单...${NC}\n"
-    trap '' INT
-    (
-        trap - INT
-        if command -v journalctl >/dev/null 2>&1; then
-            journalctl -u redsocks -n 100 -f
-        else
-            echo -e "${YELLOW}当前为 Alpine OpenRC 环境：${NC}"
-            tail -f /var/log/messages 2>/dev/null | grep --line-buffered redsocks
-        fi
-    )
-    trap - INT
-    echo -e "\n${GREEN}✔ 已安全停止查阅日志。${NC}"
+    echo -e "${CYAN}--- 正在连接 GitHub 获取 S5 独立落地模块 ---${NC}" export SYS_MAN PKG_MAN TMP_SCRIPT="/tmp/xmm24_1_$$.sh"
+    
+    if curl -fsSL "$S5_REMOTE_URL" -o "$TMP_SCRIPT" || wget -qO "$TMP_SCRIPT" "$S5_REMOTE_URL"; then
+        chmod +x "$TMP_SCRIPT"
+        bash "$TMP_SCRIPT"
+        rm -f "$TMP_SCRIPT"
+    else
+        echo -e "${RED}拉取失败！请检查网络或 GitHub 仓库地址。${NC}"
+    fi
 }
 
 # ==================== 0. 手动修改配置 ====================
@@ -95,16 +115,16 @@ edit_configs() {
     
     echo -e "\n${CYAN}保存完毕！是否立即重启 V2bX 使其生效？ (y/n)${NC}"
     read -p "请选择: " r_choice
-    if [ "$r_choice" == "y" ]; then
+    if [ "$r_choice" = "y" ] \vert{}\vert{} [ "$r_choice" = "Y" ]; then
         restart_service "V2bX" 2>/dev/null
         echo -e "${GREEN}✅ 服务已重启。${NC}"
     fi
 }
 
-# ==================== 3. 深度体检与诊断 ====================
+# ==================== 2. 深度体检与诊断 ====================
 diagnose_env() {
     echo -e "\n${CYAN}===========================================${NC}"
-    echo -e "${YELLOW}🩺 正在深度体检 V2bX 配置与本地 S5 环境...${NC}"
+    echo -e "${YELLOW}🩺 正在深度体检 V2bX 配置与本地环境...${NC}"
     echo -e "${CYAN}===========================================${NC}"
     
     python3 -c "
@@ -115,95 +135,100 @@ try:
         print('  [\033[0;31m致命\033[0m] /etc/V2bX/config.json 不存在！')
         exit(0)
 
-    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
-    cfg = json.loads(content)
-    
+    raw = open('/etc/V2bX/config.json', encoding='utf-8').read()
+    try: cfg = json.loads(raw)
+    except: cfg = json.loads(re.sub(r'(?<!:)//.*', '', raw))
+
     for idx, node in enumerate(cfg.get('Nodes', [])):
+        nid = node.get('NodeID', '未知')
         cert = node.get('CertConfig', {})
         cf = cert.get('CertFile')
         kf = cert.get('KeyFile')
         if cf:
-            if os.path.exists(cf): print(f'  [\033[0;32m正常\033[0m] TLS 证书存在: {cf}')
-            else: print(f'  [\033[0;31m致命\033[0m] TLS 证书丢失: {cf} (会导致V2bX直接崩溃)')
+            if os.path.exists(cf): print(f'  [\033[0;32m正常\033[0m] 节点 {nid} TLS 证书存在: {cf}')
+            else: print(f'  [\033[0;31m致命\033[0m] 节点 {nid} TLS 证书丢失: {cf}')
         if kf:
-            if os.path.exists(kf): print(f'  [\033[0;32m正常\033[0m] TLS 私钥存在: {kf}')
-            else: print(f'  [\033[0;31m致命\033[0m] TLS 私钥丢失: {kf} (会导致V2bX直接崩溃)')
+            if os.path.exists(kf): print(f'  [\033[0;32m正常\033[0m] 节点 {nid} TLS 私钥存在: {kf}')
+            else: print(f'  [\033[0;31m致命\033[0m] 节点 {nid} TLS 私钥丢失: {kf}')
             
     for core in cfg.get('Cores', []):
-        dp = core.get('DnsConfigPath')
-        if dp and not os.path.exists(dp):
-            print(f'  [\033[0;33m警告\033[0m] dns.json 路径无效: {dp}')
+        lvl = core.get('Log', {}).get('Level', 'warning')
+        if lvl.lower() != 'info':
+            print(f'  [\033[0;33m提示\033[0m] 当前核心日志等级为 {lvl}，配置落地后将自动提升为 info')
 except Exception as e:
     print(f'  [\033[0;31m错误\033[0m] JSON解析失败: {e}')
 "
     
-    echo -e "\n[\033[0;36m端口扫描\033[0m] 检测本地已知代理、S5 与隧道进程..."
-    TUNNELS=$(ss -tulnp | grep -iE 'v2bx|xray|sing-box|gost|danted|microsocks|socat|sshd|redsocks')
+    echo -e "\n[\033[0;36m端口扫描\033[0m] 检测本地已知代理与隧道进程..."
+    TUNNELS=$(ss -tulnp 2>/dev/null | grep -iE 'v2bx|xray|sing-box|gost|danted|microsocks|socat|sshd')
     
     if [ -z "$TUNNELS" ]; then
-        echo -e "  ${GREEN}未检测到本地运行的其他代理隧道服务。${NC}"
+        echo -e "  ${GREEN}未检测到冲突的本地代理进程。${NC}"
     else
-        printf "  ${CYAN}%-20s %-10s %-25s${NC}\n" "进程名称" "PID" "监听地址:端口"
+        printf "  ${CYAN}\%-20s \%-10s \%-25s${NC}\n" "进程名称" "PID" "监听地址:端口"
         echo "  --------------------------------------------------------"
         echo "$TUNNELS" | while read -r line; do
             port=$(echo "$line" | awk '{print $5}')
             proc=$(echo "$line" | grep -o 'users:((".*"' | cut -d '"' -f2)
             pid=$(echo "$line" | grep -o 'pid=[0-9]*' | cut -d '=' -f2 | head -n 1)
-            if [ -n "$proc" ]; then
-                printf "  ${GREEN}%-20s${NC} ${YELLOW}%-10s${NC} %-25s\n" "$proc" "$pid" "$port"
-            fi
+            [ -n "$proc" ] && printf "  ${GREEN}%-20s${NC}${YELLOW}%-10s${NC} \%-25s\n" "$proc" "$pid" "$port"
         done
         echo "  --------------------------------------------------------"
     fi
     echo -e "${CYAN}===========================================${NC}"
 }
 
-# ==================== 4. 一键卸载与无痕回滚 ====================
+# ==================== 3. 一键卸载与无痕回滚 ====================
 uninstall_all() {
-    echo -e "\n${RED}⚠️ 警告: 这将彻底清除全部节点的 S5 落地，将出口恢复为 VPS 原生机房直连。${NC}"
+    echo -e "\n${RED}⚠️ 警告: 这将彻底清除全部节点的 S5 落地，将出口恢复为原生直连。${NC}"
     read -p "确定要继续吗？(y/n): " confirm
-    [ "$confirm" != "y" ] && { echo "已取消。"; return; }
+    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && { echo "已取消。"; return; }
     
     echo -e "${YELLOW}正在剥离 V2bX 的外部出站路由设定...${NC}"
     python3 -c "
 import json, re, os
+cfg_path = '/etc/V2bX/config.json'
 try:
-    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
-    cfg = json.loads(content)
+    raw = open(cfg_path, encoding='utf-8').read()
+    try: cfg = json.loads(raw)
+    except: cfg = json.loads(re.sub(r'(?<!:)//.*', '', raw))
+    
     for core in cfg.get('Cores', []):
         core.pop('OutboundConfigPath', None)
         core.pop('RouteConfigPath', None)
-    with open('/etc/V2bX/config.json', 'w') as f:
-        json.dump(cfg, f, indent=2)
+    for node in cfg.get('Nodes', []):
+        node.pop('OutboundConfigPath', None)
+        node.pop('RouteConfigPath', None)
+        
+    tmp = cfg_path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, cfg_path)
     
-    if os.path.exists('/etc/V2bX/custom_outbound.json'):
-        os.remove('/etc/V2bX/custom_outbound.json')
-    if os.path.exists('/etc/V2bX/route.json'):
-        os.remove('/etc/V2bX/route.json')
-except:
-    pass
+    for f in ['/etc/V2bX/custom_outbound.json', '/etc/V2bX/route.json']:
+        if os.path.exists(f): os.remove(f)
+except Exception as e:
+    print('清理失败:', e)
 " 2>/dev/null
     restart_service "V2bX" 2>/dev/null
-
-    echo -e "${GREEN}✅ 清理完毕！所有节点出口已恢复原生机房直连。${NC}"
+    echo -e "${GREEN}✅ 清理完毕！所有节点已恢复机房原生直连。${NC}"
 }
 
 update_self() {
     echo -e "${YELLOW}正在更新脚本...${NC}"
-    wget -qO "$0" "$SCRIPT_URL" && chmod +x "$0" && exec bash "$0"
+    (curl -fsSL "$SCRIPT_URL" -o "$0" || wget -qO "$0" "$SCRIPT_URL") && chmod +x "$0" && exec bash "$0"
 }
 
 # ==================== 入口菜单 ====================
 while true; do
     echo -e "\n${CYAN}===========================================${NC}"
-    echo -e "${GREEN}  Maimai Cloud - S5 落地调度器 (Pro) ${NC}"
-    echo -e "  环境: ${YELLOW}${SYS_MAN^^}${NC} + ${YELLOW}${PKG_MAN^^}${NC}"
+    echo -e "${GREEN}  Maimai Cloud - S5 落地调度器 (Pro 稳定版) ${NC}"
+    echo -e "  内核系统: ${YELLOW}${SYS_MAN^^}${NC} \vert{} 包管理器: ${YELLOW}${PKG_MAN^^}${NC}"
     echo -e "${CYAN}===========================================${NC}"
     echo "  0. 手动修改配置文件 (nano)"
     echo "  1. 部署 S5 落地 (自适应识别多节点 - 远程)"
-    echo "  2. 查看 S5 (Redsocks) 运行日志"
-    echo "  3. 深度诊断 (配置体检 & 本地端口探针)"
-    echo "  4. 一键剥离所有落地 (回滚直连)"
+    echo "  2. 深度诊断 (配置体检 & 端口探针)"
+    echo "  3. 一键剥离所有落地 (回滚直连)"
     echo "  8. 更新当前脚本"
     echo "  9. 退出"
     echo -e "${CYAN}===========================================${NC}"
@@ -212,9 +237,8 @@ while true; do
     case $opt in
         0) edit_configs ;;
         1) setup_s5 ;;
-        2) view_s5_logs ;;
-        3) diagnose_env ;;
-        4) uninstall_all ;;
+        2) diagnose_env ;;
+        3) uninstall_all ;;
         8) update_self ;;
         9) exit 0 ;;
         *) echo -e "${RED}无效输入！${NC}" ;;
