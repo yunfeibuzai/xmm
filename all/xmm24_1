@@ -1,6 +1,6 @@
 #!/bin/bash
-# 麦卖云 (Maimai Cloud) - V2bX 多节点独立 S5 落地调度器 (Pro 稳定版)
-# 专为单核心多 Node 架构设计 (基于 Xray inboundTag 动态路由分流)
+# 麦卖云 (Maimai Cloud) - V2bX 多节点独立 S5 落地调度器 (最终健壮版)
+# 特性: 域名/IP自动净化、socks5h 远端解析、IPv6 双栈、防命名冲突
 # 更新地址: https://github.com/yunfeibuzai/xmm/blob/main/all/xmm24_1
 
 RED='\033[0;31m'
@@ -18,26 +18,32 @@ CONFIG_FILE="/etc/V2bX/config.json"
 OUTBOUND_FILE="/etc/V2bX/custom_outbound.json"
 ROUTE_FILE="/etc/V2bX/route.json"
 
+# 基础工具自愈
+command -v curl >/dev/null 2>&1 || { command -v apk >/dev/null && apk add --no-cache curl || apt-get install -y curl; }
+
 restart_v2bx() {
     if command -v systemctl >/dev/null 2>&1; then
         systemctl restart V2bX
+    elif command -v rc-service >/dev/null 2>&1; then
+        rc-service V2bX restart 2>/dev/null || /etc/init.d/V2bX restart
+    elif [ -x /etc/init.d/V2bX ]; then
+        /etc/init.d/V2bX restart
     else
-        rc-service V2bX restart
+        pkill -f V2bX && /usr/local/bin/V2bX server &
     fi
 }
 
 ensure_core_paths() {
     python3 -c "
 import json, re, os, sys
-
 cfg_path = '$CONFIG_FILE'
 out_path = '$OUTBOUND_FILE'
 route_path = '$ROUTE_FILE'
 
 try:
-    with open(cfg_path, 'r', encoding='utf-8') as f:
-        content = re.sub(r'(?<!:)//.*', '', f.read())
-    cfg = json.loads(content)
+    raw = open(cfg_path, 'r', encoding='utf-8').read()
+    try: cfg = json.loads(raw)
+    except: cfg = json.loads(re.sub(r'(?<!:)//.*', '', raw))
     changed = False
 
     for core in cfg.get('Cores', []):
@@ -50,6 +56,11 @@ try:
                 changed = True
             if 'DnsConfigPath' in core:
                 core.pop('DnsConfigPath', None)
+                changed = True
+            if 'Log' not in core or not isinstance(core['Log'], dict):
+                core['Log'] = {}
+            if core['Log'].get('Level', '').lower() != 'info':
+                core['Log']['Level'] = 'info'
                 changed = True
 
     if changed:
@@ -66,7 +77,6 @@ except Exception as e:
 list_nodes() {
     python3 -c "
 import json, re, os
-
 cfg_path = '$CONFIG_FILE'
 route_path = '$ROUTE_FILE'
 
@@ -75,8 +85,10 @@ try:
         print('NOT_FOUND')
         exit(0)
 
-    content = re.sub(r'(?<!:)//.*', '', open(cfg_path, encoding='utf-8').read())
-    cfg = json.loads(content)
+    raw = open(cfg_path, encoding='utf-8').read()
+    try: cfg = json.loads(raw)
+    except: cfg = json.loads(re.sub(r'(?<!:)//.*', '', raw))
+
     nodes = cfg.get('Nodes', [])
     if not nodes:
         print('EMPTY')
@@ -89,8 +101,7 @@ try:
             for r in r_data.get('rules', []):
                 otag = r.get('outboundTag', '')
                 if otag.startswith('s5-out-'):
-                    nid = otag.replace('s5-out-', '')
-                    s5_routed.add(nid)
+                    s5_routed.add(otag.replace('s5-out-', ''))
         except:
             pass
 
@@ -107,6 +118,26 @@ except Exception as e:
 "
 }
 
+# 预检连通性 (自动解析域名/IPv4/IPv6 双栈)
+test_s5_connection() {
+    local host=$1 port=$2
+    python3 -c "
+import socket, time
+
+host = '$host'.strip('[]')
+port = int('$port')
+
+start = time.time()
+try:
+    s = socket.create_connection((host, port), timeout=3.0)
+    latency = round((time.time() - start) * 1000)
+    s.close()
+    print(f'OK|{latency}')
+except Exception as e:
+    print(f'FAIL|{e}')
+"
+}
+
 # 1. 部署/绑定独立 S5 落地
 setup_node_s5() {
     ensure_core_paths || return 1
@@ -114,8 +145,8 @@ setup_node_s5() {
     echo -e "\n${CYAN}================== 当前 V2bX 节点列表 ==================${NC}"
     NODE_RAW=$(list_nodes)
 
-    if [ "$NODE_RAW" == "EMPTY" ] || [ -z "$NODE_RAW" ]; then
-        echo -e "${RED}未在 config.json 中扫描到任何有效节点！${NC}"
+    if [ "$NODE_RAW" = "EMPTY" ] || [ "$NODE_RAW" = "NOT_FOUND" ] || [ "$NODE_RAW" = "ERROR" ] || [ -z "$NODE_RAW" ]; then
+        echo -e "${RED}未在 /etc/V2bX/config.json 中扫描到任何有效节点或配置有误！${NC}"
         return 1
     fi
 
@@ -124,14 +155,20 @@ setup_node_s5() {
     
     TOTAL_NODES=0
     while IFS='|' read -r idx nid ntype core status; do
+        [ -n "$idx" ] || continue
         printf "%-6s %-10s %-12s %-10s %-30b\n" " [$idx]" "$nid" "$ntype" "$core" "$status"
         TOTAL_NODES=$((TOTAL_NODES + 1))
-    done <<< "$NODE_RAW"
+    done << EOF
+$NODE_RAW
+EOF
     echo -e "${CYAN}==================================================================${NC}"
 
     read -p "请输入要配置 S5 落地的节点【序号】(1-${TOTAL_NODES}): " CHOSEN_IDX
-    if [[ ! "$CHOSEN_IDX" =~ ^[0-9]+$ ]] || [ "$CHOSEN_IDX" -lt 1 ] || [ "$CHOSEN_IDX" -gt "$TOTAL_NODES" ]; then
-        echo -e "${RED}输入序号无效！${NC}"; return 1
+    case $CHOSEN_IDX in
+        ''|*[!0-9]*) echo -e "${RED}输入序号无效！${NC}"; return 1 ;;
+    esac
+    if [ "$CHOSEN_IDX" -lt 1 ] || [ "$CHOSEN_IDX" -gt "$TOTAL_NODES" ]; then
+        echo -e "${RED}序号超出范围！${NC}"; return 1
     fi
 
     TARGET_LINE=$(echo "$NODE_RAW" | sed -n "${CHOSEN_IDX}p")
@@ -140,13 +177,43 @@ setup_node_s5() {
 
     echo -e "\n已选定: ${GREEN}NodeID: ${TARGET_NID} (${TARGET_TYPE})${NC}"
     echo -e "${YELLOW}--- 请输入该节点专属的 SOCKS5 代理信息 ---${NC}"
-    read -p "S5 服务器 (域名或IP, 本地填 127.0.0.1): " S5_HOST
-    read -p "S5 端口: " S5_PORT
+    read -p "S5 服务器 (域名/IPv4/IPv6, 本地填 127.0.0.1): " RAW_HOST
+    read -p "S5 端口: " RAW_PORT
     read -p "S5 用户名 (无则直接回车): " S5_USER
     read -p "S5 密码 (无则直接回车): " S5_PASS
 
-    if [[ -z "$S5_HOST" || -z "$S5_PORT" || ! "$S5_PORT" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}错误: 主机不可为空，且端口必须为合法数字！${NC}"; return 1
+    # 智能清洗用户手滑输入的格式 (如误输入 socks5:// 或带端口)
+    CLEAN_HOST=$(echo "$RAW_HOST" | tr -d ' ' | sed -E 's#^[a-zA-Z0-9]+://##; s#/.*$##')
+    if [[ "$CLEAN_HOST" =~ ^\[([0-9a-fA-F:]+)\]:([0-9]+)$ ]]; then
+        S5_HOST="${BASH_REMATCH[1]}"
+        [ -z "$RAW_PORT" ] && S5_PORT="${BASH_REMATCH[2]}" || S5_PORT="$RAW_PORT"
+    elif [[ "$CLEAN_HOST" =~ ^([^:]+):([0-9]+)$ ]]; then
+        S5_HOST="${BASH_REMATCH[1]}"
+        [ -z "$RAW_PORT" ] && S5_PORT="${BASH_REMATCH[2]}" || S5_PORT="$RAW_PORT"
+    else
+        S5_HOST="${CLEAN_HOST#[}"
+        S5_HOST="${S5_HOST%]}"
+        S5_PORT="$RAW_PORT"
+    fi
+
+    case $S5_PORT in
+        ''|*[!0-9]*) echo -e "${RED}错误: 端口必须为纯数字！${NC}"; return 1 ;;
+    esac
+    if [ -z "$S5_HOST" ]; then
+        echo -e "${RED}错误: 主机地址不可为空！${NC}"; return 1
+    fi
+
+    echo -e "${CYAN}正在对 S5 出口执行连通性探测 (支持 域名/IPv4/IPv6)...${NC}"
+    TEST_RES=$(test_s5_connection "$S5_HOST" "$S5_PORT")
+    STATUS=$(echo "$TEST_RES" | cut -d'|' -f1)
+    LATENCY=$(echo "$TEST_RES" | cut -d'|' -f2)
+
+    if [ "$STATUS" = "OK" ]; then
+        echo -e "${GREEN}✔ 连通性检测正常 (TCP 握手延迟: ${LATENCY}ms)${NC}"
+    else
+        echo -e "${RED}⚠️ 警告: 无法连通目标 S5 端口 (${LATENCY})${NC}"
+        read -p "目标代理可能不可达，仍要强行写入吗？(y/n): " force_write
+        [ "$force_write" != "y" ] && [ "$force_write" != "Y" ] && { echo "已取消部署。"; return; }
     fi
 
     export S5_HOST S5_PORT S5_USER S5_PASS TARGET_NID TARGET_TYPE
@@ -174,7 +241,7 @@ if os.path.exists(out_file):
     except:
         outbounds = []
 
-outbounds = [o for o in outbounds if o.get('tag') != target_tag and o.get('tag') not in ['direct', 'block']]
+outbounds = [o for o in outbounds if o.get('tag') != target_tag and o.get('tag') not in ['direct', 'block', 'maimai-default-direct', 'maimai-default-block']]
 
 new_s5_outbound = {
     'tag': target_tag,
@@ -192,8 +259,8 @@ new_s5_outbound = {
 outbounds.append(new_s5_outbound)
 
 final_outbounds = [
-    {'tag': 'direct', 'protocol': 'freedom'},
-    {'tag': 'block', 'protocol': 'blackhole'}
+    {'tag': 'maimai-default-direct', 'protocol': 'freedom'},
+    {'tag': 'maimai-default-block', 'protocol': 'blackhole'}
 ] + outbounds
 
 tmp_out = out_file + '.tmp'
@@ -210,17 +277,21 @@ if os.path.exists(route_file):
         pass
 
 existing_rules = routes.get('rules', [])
-node_rules = [r for r in existing_rules if r.get('outboundTag') != target_tag and r.get('outboundTag') != 'block']
+node_rules = [r for r in existing_rules if r.get('outboundTag') != target_tag and r.get('outboundTag') not in ['block', 'maimai-default-block']]
 
-inbound_tags = [
+tag_candidates = [
     nid, 
     f'node_{nid}', 
     f'{ntype}_{nid}', 
+    f'{ntype.lower()}_{nid}',
+    f'{ntype.upper()}_{nid}',
     f'inbound_{nid}',
-    f'{ntype}_{nid}_tcp',
-    f'{ntype}_{nid}_ws',
-    f'{ntype}_{nid}_grpc'
+    f'{ntype.lower()}_{nid}_tcp',
+    f'{ntype.lower()}_{nid}_ws',
+    f'{ntype.lower()}_{nid}_grpc',
+    f'{ntype.lower()}_{nid}_xhttp'
 ]
+inbound_tags = sorted(list(set(tag_candidates)))
 
 new_rule = {
     'type': 'field',
@@ -232,7 +303,7 @@ node_rules.append(new_rule)
 final_rules = [
     {
         'type': 'field',
-        'outboundTag': 'block',
+        'outboundTag': 'maimai-default-block',
         'ip': [
             '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
             '127.0.0.0/8', '169.254.0.0/16', '::1/128', 'fc00::/7', 'fe80::/10'
@@ -252,8 +323,8 @@ print('SUCCESS')
     if [ $? -eq 0 ]; then
         restart_v2bx
         echo -e "\n${GREEN}✅ 节点 [NodeID: ${TARGET_NID}] 专属落地配置成功！${NC}"
-        echo -e "${CYAN}入站匹配: 覆盖 NodeID ${TARGET_NID} 所有传输协议 -> 专属出站: s5-out-${TARGET_NID}${NC}"
-        echo -e "${GREEN}V2bX 核心已重启生效。${NC}"
+        echo -e "${CYAN}入站匹配: 覆盖 NodeID ${TARGET_NID} 所有协议入站 -> 专属出站: s5-out-${TARGET_NID}${NC}"
+        echo -e "${GREEN}V2bX 核心已热重启生效。${NC}"
     else
         echo -e "${RED}❌ 写入配置失败！${NC}"
     fi
@@ -262,16 +333,26 @@ print('SUCCESS')
 # 2. 单独重置某个节点为直连
 reset_node_s5() {
     NODE_RAW=$(list_nodes)
-    TOTAL_NODES=$(echo "$NODE_RAW" | wc -l)
-    
+    if [ "$NODE_RAW" = "EMPTY" ] || [ "$NODE_RAW" = "NOT_FOUND" ] || [ -z "$NODE_RAW" ]; then
+        echo -e "${RED}当前无节点可重置。${NC}"; return 1
+    fi
+
+    TOTAL_NODES=0
     printf "${YELLOW}%-6s %-10s %-30s${NC}\n" "序号" "NodeID" "当前状态"
     while IFS='|' read -r idx nid ntype core status; do
+        [ -n "$idx" ] || continue
         printf "%-6s %-10s %-30b\n" " [$idx]" "$nid" "$status"
-    done <<< "$NODE_RAW"
+        TOTAL_NODES=$((TOTAL_NODES + 1))
+    done << EOF
+$NODE_RAW
+EOF
 
     read -p "请输入要重置为机房原生直连的节点【序号】: " R_IDX
-    if [[ ! "$R_IDX" =~ ^[0-9]+$ ]] || [ "$R_IDX" -lt 1 ] || [ "$R_IDX" -gt "$TOTAL_NODES" ]; then
-        echo -e "${RED}输入序号无效！${NC}"; return 1
+    case $R_IDX in
+        ''|*[!0-9]*) echo -e "${RED}输入序号无效！${NC}"; return 1 ;;
+    esac
+    if [ "$R_IDX" -lt 1 ] || [ "$R_IDX" -gt "$TOTAL_NODES" ]; then
+        echo -e "${RED}序号超出范围！${NC}"; return 1
     fi
 
     TARGET_NID=$(echo "$NODE_RAW" | sed -n "${R_IDX}p" | cut -d'|' -f2)
@@ -286,7 +367,6 @@ out_file = os.environ['OUTBOUND_FILE']
 route_file = os.environ['ROUTE_FILE']
 target_tag = os.environ['TARGET_TAG']
 
-# 1. 清理出站
 if os.path.exists(out_file):
     try:
         outs = json.loads(open(out_file, encoding='utf-8').read())
@@ -298,7 +378,6 @@ if os.path.exists(out_file):
     except:
         pass
 
-# 2. 清理路由
 if os.path.exists(route_file):
     try:
         rts = json.loads(open(route_file, encoding='utf-8').read())
@@ -314,20 +393,87 @@ if os.path.exists(route_file):
     echo -e "${GREEN}✅ 节点 [NodeID: ${TARGET_NID}] 已成功解绑 S5，恢复原生直连！${NC}"
 }
 
-# 3. 查阅 S5 实时运行日志
-view_s5_logs() {
-    echo -e "\n${YELLOW}💡 正在实时滚动 S5 (Redsocks) 运行日志，按 [Ctrl+C] 可安全返回主菜单...${NC}\n"
+# 3. 查阅 S5 提纯流量流水
+view_s5_purified_logs() {
+    echo -e "\n${YELLOW}💡 正在实时滚动 S5 出站流量流水 (按 Ctrl+C 退出)...${NC}\n"
+    
+    GREP_OPTS="-E"
+    if grep --help 2>&1 | grep -q "line-buffered"; then
+        GREP_OPTS="-E --line-buffered"
+    fi
+
     trap '' INT
     (
         trap - INT
         if command -v journalctl >/dev/null 2>&1; then
-            journalctl -u redsocks -n 100 -f
+            journalctl -u V2bX -n 150 -f | grep $GREP_OPTS "s5-out|proxy|socks|accepted"
         else
-            tail -f /var/log/messages 2>/dev/null | grep --line-buffered redsocks
+            LOG_TARGET=""
+            for f in /var/log/V2bX.log /var/log/v2bx.log /etc/V2bX/v2bx.log /var/log/messages; do
+                if [ -f "$f" ]; then LOG_TARGET="$f"; break; fi
+            done
+            if [ -n "$LOG_TARGET" ]; then
+                tail -f "$LOG_TARGET" | grep $GREP_OPTS "s5-out|proxy|socks|accepted"
+            else
+                echo -e "${RED}未找到常驻日志文件，请确认 V2bX 正在运行。${NC}"
+                sleep 2
+            fi
         fi
     )
     trap - INT
-    echo -e "\n${GREEN}✔ 已安全退出日志查看。${NC}"
+    echo -e "\n${GREEN}✔ 已退出日志查看。${NC}"
+}
+
+# 4. 真实通过 S5 测试出口 IP 与地理位置 (强化 socks5h 远端解析与防转义)
+check_exit_ip() {
+    if [ ! -f "$OUTBOUND_FILE" ]; then
+        echo -e "${RED}尚未生成任何 S5 出口配置！${NC}"; return
+    fi
+
+    echo -e "\n${CYAN}--- 正在逐个测试 S5 落地真实出口 IP (通过 socks5h 远端解析) ---${NC}"
+    python3 -c "
+import json, subprocess
+
+try:
+    outs = json.loads(open('$OUTBOUND_FILE', encoding='utf-8').read())
+    s5_outs = [o for o in outs if str(o.get('tag', '')).startswith('s5-out-')]
+    if not s5_outs:
+        print('[\033[0;33m提示\033[0m] 当前没有正在运行的 S5 出口')
+        exit(0)
+
+    for o in s5_outs:
+        tag = o['tag']
+        nid = tag.replace('s5-out-', '')
+        srv = o['settings']['servers'][0]
+        host = srv['address'].strip('[]')
+        port = srv['port']
+        user = srv.get('users', [{}])[0].get('user', '')
+        passwd = srv.get('users', [{}])[0].get('pass', '')
+
+        # 区分 IPv6 与域名/IPv4
+        proxy_host = f'[{host}]' if ':' in host else host
+        proxy_url = f'socks5h://{proxy_host}:{port}'
+
+        cmd = ['curl', '-s', '--max-time', '6', '--proxy', proxy_url]
+        if user:
+            cmd.extend(['--proxy-user', f'{user}:{passwd}'])
+        cmd.append('https://api.ip.sb/geoip')
+
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode == 0 and res.stdout:
+                geo = json.loads(res.stdout)
+                ip = geo.get('ip', '未知')
+                country = geo.get('country', '')
+                isp = geo.get('isp', '')
+                print(f'[\033[0;32m节点 {nid}\033[0m] 出口 IP: \033[0;36m{ip}\033[0m | 地区: {country} ({isp})')
+            else:
+                print(f'[\033[0;31m节点 {nid}\033[0m] 目标代理 ({host}:{port}) 连通超时或鉴权失败')
+        except:
+            print(f'[\033[0;31m节点 {nid}\033[0m] 探测失败')
+except Exception as e:
+    print('解析出错:', e)
+"
 }
 
 # ==================== 主菜单 ====================
@@ -335,9 +481,10 @@ while true; do
     echo -e "\n${CYAN}===========================================${NC}"
     echo -e "${GREEN}  麦卖云 (Maimai Cloud) - 多节点独立 S5 调度器  ${NC}"
     echo -e "${CYAN}===========================================${NC}"
-    echo "  1. 扫描节点并配置专属 S5 落地 (按序号选择)"
+    echo "  1. 扫描节点并配置专属 S5 落地 (双栈测速预检)"
     echo "  2. 单独重置某个节点为原生直连 (解绑 S5)"
-    echo "  3. 查看 S5 (Redsocks) 运行日志"
+    echo "  3. 查看 S5 出站专属流量流水 (纯净提纯版)"
+    echo "  4. 真实探测各节点 S5 落地出口 IP 与国家"
     echo "  9. 退出"
     echo -e "${CYAN}===========================================${NC}"
     read -p "请输入指令: " opt
@@ -345,7 +492,8 @@ while true; do
     case $opt in
         1) setup_node_s5 ;;
         2) reset_node_s5 ;;
-        3) view_s5_logs ;;
+        3) view_s5_purified_logs ;;
+        4) check_exit_ip ;;
         9) exit 0 ;;
         *) echo -e "${RED}输入无效！${NC}" ;;
     esac
