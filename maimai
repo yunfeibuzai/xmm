@@ -258,4 +258,218 @@ show_status() {
         fi
     fi
 
-    echo -e "状态: $core_status | 模式
+    echo -e "状态: $core_status | 模式: $mode_status | 护卫: $guard_status"
+}
+
+show_menu() {
+    local status_text; status_text="$(show_status)"
+    local menu_text
+    menu_text=$(cat <<EOF
+${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
+--- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---
+  ${green}0.${plain} 快捷修改节点配置 (自适应单/多进程)
+--------------------------------------------
+  ${green}1.${plain} 安装 V2bX (Shannon-x 全协议核心 / 智能防爆版)
+  ${green}2.${plain} 更新 V2bX 核心
+  ${green}3.${plain} 卸载 V2bX
+  ${green}4.${plain} 启动 V2bX 服务
+  ${green}5.${plain} 停止 V2bX 服务
+  ${green}6.${plain} 重启 V2bX 服务
+  ${green}7.${plain} 查看 V2bX 运行状态
+  ${green}8.${plain} 📊 查看 V2bX 实时运行与错误日志
+  ${green}9.${plain} 设置开机自启动
+  ${green}10.${plain} 取消开机自启动
+--------------------------------------------
+${magenta}[🌟 核心战力配置向导群]${plain}
+  ${green}11.${plain} 🌟 纯净向导式配置创建与多进程托管 (xmm2)
+  ${green}12.${plain} 🚦 节点追加 / 红绿灯体检 / 外置ACME证书中心 (xmm12)
+  ${green}13.${plain} 生成 X25519 密钥 (Reality 必备)
+  ${green}14.${plain} 升级本维护脚本
+--------------------------------------------
+${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
+  ${green}15.${plain} 豪华版 BBR 加速控制台
+  ${green}16.${plain} 放行全局端口 + 自适应高并发连接数
+  ${green}17.${plain} Linux 系统级内存与 Swap 深度净化
+  ${green}18.${plain} 彻底清空顽固大日志 + 开启全局日志轮转硬控
+  ${green}19.${plain} 提升内存回收机制
+  ${green}20.${plain} 将现有 CDN 节点改为 CF 隧道
+  ${green}21.${plain} 🔍 查看隧道日志 (排查超时)
+  ${green}22.${plain} 🛠️ CF 隧道交互式管理 (改域名/ID/监控/启停)
+  ${green}23.${plain} 🌐 启动极简网络中转面板 (xmmzz)
+  ${green}24.${plain} 🔀 部署 S5 落地智能路由 (xmm_24)
+  ${green}25.${plain} 彻底退出脚本
+--------------------------------------------
+EOF
+)
+    printf '\033[H\033[2J'
+    printf '%b\n%b\n' "$menu_text" "$status_text"
+}
+
+# 🌟 生成 X25519 (保留在主脚本中)
+generate_x25519() {
+    if [[ ! -x /usr/local/V2bX/V2bX ]]; then
+        echo -e "${red}错误：尚未安装 V2bX，请先执行选项 1 安装核心！${plain}"
+        return
+    fi
+    echo -e "${cyan}正在生成 Reality X25519 密钥对...${plain}\n"
+    /usr/local/V2bX/V2bX x25519
+    echo "--------------------------------------------------------"
+    echo -e "${yellow}💡 配置指引：${plain}"
+    echo -e "  - ${green}Private key (私钥)${plain} : 填入节点配置"
+    echo -e "  - ${green}Public key (公钥)${plain}  : 填入面板后台供客户端校验"
+}
+
+install_bbr() { 
+    wget -O tcp.sh --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh
+}
+
+# 🌟 修复 cp 同一文件报错的升级函数
+update_shell() { 
+    echo -e "${cyan}正在拉取主控脚本最新版本...${plain}"
+    local tmp_up="/tmp/maimai_update_${RANDOM}.sh"
+    local urls=(
+        "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
+        "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
+    )
+
+    local ok=false
+    for url in "${urls[@]}"; do
+        if wget -q --timeout=10 -O "$tmp_up" "$url" || curl -sL --connect-timeout 8 "$url" -o "$tmp_up"; then
+            if [[ -f "$tmp_up" && -s "$tmp_up" ]] && grep -q "sh_ver=" "$tmp_up"; then
+                ok=true
+                break
+            fi
+        fi
+    done
+
+    if [ "$ok" = false ]; then
+        rm -f "$tmp_up"
+        echo -e "${red}错误：拉取脚本更新失败，请检查网络！${plain}"
+        return
+    fi
+
+    mkdir -p /usr/local/bin
+    mv -f "$tmp_up" /usr/local/bin/maimai_core.sh
+    chmod +x /usr/local/bin/maimai_core.sh
+
+    # 解析当前执行文件的真实物理路径，避免对指向 maimai_core.sh 的软链接重复 cp
+    if [[ -f "$0" ]]; then
+        local real_run
+        real_run=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
+        local real_core
+        real_core=$(readlink -f "/usr/local/bin/maimai_core.sh" 2>/dev/null || echo "/usr/local/bin/maimai_core.sh")
+        if [[ "$real_run" != "$real_core" && "$0" != "/usr/bin/v2bx" && "$0" != "/usr/bin/maimai" ]]; then
+            cp -f /usr/local/bin/maimai_core.sh "$real_run" 2>/dev/null
+            chmod +x "$real_run" 2>/dev/null
+        fi
+    fi
+
+    register_shortcut
+    local new_v
+    new_v=$(grep -m1 '^sh_ver=' /usr/local/bin/maimai_core.sh | cut -d'"' -f2)
+    echo -e "${green}✔ 脚本已成功升级至 v${new_v}！正在重新加载...${plain}"
+    sleep 1
+    exec /usr/local/bin/maimai_core.sh
+}
+
+process_run() {
+    local num; read -rp "请输入选择 [0-25]: " num < /dev/tty
+    case "$num" in
+    0) 
+        shopt -s nullglob
+        local node_files=(/etc/V2bX/nodes/node_*.json)
+        shopt -u nullglob
+
+        if [[ ${#node_files[@]} -gt 0 ]] && [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
+            echo -e "\n${cyan}=== 🛠️ 多进程节点配置编辑器 ===${plain}"
+            local i=1
+            for f in "${node_files[@]}"; do
+                echo -e "  ${green}${i}.${plain} $(basename "$f")"
+                ((i++))
+            done
+            echo -e "  ${dim}0. 取消 / 返回主菜单${plain}"
+            read -rp "请输入要编辑的独立节点序号 [0-$((i-1))]: " edit_idx < /dev/tty
+            
+            if [[ "$edit_idx" =~ ^[1-9][0-9]*$ ]] && [ "$edit_idx" -lt "$i" ]; then
+                local target_file="${node_files[$((edit_idx-1))]}"
+                local inst_name
+                inst_name=$(basename "$target_file" .json)
+                
+                nano "$target_file"
+                
+                echo -e "\n${green}修改已保存。由于各节点是独立进程，只需重启该特定节点即可生效。${plain}"
+                read -rp "是否立即重启节点 [${inst_name}]？(y/n，默认 y): " ask_restart < /dev/tty
+                [[ -z "$ask_restart" ]] && ask_restart="y"
+                if [[ "$ask_restart" =~ ^[Yy]$ ]]; then
+                    if command -v systemctl &>/dev/null; then
+                        systemctl restart "v2bx@${inst_name}" 2>/dev/null
+                    elif command -v rc-service &>/dev/null; then
+                        rc-service "v2bx.${inst_name}" restart 2>/dev/null
+                    fi
+                    echo -e "${green}✔ 节点 ${inst_name} 已成功重启并应用新配置！${plain}"
+                fi
+            fi
+        else
+            if [ ! -f /etc/V2bX/config.json ]; then
+                echo -e "${yellow}配置文件不存在，请先执行向导生成配置！${plain}"
+            else
+                nano /etc/V2bX/config.json
+                echo -e "${green}V2bX 支持自动热重载，若修改了关键端口或参数，建议重启服务生效。${plain}"
+                read -rp "是否立即强制重启 V2bX 服务？(y/n，默认 n): " ask_restart < /dev/tty
+                [[ "$ask_restart" =~ ^[Yy]$ ]] && manage_service restart
+            fi
+        fi
+        ;; 
+    1|2) run_remote_module "all/xmm1and2" "V2bX 核心部署与更新引擎" ;; 
+    3) 
+        read -rp "是否保留节点配置文件和域名证书 (/etc/V2bX)？(y/n，默认 y): " keep_conf < /dev/tty
+        [[ -z "$keep_conf" ]] && keep_conf="y"
+
+        manage_service stop
+        manage_service disable
+        rm -rf /usr/local/V2bX /etc/systemd/system/V2bX.service /etc/systemd/system/v2bx@.service \
+               /etc/init.d/V2bX /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_* \
+               /var/log/V2bX /var/log/v2bx*.log /var/log/V2bX*.log /var/log/v2bx*.err /var/log/V2bX*.err \
+               /etc/logrotate.d/v2bx_anti_explode /etc/logrotate.d/v2bx_all /etc/cron.hourly/v2bx_cleaner
+
+        if [[ ! "$keep_conf" =~ ^[Yy]$ ]]; then
+            rm -rf /etc/V2bX
+            echo -e "${yellow}已清除配置文件与证书目录。${plain}"
+        fi
+
+        if command -v systemctl &>/dev/null; then systemctl daemon-reload; fi
+        echo -e "${green}卸载完成！${plain}" 
+        ;;
+    4) manage_service start ;; 
+    5) manage_service stop ;; 
+    6) manage_service restart ;; 
+    7) manage_service status ;; 
+    8) inspect_logs ;; 
+    9) manage_service enable ;; 
+    10) manage_service disable ;; 
+    11) run_remote_module "xmm2" "全新覆盖配置与多进程向导 (xmm2)" ;; 
+    12) run_remote_module "all/xmm12" "节点追加 / 红绿灯体检 / ACME证书中心 (xmm12)" ;;  
+    13) generate_x25519 ;;
+    14) update_shell ;; 
+    15) install_bbr ;; 
+    16) run_remote_module "lianjie" "高并发连接数与端口解锁" ;; 
+    17) run_remote_module "Linuxclean" "Linux 系统级深度净化" ;; 
+    18) run_remote_module "V2bXclean" "日志深度防爆与轮转强控" ;;
+    19) run_remote_module "memory" "内存回收机制优化" ;; 
+    20) run_remote_module "cf" "CDN 节点转 CF 隧道模块" ;;
+    21) run_remote_module "cfjournal" "CF 隧道日志排查诊断" ;; 
+    22) run_remote_module "cfmgr" "CF 隧道交互式管理控制台" ;;
+    23) run_remote_module "xmmzz" "极简网络中转管理面板" ;;
+    24) run_remote_module "all/xmm_24" "S5 落地智能路由 (Pro Max)" ;;
+    25) exit 0 ;; 
+    *) echo -e "${red}未知序号，请输入 0-25 之间的数字${plain}" ;;
+    esac
+}
+
+while true; do 
+    show_menu
+    process_run
+    echo ""
+    read -rp "按回车键返回主菜单..." < /dev/tty
+done
