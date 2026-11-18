@@ -268,4 +268,357 @@ manage_creds_and_aux() {
     case "$c_opt" in
         1) rm -f "$saved_file"; load_or_ask_creds ;;
         2) rm -f "$saved_file"; echo -e " ${green}✔ 凭证已清除。${plain}" ;;
-        3) generate_h
+        3) generate_hy2_yaml; echo -e " ${green}✔ /etc/V2bX/hy2config.yaml 重新生成完成！${plain}" ;;
+        4) 
+            rm -f /etc/V2bX/sing_origin.json /etc/V2bX/dns.json /etc/V2bX/sing_dns.json /etc/V2bX/custom_outbound.json /etc/V2bX/route.json
+            init_aux_files
+            echo -e " ${green}✔ 所有附属规则文件已重置为标准模板！${plain}" 
+            ;;
+    esac
+}
+
+# ════════════════════ 4. 节点拆分与多进程隔离托管 ════════════════════
+multi_split_configs() {
+    if [[ ! -f /etc/V2bX/config.json ]] || ! command -v jq &>/dev/null; then
+        echo -e " ${red}✖ 错误：未找到 /etc/V2bX/config.json 或未安装 jq！${plain}"
+        return 1
+    fi
+
+    local total_nodes
+    total_nodes=$(jq '.Nodes | length' /etc/V2bX/config.json 2>/dev/null || echo 0)
+    if [[ "$total_nodes" -eq 0 ]]; then
+        echo -e " ${red}✖ 错误：当前 config.json 中没有任何节点配置！${plain}"
+        return 1
+    fi
+
+    mkdir -p /etc/V2bX/nodes /var/log/V2bX
+    rm -f /etc/V2bX/nodes/node_*.json
+
+    echo -e " ${cyan}正在从主配置拆分 ${total_nodes} 个独立节点实例配置...${plain}"
+    for ((i=0; i<total_nodes; i++)); do
+        local nid ntype ncore inst_name out_file
+        nid=$(jq -r ".Nodes[$i].NodeID" /etc/V2bX/config.json)
+        ntype=$(jq -r ".Nodes[$i].NodeType" /etc/V2bX/config.json)
+        ncore=$(jq -r ".Nodes[$i].Core" /etc/V2bX/config.json)
+        inst_name="node_${nid}_${ntype}"
+        out_file="/etc/V2bX/nodes/${inst_name}.json"
+
+        jq --argjson idx "$i" --arg core "$ncore" --arg name "$inst_name" '
+        {
+          "Log": {
+            "Level": (.Log.Level // "error"),
+            "Output": ""
+          },
+          "Runtime": (.Runtime // { "GCPercent": 50, "MemoryLimitPercent": 70 }),
+          "Cores": [
+            (
+              (.Cores[] | select(.Type == $core)) as $c |
+              if $core == "xray" then
+                $c | .Log.ErrorPath = ("/var/log/V2bX/error_" + $name + ".log") | .Log.AccessPath = ("/var/log/V2bX/access_" + $name + ".log")
+              else
+                $c
+              end
+            )
+          ],
+          "Nodes": [ .Nodes[$idx] ]
+        }' /etc/V2bX/config.json > "$out_file"
+
+        echo -e "   ├─ 已生成独立配置: ${green}${out_file}${plain} ${dim}(Core: ${ncore}, NodeID: ${nid})${plain}"
+    done
+    echo -e " ${green}✔ 拆分完成！主配置 /etc/V2bX/config.json 保持原样未修改。${plain}"
+    return 0
+}
+
+multi_migrate_instances() {
+    local mode="$1"
+    multi_split_configs || return 1
+
+    local mem_env="" cpu_quota="" nice_val="" mem_high="" mem_max=""
+    if [[ -f /etc/systemd/system/V2bX.service ]]; then
+        mem_env=$(grep '^Environment="GOMEMLIMIT=' /etc/systemd/system/V2bX.service | head -n1)
+        cpu_quota=$(grep '^CPUQuota=' /etc/systemd/system/V2bX.service | head -n1)
+        nice_val=$(grep '^Nice=' /etc/systemd/system/V2bX.service | head -n1)
+        mem_high=$(grep '^MemoryHigh=' /etc/systemd/system/V2bX.service | head -n1)
+        mem_max=$(grep '^MemoryMax=' /etc/systemd/system/V2bX.service | head -n1)
+    elif [[ -f /etc/init.d/V2bX ]]; then
+        mem_env=$(grep 'GOMEMLIMIT=' /etc/init.d/V2bX | head -n1 | sed -n 's/.*\(GOMEMLIMIT=[^" ]*\).*/\1/p')
+    fi
+
+    if command -v systemctl &>/dev/null; then
+        systemctl stop V2bX 2>/dev/null
+        systemctl disable V2bX >/dev/null 2>&1
+        for old_srv in /etc/systemd/system/multi-user.target.wants/v2bx@*.service; do
+            [[ -e "$old_srv" ]] || continue
+            local srv_base
+            srv_base=$(basename "$old_srv")
+            systemctl stop "$srv_base" 2>/dev/null
+            systemctl disable "$srv_base" >/dev/null 2>&1
+        done
+
+        cat << EOF > /etc/systemd/system/v2bx@.service
+[Unit]
+Description=V2bX Isolated Node Instance (%i)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/nodes/%i.json -w
+Restart=always
+RestartSec=5
+User=root
+LimitNOFILE=1048576
+LimitNPROC=51200
+Environment="XRAY_DNS_PATH=/etc/V2bX/dns.json"
+Environment="SING_DNS_PATH=/etc/V2bX/sing_dns.json"
+EOF
+        if [[ -n "$mem_env" ]]; then
+            {
+                echo "$mem_env"
+                echo 'Environment="GOGC=80"'
+                [[ -n "$cpu_quota" ]] && echo "$cpu_quota"
+                [[ -n "$nice_val" ]] && echo "$nice_val"
+                [[ -n "$mem_high" ]] && echo "$mem_high"
+                [[ -n "$mem_max" ]] && echo "$mem_max"
+                echo "OOMScoreAdjust=-100"
+            } >> /etc/systemd/system/v2bx@.service
+        fi
+        echo -e "[Install]\nWantedBy=multi-user.target" >> /etc/systemd/system/v2bx@.service
+        systemctl daemon-reload
+
+        for nf in /etc/V2bX/nodes/node_*.json; do
+            [[ -f "$nf" ]] || continue
+            local inst
+            inst=$(basename "$nf" .json)
+            systemctl enable "v2bx@${inst}.service" >/dev/null 2>&1
+            systemctl restart "v2bx@${inst}.service"
+            echo -e " ${green}✔ 已启动独立守护实例: v2bx@${inst}.service${plain}"
+        done
+
+    elif command -v rc-service &>/dev/null; then
+        rc-service V2bX stop 2>/dev/null
+        rc-update del V2bX default >/dev/null 2>&1
+        for old_rc in /etc/init.d/V2bX.node_* /etc/init.d/v2bx.node_*; do
+            [[ -f "$old_rc" ]] || continue
+            local rc_base
+            rc_base=$(basename "$old_rc")
+            rc-service "$rc_base" stop 2>/dev/null
+            rc-update del "$rc_base" default >/dev/null 2>&1
+            rm -f "$old_rc"
+        done
+
+        for nf in /etc/V2bX/nodes/node_*.json; do
+            [[ -f "$nf" ]] || continue
+            local inst rc_file
+            inst=$(basename "$nf" .json)
+            rc_file="/etc/init.d/v2bx.${inst}"
+            local env_line="XRAY_DNS_PATH=/etc/V2bX/dns.json SING_DNS_PATH=/etc/V2bX/sing_dns.json"
+            [[ -n "$mem_env" ]] && env_line="${env_line} ${mem_env} GOGC=80"
+            cat << EOF > "$rc_file"
+#!/sbin/openrc-run
+description="V2bX Isolated Node (${inst})"
+command="/usr/local/V2bX/V2bX"
+command_args="server -c /etc/V2bX/nodes/${inst}.json -w"
+command_background=true
+pidfile="/run/v2bx.${inst}.pid"
+output_log="/var/log/V2bX/out_${inst}.log"
+error_log="/var/log/V2bX/err_${inst}.log"
+command_env="${env_line}"
+
+depend() {
+    need net
+}
+EOF
+            chmod +x "$rc_file"
+            rc-update add "v2bx.${inst}" default >/dev/null 2>&1
+            rc-service "v2bx.${inst}" restart
+            echo -e " ${green}✔ 已启动 OpenRC 独立守护实例: v2bx.${inst}${plain}"
+        done
+    fi
+
+    touch /etc/V2bX/nodes/.multi_enabled
+    [[ "$mode" != "quiet" ]] && echo -e "\n ${green}🎉 已成功切换至【每节点独立进程模式】，各节点故障与重载完全隔离！${plain}"
+}
+
+multi_status_view() {
+    ui_section "多进程实例运行状态看板"
+    echo -e " 当前运行架构: $(detect_run_mode)\n"
+
+    if command -v systemctl &>/dev/null; then
+        local found=false
+        for nf in /etc/V2bX/nodes/node_*.json; do
+            [[ -f "$nf" ]] || continue
+            found=true
+            local inst st_color pid_info
+            inst=$(basename "$nf" .json)
+            if systemctl is-active --quiet "v2bx@${inst}.service" 2>/dev/null; then
+                st_color="${green}● 运行中${plain}"
+                pid_info=$(systemctl show -p MainPID --value "v2bx@${inst}.service" 2>/dev/null)
+            else
+                st_color="${red}○ 已停止${plain}"
+                pid_info="-"
+            fi
+            printf "  %-28s 状态: %-18b PID: %s\n" "v2bx@${inst}" "$st_color" "$pid_info"
+        done
+        [[ "$found" = false ]] && echo -e " ${yellow}暂无已拆分的节点配置文件 (/etc/V2bX/nodes/ 为空)${plain}"
+    elif command -v rc-service &>/dev/null; then
+        local found=false
+        for rc_f in /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_*; do
+            [[ -f "$rc_f" ]] || continue
+            found=true
+            local srv_name st_out
+            srv_name=$(basename "$rc_f")
+            st_out=$(rc-service "$srv_name" status 2>/dev/null)
+            if echo "$st_out" | grep -q "started"; then
+                echo -e "  ${srv_name} -> ${green}● 运行中${plain}"
+            else
+                echo -e "  ${srv_name} -> ${red}○ 已停止${plain}"
+            fi
+        done
+        [[ "$found" = false ]] && echo -e " ${yellow}当前未激活 OpenRC 多进程实例。${plain}"
+    fi
+}
+
+multi_rollback_single() {
+    ui_section "正在回滚至单进程标准模式"
+    rm -f /etc/V2bX/nodes/.multi_enabled
+    
+    if ls /etc/V2bX/nodes/node_*.json 1> /dev/null 2>&1; then
+        echo -e " ${cyan}正在将独立节点的最新配置反向同步合并至主配置...${plain}"
+        if jq --slurpfile splits /etc/V2bX/nodes/node_*.json '.Nodes = [ $splits[] | .Nodes[] ]' /etc/V2bX/config.json > /etc/V2bX/config.tmp; then
+            mv -f /etc/V2bX/config.tmp /etc/V2bX/config.json
+            echo -e " ${green}✔ 节点参数已完美合并归一至 /etc/V2bX/config.json！${plain}"
+        else
+            rm -f /etc/V2bX/config.tmp
+            echo -e " ${red}✖ 反向合并失败，将使用原主配置。${plain}"
+        fi
+    fi
+
+    if command -v systemctl &>/dev/null; then
+        for nf in /etc/V2bX/nodes/node_*.json; do
+            [[ -f "$nf" ]] || continue
+            local inst
+            inst=$(basename "$nf" .json)
+            systemctl stop "v2bx@${inst}.service" 2>/dev/null
+            systemctl disable "v2bx@${inst}.service" >/dev/null 2>&1
+        done
+        rm -f /etc/systemd/system/v2bx@.service
+        systemctl daemon-reload
+        systemctl enable V2bX >/dev/null 2>&1
+        systemctl restart V2bX
+        echo -e " ${green}✔ 已停用所有独立子实例，并恢复主服务 V2bX.service 单进程运行！${plain}"
+    elif command -v rc-service &>/dev/null; then
+        for rc_f in /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_*; do
+            [[ -f "$rc_f" ]] || continue
+            local srv_name
+            srv_name=$(basename "$rc_f")
+            rc-service "$srv_name" stop 2>/dev/null
+            rc-update del "$srv_name" default >/dev/null 2>&1
+            rm -f "$rc_f"
+        done
+        rc-update add V2bX default >/dev/null 2>&1
+        rc-service V2bX restart
+        echo -e " ${green}✔ 已恢复 OpenRC V2bX 单进程运行模式！${plain}"
+    fi
+}
+
+manage_multi_process() {
+    while true; do
+        ui_banner
+        ui_section "节点拆分与多进程隔离托管中心 (Multi-Process)"
+        echo -e " ${dim}原理：将 config.json 拆分为每节点独立进程，彻底解决“单节点报错导致全机房断连”问题。${plain}"
+        ui_line
+        echo -e "  ${cyan}[1]${plain} 🔍 仅拆分生成配置预览 ${dim}(split: 生成 /etc/V2bX/nodes/*.json，不改服务)${plain}"
+        echo -e "  ${cyan}[2]${plain} 🚀 激活多进程隔离托管 ${dim}(migrate: 停用单进程，启动 v2bx@节点 独立守护)${plain}"
+        echo -e "  ${cyan}[3]${plain} 📊 查看多进程实例状态 ${dim}(status: 查看各节点独立 PID 与存活状态)${plain}"
+        echo -e "  ${cyan}[4]${plain} ⏪ 一键回滚单进程模式 ${dim}(rollback: 随时恢复默认 V2bX.service 单进程)${plain}"
+        echo -e "  ${cyan}[0]${plain} 🚪 返回向导主菜单"
+        ui_line
+        echo -ne " ${bold}▸ 请选择操作${plain} [0-4]: "
+        read -r m_opt < /dev/tty
+        case "$m_opt" in
+            1) multi_split_configs ;;
+            2) multi_migrate_instances ;;
+            3) multi_status_view ;;
+            4) multi_rollback_single ;;
+            0) return ;;
+            *) echo -e " ${red}无效选项！${plain}" ;;
+        esac
+        echo ""
+        echo -ne " ${dim}按回车键继续...${plain}"
+        read -r < /dev/tty
+    done
+}
+
+# ════════════════════ 5. 在线自更新 ════════════════════
+update_self_script() {
+    ui_banner
+    ui_section "正在同步云端最新 xmm2 向导引擎"
+    local tmp_new="/tmp/xmm2_update_${RANDOM}"
+    local urls=(
+        "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
+        "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
+        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/xmm2"
+    )
+
+    local success=false
+    for url in "${urls[@]}"; do
+        if wget -q --timeout=10 -O "$tmp_new" "$url" || curl -sL --connect-timeout 8 "$url" -o "$tmp_new"; then
+            if [[ -f "$tmp_new" && -s "$tmp_new" ]] && grep -q "sh_ver=" "$tmp_new"; then
+                success=true; break
+            fi
+        fi
+    done
+
+    if [ "$success" = true ]; then
+        local new_ver real_self
+        new_ver=$(grep -m1 '^sh_ver=' "$tmp_new" | cut -d'"' -f2)
+        real_self=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
+        mkdir -p /usr/local/bin
+        cp -f "$tmp_new" /usr/local/bin/xmm2 2>/dev/null
+        chmod +x /usr/local/bin/xmm2 2>/dev/null
+        if [[ -f "$real_self" && "$real_self" != "/usr/local/bin/xmm2" ]]; then
+            cp -f "$tmp_new" "$real_self"
+            chmod +x "$real_self" 2>/dev/null
+        fi
+        rm -f "$tmp_new"
+        echo -e " ${green}✔ xmm2 已成功更新至 v${new_ver}！正在重新载入...${plain}"
+        sleep 1
+        exec bash "/usr/local/bin/xmm2"
+    else
+        rm -f "$tmp_new"
+        echo -e " ${red}✖ 拉取更新失败，请检查网络或 GitHub 仓库连通性！${plain}"
+    fi
+}
+
+# ════════════════════ 主循环入口 ════════════════════
+show_xmm2_menu() {
+    ui_banner
+    echo -e "  ${green}${bold}1.${plain} 🌟 全新生成节点配置 ${dim}(从云端拉取执行 xmm11_2 模块)${plain}"
+    echo -e "  ${green}${bold}2.${plain} ⚡ 调整 Xray 连接池与防爆参数 ${dim}(适配不同内存与带宽 VPS)${plain}"
+    echo -e "  ${green}${bold}3.${plain} 🔑 管理面板凭证与附属规则 ${dim}(.saved_creds / DNS / Hy2)${plain}"
+    echo -e "  ${green}${bold}4.${plain} 🛡️ 节点拆分与多进程托管 ${dim}(split / migrate / 单节点故障隔离)${plain}"
+    echo -e "  ${green}${bold}5.${plain} 🔄 在线同步云端 xmm2 脚本 ${dim}(自动拉取 GitHub 最新版)${plain}"
+    ui_line
+    echo -e "  ${dim}0.${plain} 🚪 退出向导返回主菜单"
+    ui_line
+}
+
+[[ "$1" == "1" ]] && fetch_and_run_xmm11_2 && exit 0
+
+while true; do
+    show_xmm2_menu
+    echo -ne " ${bold}▸ 请选择功能序号${plain} [0-5, 默认 1]: "
+    read -r menu_num < /dev/tty
+    [[ -z "$menu_num" ]] && menu_num="1"
+    case "$menu_num" in
+        1) fetch_and_run_xmm11_2 ;;
+        2) switch_xray_profile ;;
+        3) manage_creds_and_aux ;;
+        4) manage_multi_process ;;
+        5) update_self_script ;;
+        0) echo -e "\n ${green}已安全退出配置向导。${plain}\n"; exit 0 ;;
+        *) echo -e " ${red}无效选择，请输入 0-5！${plain}" ;;
+    esac
+    echo ""
+    echo -ne " ${dim}按回车键返回菜单...${plain}"
+    read -r < /dev/tty
+done
