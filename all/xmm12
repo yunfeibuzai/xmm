@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 麦卖云 V2bX 节点追加 + 体检 + 外置 ACME 证书管理中心 (all/xmm12)
-sh_ver="4.3.0-AllInOne"
+# 麦卖云 V2bX 节点追加 + 体检 + 外置 ACME 证书管理中心 (all/xmm12 - Shannon-x 深度适配版)
+sh_ver="4.5.0-AllInOne"
 
 # 终端色彩与样式
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
@@ -10,7 +10,7 @@ dim='\033[2m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
-mkdir -p /etc/V2bX /var/log/V2bX
+mkdir -p /etc/V2bX /etc/V2bX/nodes /var/log/V2bX
 saved_file="/etc/V2bX/.saved_creds"
 acme_env_file="/etc/V2bX/.acme_cf.env"
 config_file="/etc/V2bX/config.json"
@@ -61,9 +61,97 @@ ensure_tools() {
 }
 ensure_tools
 
+sync_multi_process_instances() {
+    local total_nodes
+    total_nodes=$(jq '.Nodes | length' "$config_file" 2>/dev/null || echo 0)
+
+    # 先清理旧实例，避免删除节点后残留幽灵进程
+    if command -v systemctl &>/dev/null; then
+        for old_srv in /etc/systemd/system/multi-user.target.wants/v2bx@*.service; do
+            [[ -e "$old_srv" ]] || continue
+            local srv_base; srv_base=$(basename "$old_srv")
+            systemctl stop "$srv_base" 2>/dev/null
+            systemctl disable "$srv_base" >/dev/null 2>&1
+        done
+    elif command -v rc-service &>/dev/null; then
+        for old_rc in /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_*; do
+            [[ -f "$old_rc" ]] || continue
+            local rc_base; rc_base=$(basename "$old_rc")
+            rc-service "$rc_base" stop 2>/dev/null
+            rc-update del "$rc_base" default >/dev/null 2>&1
+            rm -f "$old_rc"
+        done
+    fi
+
+    rm -f /etc/V2bX/nodes/node_*.json
+    if [[ "$total_nodes" -eq 0 ]]; then
+        echo -e " ${yellow}⚠ 当前已无任何节点，所有隔离实例已停止。${plain}"
+        return
+    fi
+
+    for ((i=0; i<total_nodes; i++)); do
+        local nid ntype ncore inst_name out_file
+        nid=$(jq -r ".Nodes[$i].NodeID" "$config_file")
+        ntype=$(jq -r ".Nodes[$i].NodeType" "$config_file")
+        ncore=$(jq -r ".Nodes[$i].Core" "$config_file")
+        inst_name="node_${nid}_${ntype}"
+        out_file="/etc/V2bX/nodes/${inst_name}.json"
+
+        jq --argjson idx "$i" --arg core "$ncore" --arg name "$inst_name" '
+        {
+          "Log": { "Level": (.Log.Level // "error"), "Output": "" },
+          "Runtime": (.Runtime // { "GCPercent": 50, "MemoryLimitPercent": 70 }),
+          "Cores": [
+            (
+              (.Cores[] | select(.Type == $core)) as $c |
+              if $core == "xray" then
+                $c | .Log.ErrorPath = ("/var/log/V2bX/error_" + $name + ".log") | .Log.AccessPath = ("/var/log/V2bX/access_" + $name + ".log")
+              else $c end
+            )
+          ],
+          "Nodes": [ .Nodes[$idx] ]
+        }' "$config_file" > "$out_file"
+
+        if command -v systemctl &>/dev/null; then
+            systemctl enable "v2bx@${inst_name}.service" >/dev/null 2>&1
+            systemctl restart "v2bx@${inst_name}.service"
+            echo -e " ${green}✔ 已同步重启隔离实例: v2bx@${inst_name}.service${plain}"
+        elif command -v rc-service &>/dev/null; then
+            local rc_file="/etc/init.d/v2bx.${inst_name}"
+            cat << EOF > "$rc_file"
+#!/sbin/openrc-run
+description="V2bX Isolated Node (${inst_name})"
+command="/usr/local/V2bX/V2bX"
+command_args="server -c /etc/V2bX/nodes/${inst_name}.json -w"
+command_background=true
+pidfile="/run/v2bx.${inst_name}.pid"
+output_log="/var/log/V2bX/out_${inst_name}.log"
+error_log="/var/log/V2bX/err_${inst_name}.log"
+command_env="XRAY_DNS_PATH=/etc/V2bX/dns.json SING_DNS_PATH=/etc/V2bX/sing_dns.json"
+
+depend() {
+    need net
+}
+EOF
+            chmod +x "$rc_file"
+            rc-update add "v2bx.${inst_name}" default >/dev/null 2>&1
+            rc-service "v2bx.${inst_name}" restart
+            echo -e " ${green}✔ 已同步重启 OpenRC 隔离实例: v2bx.${inst_name}${plain}"
+        fi
+    done
+}
+
 restart_v2bx_service() {
     echo ""
     ui_section "正在应用配置并重载 V2bX 服务"
+    if [[ -f /etc/V2bX/nodes/.multi_enabled ]] || \
+       compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/v2bx.node_*" >/dev/null 2>&1; then
+        echo -e " ${cyan}ℹ 检测到【多进程隔离模式】，正在自动重新拆分并同步所有节点实例...${plain}"
+        sync_multi_process_instances
+        return
+    fi
+
     if command -v systemctl &>/dev/null; then
         if systemctl restart V2bX 2>/dev/null; then
             echo -e " ${green}✔ Systemd: V2bX 服务已成功重启生效！${plain}"
@@ -86,12 +174,31 @@ init_aux_files() {
         echo '{ "outbounds": [ { "type": "direct", "tag": "direct" } ] }' > /etc/V2bX/sing_origin.json
     fi
     if [[ ! -f /etc/V2bX/dns.json ]]; then
-        echo '{ "servers": [ "1.1.1.1", "8.8.8.8", "localhost" ], "tag": "dns_inbound" }' > /etc/V2bX/dns.json
+        cat << 'EOF' > /etc/V2bX/dns.json
+{
+  "servers": [
+    "tcp://8.8.8.8:53",
+    "tcp://1.1.1.1:53",
+    "8.8.8.8",
+    "1.1.1.1"
+  ]
+}
+EOF
+    fi
+    if [[ ! -f /etc/V2bX/sing_dns.json ]]; then
+        cat << 'EOF' > /etc/V2bX/sing_dns.json
+{
+  "servers": [
+    { "address": "8.8.8.8" },
+    { "address": "1.1.1.1" }
+  ]
+}
+EOF
     fi
     if [[ ! -f /etc/V2bX/custom_outbound.json ]]; then
         cat << 'EOF' > /etc/V2bX/custom_outbound.json
 [
-  { "tag": "IPv4_out", "protocol": "freedom", "settings": { "domainStrategy": "UseIP" } },
+  { "tag": "IPv4_out", "protocol": "freedom", "streamSettings": { "sockopt": { "domainStrategy": "UseIP" } } },
   { "tag": "block", "protocol": "blackhole" }
 ]
 EOF
@@ -142,7 +249,6 @@ load_or_ask_creds() {
     local default_key=""
 
     if [[ -f "$saved_file" ]]; then
-        # shellcheck disable=SC1090
         source "$saved_file" 2>/dev/null
         default_host=${saved_host:-"https://example.com"}
         default_key=${saved_key:-""}
@@ -182,599 +288,4 @@ build_xray_core_json() {
     cat << 'EOF'
 {
   "Type": "xray",
-  "Log": { "Level": "error", "AccessPath": "", "ErrorPath": "/etc/V2bX/error.log", "MaxSize": 100, "MaxBackups": 0, "MaxDays": 90, "Compress": true },
-  "AssetPath": "/etc/V2bX/",
-  "DnsConfigPath": "/etc/V2bX/dns.json",
-  "OutboundConfigPath": "/etc/V2bX/custom_outbound.json",
-  "RouteConfigPath": "/etc/V2bX/route.json",
-  "XrayConnectionConfig": { "handshake": 10, "connIdle": 300, "uplinkOnly": 2, "downlinkOnly": 4, "bufferSize": 256 }
-}
-EOF
-}
-
-build_sing_core_json() {
-    cat << 'EOF'
-{
-  "Type": "sing",
-  "Log": { "Level": "error", "Timestamp": true },
-  "NTP": { "Enable": false, "Server": "time.apple.com", "ServerPort": 0 },
-  "OriginalPath": "/etc/V2bX/sing_origin.json"
-}
-EOF
-}
-
-build_hy2_core_json() {
-    cat << 'EOF'
-{ "Type": "hysteria2", "Log": { "Level": "error" } }
-EOF
-}
-
-# ════════════════════ 1. 原有配置无缝追加节点 ════════════════════
-collect_single_node() {
-    local idx="$1"
-    ui_section "追加配置第 ${idx} 个后端节点"
-
-    ui_step "1/4" "选择代理核心与传输协议"
-    echo -e "  ${cyan}[1]${plain} Xray      ${dim}(首选: Vless / Vmess / Reality / XHTTP / CDN)${plain}"
-    echo -e "  ${cyan}[2]${plain} Sing-box  ${dim}(首选: Shadowsocks / Trojan / Tuic / AnyTLS)${plain}"
-    echo -e "  ${cyan}[3]${plain} Hysteria2 ${dim}(官方专属高性能内核)${plain}"
-    
-    local core_num=""
-    while [[ ! "$core_num" =~ ^[1-3]$ ]]; do
-        echo -ne " ${bold}▸ 请选择内核引擎${plain} [1-3, 默认 1]: "
-        read -r core_num < /dev/tty
-        [[ -z "$core_num" ]] && core_num=1
-    done
-
-    case "$core_num" in 
-        1) core_type="xray"; has_xray=true ;; 
-        2) core_type="sing"; has_sing=true ;; 
-        3) core_type="hysteria2"; has_hysteria2=true ;; 
-    esac
-
-    local protocol_num=""
-    if [[ "$core_type" == "hysteria2" ]]; then
-        node_type="hysteria2"
-        echo -e "  ${green}✔ Hysteria2 引擎自动锁定协议: hysteria2${plain}"
-    elif [[ "$core_type" == "xray" ]]; then
-        echo -e "\n  ${cyan}[1]${plain} Vless ${dim}(Reality/XHTTP/WS)${plain}  ${cyan}[2]${plain} Vmess  ${cyan}[3]${plain} Trojan  ${cyan}[4]${plain} Shadowsocks"
-        while [[ ! "$protocol_num" =~ ^[1-4]$ ]]; do
-            echo -ne " ${bold}▸ 请选择 Xray 协议${plain} [1-4, 默认 1-Vless]: "
-            read -r protocol_num < /dev/tty
-            [[ -z "$protocol_num" ]] && protocol_num=1
-        done
-        case "$protocol_num" in
-            1) node_type="vless" ;; 2) node_type="vmess" ;; 3) node_type="trojan" ;; 4) node_type="shadowsocks" ;;
-        esac
-    elif [[ "$core_type" == "sing" ]]; then
-        echo -e "\n  ${cyan}[1]${plain} Shadowsocks  ${cyan}[2]${plain} Trojan  ${cyan}[3]${plain} Tuic  ${cyan}[4]${plain} AnyTLS  ${cyan}[5]${plain} Hysteria"
-        while [[ ! "$protocol_num" =~ ^[1-5]$ ]]; do
-            echo -ne " ${bold}▸ 请选择 Sing-box 协议${plain} [1-5, 默认 1-SS]: "
-            read -r protocol_num < /dev/tty
-            [[ -z "$protocol_num" ]] && protocol_num=1
-        done
-        case "$protocol_num" in
-            1) node_type="shadowsocks" ;; 2) node_type="trojan" ;; 3) node_type="tuic" ;; 4) node_type="anytls" ;; 5) node_type="hysteria" ;;
-        esac
-    fi
-
-    ui_step "2/4" "基础参数与监听网络"
-    node_id=""
-    while [[ ! "$node_id" =~ ^[0-9]+$ ]]; do
-        echo -ne " ${bold}▸ 请输入面板中的 Node ID${plain} (纯数字): "
-        read -r node_id < /dev/tty
-    done
-
-    local listen_ip="0.0.0.0"
-    echo -ne " ${bold}▸ 监听 IP (ListenIP)${plain} ${dim}[回车默认 0.0.0.0，双栈填 ::]${plain}: "
-    read -r input_listen < /dev/tty
-    [[ -n "$input_listen" ]] && listen_ip="$input_listen"
-
-    ui_step "3/4" "TLS 安全与证书模式"
-    local run_tls_flow=false
-    local reality_yn="n" tls_yn="n" cert_mode_num="" cert_mode="none" cert_domain="" cf_token=""
-    local cert_file="" key_file=""
-
-    if [[ "$node_type" == "vless" ]]; then
-        echo -ne " ${bold}▸ 该 Vless 节点是否为 Reality 节点？${plain} [Y/n, 默认 Y]: "
-        read -r reality_yn < /dev/tty
-        [[ -z "$reality_yn" ]] && reality_yn="y"
-        if [[ "$reality_yn" =~ ^[Yy]$ ]]; then
-            cert_mode="none"
-            echo -e "  ${green}✔ Reality 节点无需证书 (自动设为 none)${plain}"
-        else
-            run_tls_flow=true
-        fi
-    elif [[ "$node_type" =~ ^(hysteria2|tuic|hysteria|trojan)$ ]]; then
-        run_tls_flow=true
-        echo -e "  ${yellow}ℹ 协议 [${node_type}] 强制要求配置 TLS 证书。${plain}"
-    else
-        echo -ne " ${bold}▸ 是否开启 TLS 证书保护？${plain} [y/N, 默认 N]: "
-        read -r tls_yn < /dev/tty
-        [[ "$tls_yn" =~ ^[Yy]$ ]] && run_tls_flow=true
-    fi
-
-    if [ "$run_tls_flow" = true ]; then
-        echo -e "  ${cyan}[1]${plain} HTTP 模式  ${dim}(内置自动申请，需域名已解析到本机且80空闲)${plain}"
-        echo -e "  ${cyan}[2]${plain} DNS 模式   ${dim}(内置 Cloudflare API Token 自动验证)${plain}"
-        echo -e "  ${cyan}[3]${plain} File 模式  ${dim}(推荐：挂载本脚本外置 ACME 申请的证书或已有证书)${plain}"
-        echo -e "  ${cyan}[4]${plain} 本地自签   ${dim}(自动用 openssl 生成自签证书并以 File 模式挂载)${plain}"
-        
-        while [[ ! "$cert_mode_num" =~ ^[1-4]$ ]]; do
-            echo -ne " ${bold}▸ 选择证书模式${plain} [1-4, 默认 1]: "
-            read -r cert_mode_num < /dev/tty
-            [[ -z "$cert_mode_num" ]] && cert_mode_num=1
-        done
-
-        case "$cert_mode_num" in
-            1)
-                cert_mode="http"
-                while [[ -z "$cert_domain" ]]; do
-                    echo -ne " ${bold}▸ 请输入绑定域名 (如 node.example.com)${plain}: "
-                    read -r cert_domain < /dev/tty
-                done
-                cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem"
-                ;;
-            2)
-                cert_mode="dns"
-                while [[ -z "$cert_domain" ]]; do
-                    echo -ne " ${bold}▸ 请输入绑定域名 (如 node.example.com)${plain}: "
-                    read -r cert_domain < /dev/tty
-                done
-                while [[ -z "$cf_token" ]]; do
-                    echo -ne " ${bold}▸ 请输入 Cloudflare API Token${plain}: "
-                    read -r cf_token < /dev/tty
-                done
-                cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem"
-                ;;
-            3)
-                cert_mode="file"
-                echo -ne " ${bold}▸ 请输入节点域名${plain} ${dim}[如已通过外置ACME申请，直接填该域名]${plain}: "
-                read -r cert_domain < /dev/tty
-                local def_c="/etc/V2bX/fullchain.cer"
-                local def_k="/etc/V2bX/cert.key"
-                if [[ -n "$cert_domain" && -f "/etc/V2bX/${cert_domain}.cert.pem" ]]; then
-                    def_c="/etc/V2bX/${cert_domain}.cert.pem"
-                    def_k="/etc/V2bX/${cert_domain}.key.pem"
-                fi
-                echo -ne " ${bold}▸ 公钥绝对路径${plain} ${dim}[默认: ${def_c}]${plain}: "
-                read -r input_cert < /dev/tty
-                cert_file=${input_cert:-"$def_c"}
-                echo -ne " ${bold}▸ 私钥绝对路径${plain} ${dim}[默认: ${def_k}]${plain}: "
-                read -r input_key < /dev/tty
-                key_file=${input_key:-"$def_k"}
-                ;;
-            4)
-                cert_mode="file"
-                echo -ne " ${bold}▸ 请输入自签域名${plain} ${dim}[默认: cf.babymonster.cc.cd]${plain}: "
-                read -r input_sni < /dev/tty
-                cert_domain=${input_sni:-"cf.babymonster.cc.cd"}
-                cert_file="/etc/V2bX/${cert_domain}.cert.pem"
-                key_file="/etc/V2bX/${cert_domain}.key.pem"
-                openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-                    -keyout "$key_file" -out "$cert_file" \
-                    -subj "/CN=${cert_domain}" >/dev/null 2>&1
-                echo -e "  ${green}✔ 自签名证书已生成至 ${cert_file}${plain}"
-                ;;
-        esac
-    fi
-
-    local cert_block=""
-    if [[ "$cert_mode" == "dns" ]]; then
-        cert_block='{ "CertMode": "dns", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "'"${cert_file}"'", "KeyFile": "'"${key_file}"'", "Email": "admin@v2bx.com", "Provider": "cloudflare", "DNSEnv": { "CF_DNS_API_TOKEN": "'"${cf_token}"'", "CLOUDFLARE_DNS_API_TOKEN": "'"${cf_token}"'" } }'
-    elif [[ "$cert_mode" =~ ^(http|file)$ ]]; then
-        cert_block='{ "CertMode": "'"${cert_mode}"'", "RejectUnknownSni": false, "CertDomain": "'"${cert_domain}"'", "CertFile": "'"${cert_file}"'", "KeyFile": "'"${key_file}"'", "Email": "admin@v2bx.com" }'
-    else
-        cert_block='{ "CertMode": "none" }'
-    fi
-
-    ui_step "4/4" "流量控制与网络策略"
-    local limit_block=""
-    echo -ne " ${bold}▸ 是否配置本节点限速/设备锁 (LimitConfig)？${plain} [y/N, 默认 N]: "
-    read -r limit_yn < /dev/tty
-    if [[ "$limit_yn" =~ ^[Yy]$ ]]; then
-        echo -ne "   └─ 单用户限速 (Mbps, 0不限) [0]: "; read -r speed_limit < /dev/tty; [[ -z "$speed_limit" ]] && speed_limit=0
-        echo -ne "   └─ 单用户设备限制 (0跟随面板) [0]: "; read -r dev_limit < /dev/tty; [[ -z "$dev_limit" ]] && dev_limit=0
-        echo -ne "   └─ 单用户连接上限 (0不限) [0]: "; read -r conn_limit < /dev/tty; [[ -z "$conn_limit" ]] && conn_limit=0
-        echo -ne "   └─ 启用暴流动态压制 (60秒达1GB限速10Mbps)？[y/N]: "; read -r dyn_yn < /dev/tty
-        local enable_dyn="false"; [[ "$dyn_yn" =~ ^[Yy]$ ]] && enable_dyn="true"
-        limit_block=', "LimitConfig": { "EnableRealtime": false, "SpeedLimit": '"${speed_limit}"', "DeviceLimit": '"${dev_limit}"', "ConnLimit": '"${conn_limit}"', "EnableDynamicSpeedLimit": '"${enable_dyn}"', "DynamicSpeedLimitConfig": { "Periodic": 60, "Traffic": 1073741824, "SpeedLimit": 10, "ExpireTime": 600 } }'
-    fi
-
-    if [[ "$core_type" == "xray" ]]; then
-        local dns_type="UseIPv4"
-        echo -ne " ${bold}▸ Xray 出站解析策略${plain} [1:IPv4(默认) 2:IPv6 3:双栈 4:AsIs]: "
-        read -r dns_opt < /dev/tty
-        case "$dns_opt" in 2) dns_type="UseIPv6" ;; 3) dns_type="UseIP" ;; 4) dns_type="AsIs" ;; esac
-        current_node='{ "Core": "xray", "ApiHost": "'"${api_host}"'", "ApiKey": "'"${api_key}"'", "NodeID": '"${node_id}"', "NodeType": "'"${node_type}"'", "Timeout": 30, "ListenIP": "'"${listen_ip}"'", "SendIP": "0.0.0.0", "DeviceOnlineMinTraffic": 200, "ReportMinTraffic": 0, "EnableProxyProtocol": false, "EnableUot": true, "EnableTFO": true, "DNSType": "'"${dns_type}"'", "DisableSniffing": false, "CertConfig": '"${cert_block}""${limit_block}"' }'
-    elif [[ "$core_type" == "sing" ]]; then
-        current_node='{ "Core": "sing", "ApiHost": "'"${api_host}"'", "ApiKey": "'"${api_key}"'", "NodeID": '"${node_id}"', "NodeType": "'"${node_type}"'", "Timeout": 30, "ListenIP": "'"${listen_ip}"'", "SendIP": "0.0.0.0", "DeviceOnlineMinTraffic": 200, "ReportMinTraffic": 0, "EnableTFO": true, "EnableSniff": true, "SniffOverrideDestination": true, "CertConfig": '"${cert_block}""${limit_block}"' }'
-    elif [[ "$core_type" == "hysteria2" ]]; then
-        current_node='{ "Core": "hysteria2", "ApiHost": "'"${api_host}"'", "ApiKey": "'"${api_key}"'", "NodeID": '"${node_id}"', "NodeType": "hysteria2", "Hysteria2ConfigPath": "/etc/V2bX/hy2config.yaml", "Timeout": 30, "ListenIP": "", "SendIP": "0.0.0.0", "DeviceOnlineMinTraffic": 200, "ReportMinTraffic": 0, "CertConfig": '"${cert_block}""${limit_block}"' }'
-    fi
-}
-
-wizard_append_node() {
-    ui_banner
-    init_aux_files
-
-    if [[ ! -f "$config_file" ]] || ! jq -e . "$config_file" >/dev/null 2>&1; then
-        echo -e " ${yellow}ℹ 未检测到有效的主配置，正在初始化标准配置骨架...${plain}"
-        echo '{ "Log": { "Level": "error", "Output": "" }, "Cores": [], "Nodes": [] }' | jq . > "$config_file"
-    fi
-
-    load_or_ask_creds
-
-    has_xray=false; has_sing=false; has_hysteria2=false
-    local exist_count
-    exist_count=$(jq '.Nodes | length' "$config_file" 2>/dev/null || echo 0)
-
-    while true; do
-        ((exist_count++))
-        collect_single_node "$exist_count"
-
-        local tmp_json="/tmp/v2bx_append_${RANDOM}.json"
-        # 优化 JQ 安全合并机制 (先写入缓冲文件，再核对正确性)
-        cp -f "$config_file" "$tmp_json"
-
-        if [ "$has_xray" = true ] && ! jq -e '.Cores[] | select(.Type=="xray")' "$tmp_json" >/dev/null 2>&1; then
-            local xc; xc=$(build_xray_core_json)
-            jq --argjson c "$xc" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv -f "${tmp_json}.new" "$tmp_json"
-        fi
-        if [ "$has_sing" = true ] && ! jq -e '.Cores[] | select(.Type=="sing")' "$tmp_json" >/dev/null 2>&1; then
-            local sc; sc=$(build_sing_core_json)
-            jq --argjson c "$sc" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv -f "${tmp_json}.new" "$tmp_json"
-        fi
-        if [ "$has_hysteria2" = true ] && ! jq -e '.Cores[] | select(.Type=="hysteria2")' "$tmp_json" >/dev/null 2>&1; then
-            local hc; hc=$(build_hy2_core_json)
-            jq --argjson c "$hc" '.Cores += [$c]' "$tmp_json" > "${tmp_json}.new" && mv -f "${tmp_json}.new" "$tmp_json"
-        fi
-
-        jq --argjson n "$current_node" '.Nodes += [$n]' "$tmp_json" > "${tmp_json}.new" 2>/dev/null
-        
-        # 强制检验新生成的 JSON 是否合法，再覆盖配置，防爆
-        if jq -e . "${tmp_json}.new" >/dev/null 2>&1; then
-            mv -f "${tmp_json}.new" "$config_file"
-            echo -e "\n ${green}✔ 节点 #${exist_count} (NodeID: ${node_id} / ${node_type}) 已成功追加！${plain}"
-        else
-            echo -e "\n ${red}✖ JSON 合并致命校验失败，已安全回滚原配置！${plain}"
-        fi
-        rm -f "$tmp_json" "${tmp_json}.new"
-
-        echo ""
-        echo -ne " ${bold}▸ 是否继续追加下一个节点？${plain} [y/N, 默认 N]: "
-        read -r cont < /dev/tty
-        [[ ! "$cont" =~ ^[Yy]$ ]] && break
-    done
-
-    restart_v2bx_service
-}
-
-# ════════════════════ 2. 面板对接与网络“红绿灯”体检中心 ════════════════════
-traffic_light_health_check() {
-    ui_banner
-    ui_section "🚦 面板对接与网络“红绿灯”全景体检中心"
-
-    if [[ ! -f "$config_file" ]] || ! jq -e . "$config_file" >/dev/null 2>&1; then
-        echo -e " ${red}🔴 [红灯] /etc/V2bX/config.json 不存在或配置结构被破坏！${plain}"
-        return
-    fi
-
-    if pgrep -f "/usr/local/V2bX/V2bX" >/dev/null 2>&1; then
-        echo -e " 🟢 ${green}[进程状态]${plain} V2bX 核心进程正在后台正常运行"
-    else
-        echo -e " 🔴 ${red}[进程状态]${plain} V2bX 进程未运行！"
-    fi
-
-    ui_line
-    echo -e " ${bold}正在逐个节点发起面板 UniProxy API 握手与证书诊断...${plain}\n"
-
-    local node_len
-    node_len=$(jq '.Nodes | length' "$config_file")
-    if [[ "$node_len" -eq 0 ]]; then
-        echo -e " ${yellow}🟡 [黄灯] 当前配置文件中没有任何节点${plain}"
-        return
-    fi
-
-    local i=0
-    while [[ $i -lt $node_len ]]; do
-        local c_core c_host c_key c_id c_type c_cmode c_cfile
-        c_core=$(jq -r ".Nodes[$i].Core // \"xray\"" "$config_file")
-        c_host=$(jq -r ".Nodes[$i].ApiHost // \"\"" "$config_file")
-        c_key=$(jq -r ".Nodes[$i].ApiKey // \"\"" "$config_file")
-        c_id=$(jq -r ".Nodes[$i].NodeID // 0" "$config_file")
-        c_type=$(jq -r ".Nodes[$i].NodeType // \"vless\"" "$config_file")
-        c_cmode=$(jq -r ".Nodes[$i].CertConfig.CertMode // \"none\"" "$config_file")
-        c_cfile=$(jq -r ".Nodes[$i].CertConfig.CertFile // \"\"" "$config_file")
-
-        c_host="${c_host%/}"
-        local test_url="${c_host}/api/v1/server/UniProxy/config?node_id=${c_id}&node_type=${c_type}&token=${c_key}"
-        local resp_file="/tmp/v2bx_diag_${RANDOM}.json"
-        local http_code
-        # 优化探测：强制开启超时防拥塞锁
-        http_code=$(curl -sL -w "%{http_code}" --connect-timeout 8 --max-time 12 -o "$resp_file" "$test_url" 2>/dev/null)
-
-        echo -e "${cyan}${bold}┌── 节点 #$((i+1)) [NodeID: ${c_id} | 内核: ${c_core} | 协议: ${c_type}]${plain}"
-        echo -e "│ 对接面板: ${c_host}"
-
-        if [[ "$http_code" == "200" ]]; then
-            local srv_port
-            srv_port=$(jq -r '.server_port // .port // "动态下发"' "$resp_file" 2>/dev/null)
-            echo -e "│ API 握手: 🟢 ${green}[绿灯正常] (HTTP 200) — 端口: ${srv_port}${plain}"
-        elif [[ "$http_code" == "000" ]]; then
-            echo -e "│ API 握手: 🔴 ${red}[红灯断联] (网络完全不通或 SSL 阻断)${plain}"
-        elif [[ "$http_code" == "401" || "$http_code" == "403" || "$http_code" == "500" ]]; then
-            local err_msg
-            err_msg=$(jq -r '.message // "密钥错误或 NodeID 不存在"' "$resp_file" 2>/dev/null | head -c 60)
-            echo -e "│ API 握手: 🔴 ${red}[红灯拒绝] (HTTP ${http_code}) — 原因: ${err_msg}${plain}"
-        else
-            echo -e "│ API 握手: 🟡 ${yellow}[黄灯异常] (HTTP ${http_code})${plain}"
-        fi
-        rm -f "$resp_file"
-
-        if [[ "$c_cmode" == "file" ]]; then
-            if [[ -f "$c_cfile" && -s "$c_cfile" ]]; then
-                local exp_date
-                exp_date=$(openssl x509 -enddate -noout -in "$c_cfile" 2>/dev/null | cut -d= -f2)
-                echo -e "│ 证书状态: 🟢 ${green}[文件就绪] 到期: ${exp_date:-未知}${plain}"
-            else
-                echo -e "│ 证书状态: 🔴 ${red}[证书缺失] 找不到: ${c_cfile}${plain}"
-            fi
-        else
-            echo -e "│ 证书状态: 🟢 ${dim}模式: ${c_cmode}${plain}"
-        fi
-        echo -e "${cyan}${bold}└─────────────────────────────────────────────────────${plain}"
-        ((i++))
-    done
-}
-
-# ════════════════════ 3. 独立外置 ACME.sh 证书控制台 ════════════════════
-install_acme_sh() {
-    if [[ ! -f ~/.acme.sh/acme.sh ]]; then
-        echo -e " ${cyan}正在安装独立 acme.sh 证书引擎...${plain}"
-        curl -sL https://get.acme.sh | sh -s email=admin@v2bx.com >/dev/null 2>&1
-        ~/.acme.sh/acme.sh --upgrade --auto-upgrade >/dev/null 2>&1
-        ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1
-    fi
-}
-
-acme_bind_to_node() {
-    local domain="$1"
-    local cert_f="$2"
-    local key_f="$3"
-
-    if [[ ! -f "$config_file" ]]; then return; fi
-    echo -ne "\n ${bold}▸ 是否将该证书一键挂载到现有节点 (自动改为 CertMode: file)？${plain} [Y/n]: "
-    read -r bind_yn < /dev/tty
-    [[ -z "$bind_yn" ]] && bind_yn="y"
-    [[ ! "$bind_yn" =~ ^[Yy]$ ]] && return
-
-    echo -e " 当前已配置的节点列表："
-    jq -r '.Nodes[] | "  ▸ NodeID: \(.NodeID)  | 协议: \(.NodeType)  | 证书模式: \(.CertConfig.CertMode)"' "$config_file"
-    echo -ne " ${bold}▸ 请输入要绑定此证书的 NodeID${plain} (输入 all 绑定所有): "
-    read -r target_id < /dev/tty
-    [[ -z "$target_id" ]] && return
-
-    local tmp_j="/tmp/v2bx_cert_bind_${RANDOM}.json"
-    if [[ "$target_id" == "all" ]]; then
-        jq --arg dom "$domain" --arg cf "$cert_f" --arg kf "$key_f" \
-           '(.Nodes[].CertConfig) = {"CertMode":"file","RejectUnknownSni":false,"CertDomain":$dom,"CertFile":$cf,"KeyFile":$kf}' \
-           "$config_file" > "$tmp_j" && mv -f "$tmp_j" "$config_file"
-        echo -e " ${green}✔ 已挂载至所有节点！${plain}"
-        restart_v2bx_service
-    elif [[ "$target_id" =~ ^[0-9]+$ ]]; then
-        jq --argjson nid "$target_id" --arg dom "$domain" --arg cf "$cert_f" --arg kf "$key_f" \
-           '(.Nodes[] | select(.NodeID == $nid) | .CertConfig) = {"CertMode":"file","RejectUnknownSni":false,"CertDomain":$dom,"CertFile":$cf,"KeyFile":$kf}' \
-           "$config_file" > "$tmp_j" && mv -f "$tmp_j" "$config_file"
-        echo -e " ${green}✔ 已挂载至 NodeID: ${target_id}！${plain}"
-        restart_v2bx_service
-    fi
-    rm -f "$tmp_j"
-}
-
-external_acme_console() {
-    while true; do
-        ui_banner
-        ui_section "🔐 独立外置 ACME.sh 证书管理控制台"
-        echo -e "  ${cyan}[1]${plain} 🌐 Cloudflare DNS API 模式申请 ${dim}(免80端口 / 支持套CDN / 自动续签)${plain}"
-        echo -e "  ${cyan}[2]${plain} ⚡ HTTP 80 端口独立模式申请 ${dim}(需80端口空闲)${plain}"
-        echo -e "  ${cyan}[3]${plain} 🔄 手动强制续签所有外置证书"
-        echo -e "  ${cyan}[4]${plain} 📋 查看本地已安装的证书详情"
-        echo -e "  ${cyan}[5]${plain} 🔗 将已有证书一键绑定到指定 NodeID"
-        echo -e "  ${cyan}[0]${plain} 🔙 返回上级菜单"
-        ui_line
-        echo -ne " ${bold}▸ 请选择操作${plain} [0-5]: "
-        read -r acme_opt < /dev/tty
-
-        case "$acme_opt" in
-            1)
-                install_acme_sh
-                local saved_cf_token=""
-                [[ -f "$acme_env_file" ]] && source "$acme_env_file" 2>/dev/null
-                echo -ne " ${bold}▸ 请输入要申请证书的域名${plain} (如 node1.example.com): "
-                read -r domain < /dev/tty
-                [[ -z "$domain" ]] && continue
-
-                if [[ -n "$saved_cf_token" ]]; then
-                    echo -ne " ${bold}▸ Cloudflare API Token${plain} ${dim}[回车使用已保存 Token]${plain}: "
-                    read -r in_token < /dev/tty
-                    cf_token=${in_token:-"$saved_cf_token"}
-                else
-                    echo -ne " ${bold}▸ 请输入 Cloudflare API Token${plain}: "
-                    read -r cf_token < /dev/tty
-                fi
-                [[ -z "$cf_token" ]] && echo -e " ${red}✖ Token 不能为空！${plain}" && sleep 1 && continue
-
-                echo "saved_cf_token=\"$cf_token\"" > "$acme_env_file"
-                chmod 600 "$acme_env_file"
-                export CF_Token="$cf_token"
-
-                echo -e "\n ${cyan}正在通过 Cloudflare DNS 验证申请 ECC 证书 (${domain})...${plain}"
-                if ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$domain" --keylength ec-256 --force; then
-                    local cert_f="/etc/V2bX/${domain}.cert.pem"
-                    local key_f="/etc/V2bX/${domain}.key.pem"
-                    local r_cmd="systemctl restart V2bX 2>/dev/null || rc-service V2bX restart 2>/dev/null || true"
-                    ~/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
-                        --fullchain-file "$cert_f" \
-                        --key-file "$key_f" \
-                        --reloadcmd "$r_cmd"
-                    ln -sf "$cert_f" /etc/V2bX/fullchain.cer
-                    ln -sf "$key_f" /etc/V2bX/cert.key
-                    echo -e "\n ${green}✔ 证书签发成功！已启用定时自动续签与自动重启。${plain}"
-                    acme_bind_to_node "$domain" "$cert_f" "$key_f"
-                else
-                    echo -e "\n ${red}✖ 证书申请失败！${plain}"
-                fi
-                echo -ne "\n ${dim}按回车键继续...${plain}"; read -r < /dev/tty
-                ;;
-            2)
-                install_acme_sh
-                echo -ne " ${bold}▸ 请输入已解析到本机的域名${plain}: "
-                read -r domain < /dev/tty
-                [[ -z "$domain" ]] && continue
-                if ~/.acme.sh/acme.sh --issue -d "$domain" --standalone --keylength ec-256 --force; then
-                    local cert_f="/etc/V2bX/${domain}.cert.pem"
-                    local key_f="/etc/V2bX/${domain}.key.pem"
-                    local r_cmd="systemctl restart V2bX 2>/dev/null || rc-service V2bX restart 2>/dev/null || true"
-                    ~/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
-                        --fullchain-file "$cert_f" \
-                        --key-file "$key_f" \
-                        --reloadcmd "$r_cmd"
-                    echo -e "\n ${green}✔ 证书签发成功！${plain}"
-                    acme_bind_to_node "$domain" "$cert_f" "$key_f"
-                else
-                    echo -e "\n ${red}✖ 申请失败，请检查 80 端口占用。${plain}"
-                fi
-                echo -ne "\n ${dim}按回车键继续...${plain}"; read -r < /dev/tty
-                ;;
-            3)
-                install_acme_sh
-                ~/.acme.sh/acme.sh --cron --force
-                echo -e " ${green}✔ 强制续签任务执行完毕！${plain}"
-                echo -ne "\n ${dim}按回车键继续...${plain}"; read -r < /dev/tty
-                ;;
-            4)
-                echo -e "\n ${bold}/etc/V2bX/ 目录下的证书文件状态：${plain}"
-                for f in /etc/V2bX/*.cert.pem /etc/V2bX/*.cer; do
-                    [[ ! -e "$f" ]] && continue
-                    local exp_d subj_d
-                    exp_d=$(openssl x509 -enddate -noout -in "$f" 2>/dev/null | cut -d= -f2)
-                    subj_d=$(openssl x509 -subject -noout -in "$f" 2>/dev/null | sed 's/.*CN *= *//')
-                    echo -e "  🟢 文件: ${cyan}${f}${plain} | 域名: ${subj_d} | 到期: ${green}${exp_d}${plain}"
-                done
-                echo -ne "\n ${dim}按回车键继续...${plain}"; read -r < /dev/tty
-                ;;
-            5)
-                echo -ne " ${bold}▸ 请输入域名${plain}: "
-                read -r b_dom < /dev/tty
-                [[ -f "/etc/V2bX/${b_dom}.cert.pem" ]] && acme_bind_to_node "$b_dom" "/etc/V2bX/${b_dom}.cert.pem" "/etc/V2bX/${b_dom}.key.pem"
-                echo -ne "\n ${dim}按回车键继续...${plain}"; read -r < /dev/tty
-                ;;
-            0|*) break ;;
-        esac
-    done
-}
-
-# ════════════════════ 4. 节点精准删除 ════════════════════
-remove_single_node() {
-    ui_banner
-    ui_section "🗑️ 现有节点精准管理与移除"
-    if [[ ! -f "$config_file" ]] || ! jq -e . "$config_file" >/dev/null 2>&1; then
-        echo -e " ${red}✖ 配置文件不存在或损坏！${plain}"; return
-    fi
-    echo -e " 当前已挂载的节点列表："
-    jq -r '.Nodes | to_entries[] | "  [\(.key + 1)] NodeID: \(.value.NodeID) | 内核: \(.value.Core) | 协议: \(.value.NodeType)"' "$config_file"
-    ui_line
-    echo -ne " ${bold}▸ 请输入要删除的 NodeID${plain} (直接回车取消): "
-    read -r del_id < /dev/tty
-    [[ ! "$del_id" =~ ^[0-9]+$ ]] && return
-
-    local tmp_d="/tmp/v2bx_del_${RANDOM}.json"
-    if jq --argjson id "$del_id" 'del(.Nodes[] | select(.NodeID == $id))' "$config_file" > "$tmp_d" 2>/dev/null; then
-        # 强制检验新 JSON 是否有效，再覆盖
-        if jq -e . "$tmp_d" >/dev/null 2>&1; then
-            mv -f "$tmp_d" "$config_file"
-            echo -e " ${green}✔ 已从配置中安全移除 NodeID: ${del_id}！${plain}"
-            restart_v2bx_service
-        else
-            echo -e " ${red}✖ 移除逻辑导致配置毁损，已取消操作！${plain}"
-        fi
-    else
-        echo -e " ${red}✖ 移除失败！${plain}"
-    fi
-    rm -f "$tmp_d"
-}
-
-# ════════════════════ 5. 在线自更新 ════════════════════
-update_self_script() {
-    ui_banner
-    ui_section "🔄 正在同步云端最新 all/xmm12 脚本"
-    local tmp_new="/tmp/xmm12_update_${RANDOM}"
-    
-    # 引入智能多镜像下载引擎
-    local urls=(
-        "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm12"
-        "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm12"
-        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm12"
-    )
-
-    local success=false
-    for url in "${urls[@]}"; do
-        if curl -sSfL --connect-timeout 8 "$url" -o "$tmp_new" || wget -q --timeout=10 -O "$tmp_new" "$url"; then
-            if [[ -f "$tmp_new" && -s "$tmp_new" ]] && grep -q "sh_ver=" "$tmp_new"; then
-                success=true; break
-            fi
-        fi
-    done
-
-    if [ "$success" = true ]; then
-        local new_ver; new_ver=$(grep -m1 '^sh_ver=' "$tmp_new" | cut -d'"' -f2)
-        local real_me
-        real_me=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
-        if [[ -f "$real_me" && "$real_me" != "/usr/local/bin/xmm12" ]]; then
-            cp -f "$tmp_new" "$real_me" 2>/dev/null
-            chmod +x "$real_me" 2>/dev/null
-        fi
-        cp -f "$tmp_new" /usr/local/bin/xmm12 2>/dev/null
-        chmod +x /usr/local/bin/xmm12 2>/dev/null
-        rm -f "$tmp_new"
-        echo -e " ${green}✔ all/xmm12 已成功更新至 v${new_ver}！${plain}"
-        sleep 1
-        exec bash "/usr/local/bin/xmm12"
-    else
-        rm -f "$tmp_new"
-        echo -e " ${red}✖ 更新失败，可能遭遇网络阻断，请稍后重试！${plain}"
-    fi
-}
-
-# ════════════════════ 主菜单循环 ════════════════════
-show_xmm12_menu() {
-    ui_banner
-    echo -e "  ${green}${bold}1.${plain} ➕ 在原有配置新增节点 ${dim}(无缝增量追加 Cores 与 Nodes)${plain}"
-    echo -e "  ${green}${bold}2.${plain} 🚦 面板对接“红绿灯”体检中心 ${dim}(API 握手测通 / 端口监听 / 证书巡检)${plain}"
-    echo -e "  ${green}${bold}3.${plain} 🔐 独立外置 ACME.sh 证书控制台 ${dim}(CF DNS 申请 / 自动续签 / 一键挂载)${plain}"
-    echo -e "  ${green}${bold}4.${plain} 🗑️ 现有节点精准查看与移除 ${dim}(按 NodeID 删除单个节点)${plain}"
-    echo -e "  ${green}${bold}5.${plain} 🔄 在线更新当前脚本 ${dim}(同步 GitHub 最新版 all/xmm12)${plain}"
-    ui_line
-    echo -e "  ${dim}0.${plain} 🚪 退出返回主控菜单"
-    ui_line
-}
-
-while true; do
-    show_xmm12_menu
-    echo -ne " ${bold}▸ 请选择功能序号${plain} [0-5, 默认 1]: "
-    read -r menu_num < /dev/tty
-    [[ -z "$menu_num" ]] && menu_num="1"
-    case "$menu_num" in
-        1) wizard_append_node ;;
-        2) traffic_light_health_check ;;
-        3) external_acme_console ;;
-        4) remove_single_node ;;
-        5) update_self_script ;;
-        0) echo -e "\n ${green}已返回主控菜单。${plain}\n"; exit 0 ;;
-        *) echo -e " ${red}无效选择，请输入 0-5！${plain}" ;;
-    esac
-    echo ""
-    echo -ne " ${dim}按回车键返回子菜单...${plain}"
-    read -r < /dev/tty
-done
+  "Log": { "Level": "error", 
