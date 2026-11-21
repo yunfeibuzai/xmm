@@ -1,74 +1,129 @@
 #!/bin/sh
 # =======================================================================
-# Komari Agent 智能专属工具箱 (GitHub 极速优化版)
+# Komari Agent 智能专属工具箱 (双栈/IPv6 LXC 极速优化版)
 # =======================================================================
 
-GITHUB_URL="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/tz"
+RAW_SCRIPT_URL="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/tz"
+BIN_PATH="/usr/local/bin/komari-agent"
+SELF_PATH="/usr/local/bin/tz"
+
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
-upgrade_myself() {
-    clear
-    printf "${YELLOW}正在从 GitHub 检查并拉取最新工具箱脚本...${NC}\n"
-    LOCAL_PATH="/usr/local/bin/tz"
-    TMP_FILE="/tmp/tz_update_safe.sh"
-    rm -f "$TMP_FILE"
-
-    if command -v curl >/dev/null 2>&1; then
-        curl -sSL -k -o "$TMP_FILE" "$GITHUB_URL"
-    else
-        wget --no-check-certificate -O "$TMP_FILE" "$GITHUB_URL" >/dev/null 2>&1
-    fi
-
-    if [ $? -eq 0 ] && [ -s "$TMP_FILE" ]; then
-        if ! head -n 1 "$TMP_FILE" | grep -qE '^#!/bin/(sh|bash)'; then
-            printf "${RED}❌ 升级中断：检测到非法脚本头部！${NC}\n"
-            rm -f "$TMP_FILE"; read -r _ < /dev/tty; return
+# 自动同步安装为全局快捷命令 tz
+case "$0" in
+    sh|bash|ash|dash|*/sh|*/bash|*/ash|*/dash) ;;
+    *)
+        if [ -f "$0" ] && [ "$0" != "$SELF_PATH" ]; then
+            cp -f "$0" "$SELF_PATH" 2>/dev/null && chmod +x "$SELF_PATH" 2>/dev/null
         fi
-        if ! sh -n "$TMP_FILE" >/dev/null 2>&1; then
-            printf "${RED}❌ 升级中断：拉取的脚本存在语法错误！${NC}\n"
-            rm -f "$TMP_FILE"; read -r _ < /dev/tty; return
+        ;;
+esac
+
+# 多源智能下载与校验: smart_download <原始GitHub链接> <目标路径> <elf|text>
+smart_download() {
+    ORIG_URL="$1"
+    DEST_FILE="$2"
+    CHECK_MODE="$3"
+    TMP_DL="${DEST_FILE}.tmp"
+
+    MIRROR_LIST="
+https://ghfast.top/${ORIG_URL}
+https://gh-proxy.com/${ORIG_URL}
+${ORIG_URL}
+"
+    for URL in $MIRROR_LIST; do
+        rm -f "$TMP_DL"
+        printf "${CYAN}   -> 尝试拉取: %s${NC}\n" "$URL"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fSL -k --connect-timeout 8 -m 60 -o "$TMP_DL" "$URL" >/dev/null 2>&1
+        elif command -v wget >/dev/null 2>&1; then
+            wget --no-check-certificate -T 10 -t 2 -q -O "$TMP_DL" "$URL" >/dev/null 2>&1
+        else
+            printf "${RED}❌ 系统缺少 curl 和 wget，无法执行下载！${NC}\n"
+            return 1
         fi
-        mv "$TMP_FILE" "$LOCAL_PATH"
-        chmod +x "$LOCAL_PATH"
-        printf "${GREEN}✔ 脚本已成功一键升级到 GitHub 最新版本！请重新运行 tz。${NC}\n"
-        exit 0
-    else
-        rm -f "$TMP_FILE"
-        printf "${RED}❌ 升级失败！网络连接超时。${NC}\n"
-        read -r _ < /dev/tty
-    fi
+
+        [ ! -s "$TMP_DL" ] && continue
+
+        if [ "$CHECK_MODE" = "elf" ]; then
+            FILE_SIZE=$(wc -c < "$TMP_DL" 2>/dev/null | tr -d ' ')
+            if [ "${FILE_SIZE:-0}" -gt 500000 ] && dd if="$TMP_DL" bs=4 count=1 2>/dev/null | tr -d '\000-\037' | grep -q 'ELF'; then
+                mv -f "$TMP_DL" "$DEST_FILE"
+                return 0
+            fi
+        elif [ "$CHECK_MODE" = "text" ]; then
+            if head -n 1 "$TMP_DL" | grep -qE '^#!/bin/(sh|bash)' && sh -n "$TMP_DL" >/dev/null 2>&1; then
+                mv -f "$TMP_DL" "$DEST_FILE"
+                return 0
+            fi
+        fi
+    done
+
+    rm -f "$TMP_DL"
+    return 1
 }
 
-run_original_installer() {
-    clear
-    printf "${GREEN}=======================================================${NC}\n"
-    printf "${GREEN}    Komari Agent 智能解析 & 纯净全卸载安装向导        ${NC}\n"
-    printf "${GREEN}=======================================================${NC}\n"
+get_arch() {
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        i386|i686) echo "386" ;;
+        *) echo "" ;;
+    esac
+}
 
-    printf "${YELLOW}👉 请粘贴 Komari 主控后台的 Agent 安装命令并回车：${NC}\n"
-    read -r RAW_CMD < /dev/tty
+# 统一参数解析器：完整保留 -e、-t 之外的所有附加开关参数
+# 输出全局变量: PARSED_URL, PARSED_TOKEN, PARSED_EXTRA
+parse_agent_args() {
+    CLEAN_CMD=$(printf '%s' "$1" | tr '\r\n\t\\' '    ' | tr -d "\"'" | sed -E 's/ +/ /g; s/^ //; s/ $//')
 
-    SERVER_URL=$(echo "$RAW_CMD" | grep -oE '\-e +[^ ]+' | head -n1 | awk '{print $2}')
-    SECRET_TOKEN=$(echo "$RAW_CMD" | grep -oE '\-t +[^ ]+' | head -n1 | awk '{print $2}')
+    case " $CLEAN_CMD " in
+        *" -- "*)
+            ARGS_PART=$(printf '%s' "$CLEAN_CMD" | sed 's/^.* -- //')
+            ;;
+        *)
+            # 若开头是可执行文件路径（如 /usr/local/bin/komari-agent），先去掉程序路径本身
+            ARGS_PART=$(printf '%s' "$CLEAN_CMD" | sed -E 's/^[^-][^ ]* +//')
+            ;;
+    esac
 
-    if echo "$RAW_CMD" | grep -q -- "-- "; then
-        ARGS_PART=$(echo "$RAW_CMD" | sed 's/.*-- //')
-    else
-        ARGS_PART="$RAW_CMD"
+    PARSED_URL=$(printf ' %s ' "$ARGS_PART" | grep -oE ' -e[= ]+[^ ]+' | head -n1 | sed -E 's/^ -e[= ]+//')
+    PARSED_TOKEN=$(printf ' %s ' "$ARGS_PART" | grep -oE ' -t[= ]+[^ ]+' | head -n1 | sed -E 's/^ -t[= ]+//')
+    PARSED_EXTRA=$(printf ' %s ' "$ARGS_PART" | sed -E 's/ -e[= ]+[^ ]+/ /g; s/ -t[= ]+[^ ]+/ /g; s/ +/ /g; s/^ //; s/ $//')
+}
+
+# 通用提取本机已安装探针的启动参数（兼容进程、Systemd、OpenRC 及官方路径）
+get_existing_config() {
+    FOUND_LINE=""
+    for p in /proc/[0-9]*/cmdline; do
+        [ -r "$p" ] || continue
+        CMD_STR=$(tr '\0' ' ' < "$p" 2>/dev/null)
+        case "$CMD_STR" in
+            *komari-agent*|*/komari/agent*)
+                FOUND_LINE="$CMD_STR"
+                break
+                ;;
+        esac
+    done
+
+    if [ -z "$FOUND_LINE" ] && [ -f /etc/systemd/system/komari-agent.service ]; then
+        FOUND_LINE=$(grep '^ExecStart=' /etc/systemd/system/komari-agent.service | head -n1 | sed 's/^ExecStart=//')
     fi
-    EXTRA_ARGS=$(echo "$ARGS_PART" | sed -E 's/\-e +[^ ]+//g' | sed -E 's/\-t +[^ ]+//g' | sed -E 's/ +/ /g' | sed 's/^[ \t]*//;s/[ \t]*$//')
 
-    if [ -z "$SERVER_URL" ] || [ -z "$SECRET_TOKEN" ]; then
-        printf "${RED}❌ [错误] 无法提取到 -e (主控地址) 或 -t (Token)！${NC}\n"
-        read -r _ < /dev/tty; return
+    if [ -z "$FOUND_LINE" ] && [ -f /etc/init.d/komari-agent ]; then
+        FOUND_LINE=$(grep '^command_args=' /etc/init.d/komari-agent | head -n1 | sed 's/^command_args=//')
     fi
 
-    BIN_PATH="/usr/local/bin/komari-agent"
-    printf "${YELLOW}[1/4] 正在启动强力清场，彻底擦除旧版组件...${NC}\n"
+    printf '%s' "$FOUND_LINE"
+}
 
+# 彻底停止并清理旧服务
+cleanup_agent() {
     if [ -f /etc/init.d/komari-agent ]; then
         rc-service komari-agent stop >/dev/null 2>&1
         rc-service komari-agent zap >/dev/null 2>&1
@@ -84,53 +139,45 @@ run_original_installer() {
     fi
 
     if command -v pkill >/dev/null 2>&1; then
-        pkill -9 komari-agent >/dev/null 2>&1
+        pkill -9 -f 'komari-agent|/komari/agent' >/dev/null 2>&1
     else
-        for pid in $(ps -ef 2>/dev/null | grep '[k]omari-agent' | awk '{print $2}'); do kill -9 "$pid" >/dev/null 2>&1; done
+        for pid in $(ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent' | awk '{print $2}'); do
+            kill -9 "$pid" >/dev/null 2>&1
+        done
     fi
     rm -f "$BIN_PATH" /var/run/komari-agent.pid
-    printf "${GREEN}   ✔ 旧环境已完全擦除。${NC}\n"
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64) BIN_ARCH="amd64" ;;
-        aarch64|arm64) BIN_ARCH="arm64" ;;
-        i386|i686) BIN_ARCH="386" ;;
-        *) printf "${RED}❌ 未知的系统架构: $ARCH${NC}\n"; read -r _ < /dev/tty; return ;;
-    esac
+}
 
-    printf "${YELLOW}[2/4] 正在下载官方轻量化二进制程序...${NC}\n"
-    mkdir -p "$(dirname "$BIN_PATH")"
-    DOWNLOAD_URL="https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${BIN_ARCH}"
+# 写入并启动守护进程
+setup_service() {
+    S_URL="$1"
+    S_TOKEN="$2"
+    S_ARGS="$3"
 
-    if command -v curl >/dev/null 2>&1; then
-        curl -L -k -o "$BIN_PATH" "$DOWNLOAD_URL"
+    if [ -n "$S_ARGS" ]; then
+        FULL_ARGS="-e ${S_URL} -t ${S_TOKEN} ${S_ARGS}"
     else
-        wget --no-check-certificate -O "$BIN_PATH" "$DOWNLOAD_URL" 2>/dev/null || wget -O "$BIN_PATH" "$DOWNLOAD_URL"
+        FULL_ARGS="-e ${S_URL} -t ${S_TOKEN}"
     fi
 
-    if [ ! -f "$BIN_PATH" ] || [ ! -s "$BIN_PATH" ]; then
-        printf "${RED}❌ 文件下载失败，请检查网络。${NC}\n"; read -r _ < /dev/tty; return
-    fi
-    chmod +x "$BIN_PATH"
-
-    printf "${YELLOW}[3/4] 正在配置系统守护服务...${NC}\n"
-    if [ -f /sbin/openrc-run ] || { [ -d /etc/init.d ] && [ ! -f /lib/systemd/systemd ]; }; then
-        printf "${GREEN}   配置全新 OpenRC 守护系统 (Alpine Linux)${NC}\n"
+    if [ -f /sbin/openrc-run ] || { [ -d /etc/init.d ] && [ ! -d /run/systemd/system ]; }; then
+        printf "${GREEN}   配置 OpenRC 守护系统 (Alpine Linux)${NC}\n"
         cat << END_OPENRC > /etc/init.d/komari-agent
 #!/sbin/openrc-run
 name="komari-agent"
 description="Komari Agent Secure Service"
+export GOMEMLIMIT="20MiB"
 command="${BIN_PATH}"
-command_args="-e ${SERVER_URL} -t ${SECRET_TOKEN} ${EXTRA_ARGS}"
+command_args="${FULL_ARGS}"
 pidfile="/var/run/\${RC_SVCNAME}.pid"
 command_background="true"
 depend() { need net; }
 END_OPENRC
         chmod +x /etc/init.d/komari-agent
         rc-update add komari-agent default >/dev/null 2>&1
-        rc-service komari-agent start >/dev/null 2>&1
-    elif command -v systemctl >/dev/null 2>&1; then
-        printf "${GREEN}   配置全新 Systemd 守护系统${NC}\n"
+        rc-service komari-agent restart >/dev/null 2>&1
+    elif command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        printf "${GREEN}   配置 Systemd 守护系统${NC}\n"
         cat << END_SYSTEMD > /etc/systemd/system/komari-agent.service
 [Unit]
 Description=Komari Agent Secure Service
@@ -138,7 +185,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${BIN_PATH} -e ${SERVER_URL} -t ${SECRET_TOKEN} ${EXTRA_ARGS}
+Environment="GOMEMLIMIT=20MiB"
+ExecStart=${BIN_PATH} ${FULL_ARGS}
 Restart=always
 RestartSec=5
 StandardOutput=null
@@ -151,17 +199,237 @@ END_SYSTEMD
         systemctl enable komari-agent >/dev/null 2>&1
         systemctl restart komari-agent >/dev/null 2>&1
     else
-        nohup "$BIN_PATH" -e "$SERVER_URL" -t "$SECRET_TOKEN" $EXTRA_ARGS >/dev/null 2>&1 &
+        printf "${YELLOW}   精简容器无守护进程管理器，使用后台模式启动${NC}\n"
+        GOMEMLIMIT="20MiB" nohup "$BIN_PATH" -e "$S_URL" -t "$S_TOKEN" $S_ARGS >/dev/null 2>&1 &
     fi
+}
+
+# 安装主流程
+install_agent() {
+    RAW_CMD="$1"
+    SILENT_MODE="$2"
+
+    if [ -z "$RAW_CMD" ]; then
+        clear
+        printf "${GREEN}=======================================================${NC}\n"
+        printf "${GREEN}    Komari Agent 智能解析 & 纯净全卸载安装向导        ${NC}\n"
+        printf "${GREEN}=======================================================${NC}\n"
+        printf "${YELLOW}👉 请粘贴 Komari 主控后台的 Agent 安装命令并回车：${NC}\n"
+        read -r RAW_CMD < /dev/tty
+    fi
+
+    parse_agent_args "$RAW_CMD"
+    SERVER_URL="$PARSED_URL"
+    SECRET_TOKEN="$PARSED_TOKEN"
+    EXTRA_ARGS="$PARSED_EXTRA"
+
+    if [ -z "$SERVER_URL" ] || [ -z "$SECRET_TOKEN" ]; then
+        printf "${RED}❌ [错误] 无法提取到 -e (主控地址) 或 -t (Token)，请检查输入！${NC}\n"
+        [ "$SILENT_MODE" != "1" ] && { printf "按回车键返回..."; read -r _ < /dev/tty; }
+        return 1
+    fi
+
+    BIN_ARCH=$(get_arch)
+    if [ -z "$BIN_ARCH" ]; then
+        printf "${RED}❌ 不支持的系统架构: %s${NC}\n" "$(uname -m)"
+        [ "$SILENT_MODE" != "1" ] && read -r _ < /dev/tty
+        return 1
+    fi
+
+    printf "\n${CYAN}解析参数确认：${NC}\n"
+    printf "  主控地址: ${GREEN}%s${NC}\n" "$SERVER_URL"
+    printf "  通信密钥: ${GREEN}%s${NC}\n" "$SECRET_TOKEN"
+    printf "  附加参数: ${GREEN}%s${NC}\n" "${EXTRA_ARGS:-无}"
+
+    printf "\n${YELLOW}[1/4] 正在彻底清理旧版组件与残留进程...${NC}\n"
+    cleanup_agent
+    printf "${GREEN}   ✔ 旧环境已完全擦除。${NC}\n"
+
+    printf "${YELLOW}[2/4] 正在下载并校验官方二进制程序 (%s)...${NC}\n" "$BIN_ARCH"
+    mkdir -p "$(dirname "$BIN_PATH")"
+    DOWNLOAD_URL="https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-${BIN_ARCH}"
+
+    if ! smart_download "$DOWNLOAD_URL" "$BIN_PATH" "elf"; then
+        printf "${RED}❌ 二进制文件下载或校验失败，请检查网络连接（纯 IPv6 需确保 DNS64 正常）。${NC}\n"
+        [ "$SILENT_MODE" != "1" ] && { printf "按回车键返回..."; read -r _ < /dev/tty; }
+        return 1
+    fi
+    chmod +x "$BIN_PATH"
+    printf "${GREEN}   ✔ 二进制文件校验通过。${NC}\n"
+
+    printf "${YELLOW}[3/4] 正在配置守护服务 (内存限制 GOMEMLIMIT=20MiB)...${NC}\n"
+    setup_service "$SERVER_URL" "$SECRET_TOKEN" "$EXTRA_ARGS"
 
     printf "${YELLOW}[4/4] 正在进行运行状态体检...${NC}\n"
     sleep 2
-    PROCESS_COUNT=$(ps -ef 2>/dev/null | grep '[k]omari-agent' | wc -l)
+    PROCESS_COUNT=$(ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent' | wc -l | tr -d ' ')
 
     printf "${GREEN}=======================================================${NC}\n"
-    printf "${GREEN} 🎉 Komari Agent 纯净全新部署完毕！${NC}\n"
-    printf " 活跃进程数: ${YELLOW}$PROCESS_COUNT${NC} (标准单例应为 1)\n"
+    if [ "${PROCESS_COUNT:-0}" -ge 1 ]; then
+        printf "${GREEN} 🎉 Komari Agent 部署成功并已上线！${NC}\n"
+    else
+        printf "${RED} ⚠️ 进程未检测到存活，请使用菜单 [5] 查看报错日志！${NC}\n"
+    fi
+    printf " 活跃进程数: ${YELLOW}%s${NC} (标准单例为 1)\n" "$PROCESS_COUNT"
     printf "${GREEN}=======================================================${NC}\n"
+
+    if [ "$SILENT_MODE" != "1" ]; then
+        printf "按回车键返回主菜单..."
+        read -r _ < /dev/tty
+    fi
+}
+
+# 手动重启 Komari Agent 探针
+restart_agent() {
+    SILENT_CLI="$1"
+    [ "$SILENT_CLI" != "1" ] && clear
+    printf "${YELLOW}正在重启 Komari Agent 探针服务...${NC}\n"
+
+    if [ -f /etc/init.d/komari-agent ]; then
+        rc-service komari-agent restart >/dev/null 2>&1 || {
+            rc-service komari-agent zap >/dev/null 2>&1
+            rc-service komari-agent start >/dev/null 2>&1
+        }
+    elif command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && [ -f /etc/systemd/system/komari-agent.service ]; then
+        systemctl restart komari-agent >/dev/null 2>&1
+    else
+        EXISTING_ARGS=$(get_existing_config)
+        if [ -z "$EXISTING_ARGS" ]; then
+            printf "${RED}❌ 未检测到已安装的 Komari Agent 服务或配置，请先选择 [1] 进行安装！${NC}\n"
+            [ "$SILENT_CLI" != "1" ] && { printf "按回车键返回主菜单..."; read -r _ < /dev/tty; }
+            return 1
+        fi
+        parse_agent_args "$EXISTING_ARGS"
+
+        TARGET_BIN="$BIN_PATH"
+        [ ! -x "$TARGET_BIN" ] && [ -x /opt/komari/agent ] && TARGET_BIN="/opt/komari/agent"
+
+        if [ ! -x "$TARGET_BIN" ] || [ -z "$PARSED_URL" ] || [ -z "$PARSED_TOKEN" ]; then
+            printf "${RED}❌ 无法定位可执行文件或启动参数，建议直接使用 [1] 重新部署！${NC}\n"
+            [ "$SILENT_CLI" != "1" ] && { printf "按回车键返回主菜单..."; read -r _ < /dev/tty; }
+            return 1
+        fi
+
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -9 -f 'komari-agent|/komari/agent' >/dev/null 2>&1
+        else
+            for pid in $(ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent' | awk '{print $2}'); do
+                kill -9 "$pid" >/dev/null 2>&1
+            done
+        fi
+        sleep 1
+        GOMEMLIMIT="20MiB" nohup "$TARGET_BIN" -e "$PARSED_URL" -t "$PARSED_TOKEN" $PARSED_EXTRA >/dev/null 2>&1 &
+    fi
+
+    sleep 2
+    PROCESS_COUNT=$(ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent' | wc -l | tr -d ' ')
+    if [ "${PROCESS_COUNT:-0}" -ge 1 ]; then
+        printf "${GREEN}✔ Komari Agent 重启成功！当前活跃进程数: %s${NC}\n" "$PROCESS_COUNT"
+    else
+        printf "${RED}⚠️ 重启后未检测到存活进程，请使用 [5] 查看报错日志！${NC}\n"
+    fi
+
+    if [ "$SILENT_CLI" != "1" ]; then
+        printf "按回车键返回主菜单..."
+        read -r _ < /dev/tty
+    fi
+}
+
+# 保留现有 Token/地址/附加参数，仅升级 Agent 二进制
+upgrade_agent_binary() {
+    clear
+    printf "${YELLOW}正在读取本机现有 Komari Agent 配置...${NC}\n"
+    EXISTING_ARGS=$(get_existing_config)
+
+    if [ -z "$EXISTING_ARGS" ]; then
+        printf "${RED}❌ 未找到本机已安装的服务配置，请先使用菜单 [1] 进行全新安装！${NC}\n"
+        printf "按回车键返回..."
+        read -r _ < /dev/tty
+        return
+    fi
+
+    printf "${GREEN}已完整提取原配置与附加参数，直接执行平滑升级...${NC}\n"
+    install_agent "$EXISTING_ARGS" "0"
+}
+
+# 显示当前已安装探针的 Token 令牌与对接信息
+show_token_info() {
+    SILENT_CLI="$1"
+    [ "$SILENT_CLI" != "1" ] && clear
+
+    EXISTING_ARGS=$(get_existing_config)
+    if [ -z "$EXISTING_ARGS" ]; then
+        printf "${RED}❌ 当前服务器未检测到已安装的 Komari Agent！${NC}\n"
+        [ "$SILENT_CLI" != "1" ] && { printf "按回车键返回主菜单..."; read -r _ < /dev/tty; }
+        return 1
+    fi
+
+    parse_agent_args "$EXISTING_ARGS"
+
+    printf "${GREEN}=======================================================${NC}\n"
+    printf "${GREEN}    当前节点 Komari Agent 凭证与配置信息              ${NC}\n"
+    printf "${GREEN}=======================================================${NC}\n"
+    printf "  主控地址 (-e) : ${CYAN}%s${NC}\n" "${PARSED_URL:-未检测到}"
+    printf "  Token 令牌 (-t): ${YELLOW}%s${NC}\n" "${PARSED_TOKEN:-未检测到}"
+    printf "  附加参数      : ${GREEN}%s${NC}\n" "${PARSED_EXTRA:-无}"
+    printf "${GREEN}-------------------------------------------------------${NC}\n"
+    printf "  一键迁移/重装参数（可直接复制粘贴给 tz 使用）：\n"
+    if [ -n "$PARSED_EXTRA" ]; then
+        printf "  ${GREEN}-e %s -t %s %s${NC}\n" "$PARSED_URL" "$PARSED_TOKEN" "$PARSED_EXTRA"
+    else
+        printf "  ${GREEN}-e %s -t %s${NC}\n" "$PARSED_URL" "$PARSED_TOKEN"
+    fi
+    printf "${GREEN}=======================================================${NC}\n"
+
+    if [ "$SILENT_CLI" != "1" ]; then
+        printf "按回车键返回主菜单..."
+        read -r _ < /dev/tty
+    fi
+}
+
+upgrade_myself() {
+    clear
+    printf "${YELLOW}正在通过多源加速通道拉取最新 tz 脚本...${NC}\n"
+    TMP_SCRIPT="/tmp/tz_update_safe.sh"
+
+    if smart_download "$RAW_SCRIPT_URL" "$TMP_SCRIPT" "text"; then
+        mv -f "$TMP_SCRIPT" "$SELF_PATH"
+        chmod +x "$SELF_PATH"
+        printf "${GREEN}✔ 脚本已升级到最新版本！请重新输入 tz 启动。${NC}\n"
+        exit 0
+    else
+        printf "${RED}❌ 升级失败！所有镜像及直连节点均无法下载或语法校验未通过。${NC}\n"
+        printf "按回车键返回主菜单..."
+        read -r _ < /dev/tty
+    fi
+}
+
+check_status() {
+    clear
+    printf "${GREEN}=======================================================${NC}\n"
+    printf "${GREEN}    Komari Agent 运行状态与最近日志诊断               ${NC}\n"
+    printf "${GREEN}=======================================================${NC}\n"
+    PROCESS_COUNT=$(ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent' | wc -l | tr -d ' ')
+    printf "活跃进程数: ${YELLOW}%s${NC}\n" "$PROCESS_COUNT"
+    ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent'
+    printf "\n${CYAN}--- 最近服务日志 ---${NC}\n"
+    if command -v journalctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        journalctl -u komari-agent -n 15 --no-pager 2>/dev/null
+    elif [ -f /etc/init.d/komari-agent ]; then
+        rc-service komari-agent status 2>/dev/null
+    else
+        printf "精简容器环境无 journalctl 日志输出。\n"
+    fi
+    printf "\n按回车键返回主菜单..."
+    read -r _ < /dev/tty
+}
+
+uninstall_agent() {
+    clear
+    printf "${YELLOW}正在彻底卸载 Komari Agent 及自启服务...${NC}\n"
+    cleanup_agent
+    printf "${GREEN}✔ Komari Agent 已完全卸载清理！${NC}\n"
+    printf "按回车键返回主菜单..."
     read -r _ < /dev/tty
 }
 
@@ -171,18 +439,40 @@ show_menu() {
     printf "${GREEN}    Komari Agent 智能管理工具箱 (快捷键: tz)          ${NC}\n"
     printf "${GREEN}=======================================================${NC}\n"
     printf "  ${YELLOW}[1]${NC} 全新纯净卸载 & 安装 Komari Agent\n"
-    printf "  ${YELLOW}[2]${NC} 一键升级 tz 脚本自身\n"
+    printf "  ${YELLOW}[2]${NC} 手动重启 Komari Agent 探针\n"
+    printf "  ${YELLOW}[3]${NC} 保留原配置，原地升级 Agent 内核\n"
+    printf "  ${YELLOW}[4]${NC} 查看当前节点配置与 Token 令牌\n"
+    printf "  ${YELLOW}[5]${NC} 查看 Agent 运行状态与报错日志\n"
+    printf "  ${YELLOW}[6]${NC} 一键升级 tz 脚本自身\n"
+    printf "  ${YELLOW}[7]${NC} 彻底卸载 Komari Agent\n"
     printf "  ${YELLOW}[0]${NC} 退出工具箱\n"
     printf "${GREEN}=======================================================${NC}\n"
-    printf "请选择操作 [0-2]: "
+    printf "请选择操作 [0-7]: "
     read -r CHOICE < /dev/tty
 
     case "$CHOICE" in
-        1) run_original_installer; show_menu ;;
-        2) upgrade_myself ;;
+        1) install_agent "" "0"; show_menu ;;
+        2) restart_agent "0"; show_menu ;;
+        3) upgrade_agent_binary; show_menu ;;
+        4) show_token_info "0"; show_menu ;;
+        5) check_status; show_menu ;;
+        6) upgrade_myself ;;
+        7) uninstall_agent; show_menu ;;
         0) printf "\n退出成功！\n"; exit 0 ;;
         *) printf "${RED}输入错误！${NC}\n"; sleep 1; show_menu ;;
     esac
 }
 
-show_menu
+# 支持命令行直接带参执行，无参则进入交互菜单
+if [ $# -gt 0 ]; then
+    case "$1" in
+        restart) restart_agent "1" ;;
+        token) show_token_info "1" ;;
+        update) upgrade_myself ;;
+        status) check_status ;;
+        uninstall) uninstall_agent ;;
+        *) install_agent "$*" "1" ;;
+    esac
+else
+    show_menu
+fi
