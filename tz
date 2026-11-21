@@ -13,16 +13,6 @@ RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# 自动同步安装为全局快捷命令 tz
-case "$0" in
-    sh|bash|ash|dash|*/sh|*/bash|*/ash|*/dash) ;;
-    *)
-        if [ -f "$0" ] && [ "$0" != "$SELF_PATH" ]; then
-            cp -f "$0" "$SELF_PATH" 2>/dev/null && chmod +x "$SELF_PATH" 2>/dev/null
-        fi
-        ;;
-esac
-
 # 多源智能下载与校验: smart_download <原始GitHub链接> <目标路径> <elf|text>
 smart_download() {
     ORIG_URL="$1"
@@ -67,6 +57,32 @@ ${ORIG_URL}
     return 1
 }
 
+# 自动注册全局快捷命令 tz（兼容目录缺失、管道运行及精简 PATH 环境）
+ensure_global_shortcut() {
+    mkdir -p /usr/local/bin 2>/dev/null
+    case "$0" in
+        sh|bash|ash|dash|*/sh|*/bash|*/ash|*/dash|/dev/fd/*|/proc/*)
+            if [ ! -x "$SELF_PATH" ]; then
+                smart_download "$RAW_SCRIPT_URL" "$SELF_PATH" "text" >/dev/null 2>&1 && chmod +x "$SELF_PATH" 2>/dev/null
+            fi
+            ;;
+        *)
+            if [ -f "$0" ] && [ "$0" != "$SELF_PATH" ]; then
+                cp -f "$0" "$SELF_PATH" 2>/dev/null && chmod +x "$SELF_PATH" 2>/dev/null
+            fi
+            ;;
+    esac
+
+    if [ -x "$SELF_PATH" ]; then
+        case ":$PATH:" in
+            *:/usr/local/bin:*) ;;
+            *)
+                [ -d /usr/bin ] && [ ! -e /usr/bin/tz ] && ln -sf "$SELF_PATH" /usr/bin/tz 2>/dev/null
+                ;;
+        esac
+    fi
+}
+
 get_arch() {
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -78,7 +94,6 @@ get_arch() {
 }
 
 # 统一参数解析器：完整保留 -e、-t 之外的所有附加开关参数
-# 输出全局变量: PARSED_URL, PARSED_TOKEN, PARSED_EXTRA
 parse_agent_args() {
     CLEAN_CMD=$(printf '%s' "$1" | tr '\r\n\t\\' '    ' | tr -d "\"'" | sed -E 's/ +/ /g; s/^ //; s/ $//')
 
@@ -364,7 +379,6 @@ change_token() {
         read -r INPUT_TOKEN < /dev/tty
     fi
 
-    # 兼容直接粘贴纯 Token 或粘贴包含 -t xxx 的命令行
     CLEAN_INPUT=$(printf '%s' "$INPUT_TOKEN" | tr '\r\n\t\\' '    ' | tr -d "\"'" | sed -E 's/ +/ /g; s/^ //; s/ $//')
     case " $CLEAN_INPUT " in
         *" -t "*)
@@ -381,7 +395,6 @@ change_token() {
         return 1
     fi
 
-    # 若原进程使用官方路径 /opt/komari/agent，将其同步迁移至 BIN_PATH 免重新下载
     if [ ! -x "$BIN_PATH" ] && [ -x /opt/komari/agent ]; then
         mkdir -p "$(dirname "$BIN_PATH")"
         cp -f /opt/komari/agent "$BIN_PATH" && chmod +x "$BIN_PATH"
@@ -394,7 +407,6 @@ change_token() {
     fi
 
     printf "\n${YELLOW}正在写入新 Token 并重启守护服务...${NC}\n"
-    # 若为精简容器无 Systemd/OpenRC，先结束旧进程防止双开
     if [ ! -f /sbin/openrc-run ] && { [ ! -d /etc/init.d ] || [ -d /run/systemd/system ]; } && { ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; }; then
         kill_running_agent
         sleep 1
@@ -479,8 +491,10 @@ upgrade_myself() {
     TMP_SCRIPT="/tmp/tz_update_safe.sh"
 
     if smart_download "$RAW_SCRIPT_URL" "$TMP_SCRIPT" "text"; then
+        mkdir -p "$(dirname "$SELF_PATH")"
         mv -f "$TMP_SCRIPT" "$SELF_PATH"
         chmod +x "$SELF_PATH"
+        ensure_global_shortcut
         printf "${GREEN}✔ 脚本已升级到最新版本！请重新输入 tz 启动。${NC}\n"
         exit 0
     else
@@ -550,6 +564,8 @@ show_menu() {
         *) printf "${RED}输入错误！${NC}\n"; sleep 1; show_menu ;;
     esac
 }
+
+ensure_global_shortcut
 
 # 支持命令行直接带参执行，无参则进入交互菜单
 if [ $# -gt 0 ]; then
