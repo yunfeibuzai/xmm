@@ -87,7 +87,6 @@ parse_agent_args() {
             ARGS_PART=$(printf '%s' "$CLEAN_CMD" | sed 's/^.* -- //')
             ;;
         *)
-            # 若开头是可执行文件路径（如 /usr/local/bin/komari-agent），先去掉程序路径本身
             ARGS_PART=$(printf '%s' "$CLEAN_CMD" | sed -E 's/^[^-][^ ]* +//')
             ;;
     esac
@@ -122,6 +121,16 @@ get_existing_config() {
     printf '%s' "$FOUND_LINE"
 }
 
+kill_running_agent() {
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -9 -f 'komari-agent|/komari/agent' >/dev/null 2>&1
+    else
+        for pid in $(ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent' | awk '{print $2}'); do
+            kill -9 "$pid" >/dev/null 2>&1
+        done
+    fi
+}
+
 # 彻底停止并清理旧服务
 cleanup_agent() {
     if [ -f /etc/init.d/komari-agent ]; then
@@ -138,13 +147,7 @@ cleanup_agent() {
         systemctl daemon-reload >/dev/null 2>&1
     fi
 
-    if command -v pkill >/dev/null 2>&1; then
-        pkill -9 -f 'komari-agent|/komari/agent' >/dev/null 2>&1
-    else
-        for pid in $(ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent' | awk '{print $2}'); do
-            kill -9 "$pid" >/dev/null 2>&1
-        done
-    fi
+    kill_running_agent
     rm -f "$BIN_PATH" /var/run/komari-agent.pid
 }
 
@@ -268,7 +271,7 @@ install_agent() {
     if [ "${PROCESS_COUNT:-0}" -ge 1 ]; then
         printf "${GREEN} 🎉 Komari Agent 部署成功并已上线！${NC}\n"
     else
-        printf "${RED} ⚠️ 进程未检测到存活，请使用菜单 [5] 查看报错日志！${NC}\n"
+        printf "${RED} ⚠️ 进程未检测到存活，请使用菜单 [6] 查看报错日志！${NC}\n"
     fi
     printf " 活跃进程数: ${YELLOW}%s${NC} (标准单例为 1)\n" "$PROCESS_COUNT"
     printf "${GREEN}=======================================================${NC}\n"
@@ -310,13 +313,7 @@ restart_agent() {
             return 1
         fi
 
-        if command -v pkill >/dev/null 2>&1; then
-            pkill -9 -f 'komari-agent|/komari/agent' >/dev/null 2>&1
-        else
-            for pid in $(ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent' | awk '{print $2}'); do
-                kill -9 "$pid" >/dev/null 2>&1
-            done
-        fi
+        kill_running_agent
         sleep 1
         GOMEMLIMIT="20MiB" nohup "$TARGET_BIN" -e "$PARSED_URL" -t "$PARSED_TOKEN" $PARSED_EXTRA >/dev/null 2>&1 &
     fi
@@ -326,8 +323,97 @@ restart_agent() {
     if [ "${PROCESS_COUNT:-0}" -ge 1 ]; then
         printf "${GREEN}✔ Komari Agent 重启成功！当前活跃进程数: %s${NC}\n" "$PROCESS_COUNT"
     else
-        printf "${RED}⚠️ 重启后未检测到存活进程，请使用 [5] 查看报错日志！${NC}\n"
+        printf "${RED}⚠️ 重启后未检测到存活进程，请使用 [6] 查看报错日志！${NC}\n"
     fi
+
+    if [ "$SILENT_CLI" != "1" ]; then
+        printf "按回车键返回主菜单..."
+        read -r _ < /dev/tty
+    fi
+}
+
+# 手动修改当前节点 Token（保留原有 -e 地址与所有附加参数）
+change_token() {
+    INPUT_TOKEN="$1"
+    SILENT_CLI="$2"
+    [ "$SILENT_CLI" != "1" ] && clear
+
+    EXISTING_ARGS=$(get_existing_config)
+    if [ -z "$EXISTING_ARGS" ]; then
+        printf "${RED}❌ 未检测到已安装的 Komari Agent，请先使用菜单 [1] 进行安装！${NC}\n"
+        [ "$SILENT_CLI" != "1" ] && { printf "按回车键返回主菜单..."; read -r _ < /dev/tty; }
+        return 1
+    fi
+
+    parse_agent_args "$EXISTING_ARGS"
+    if [ -z "$PARSED_URL" ]; then
+        printf "${RED}❌ 无法读取原主控地址 (-e)，建议使用菜单 [1] 重新部署！${NC}\n"
+        [ "$SILENT_CLI" != "1" ] && { printf "按回车键返回主菜单..."; read -r _ < /dev/tty; }
+        return 1
+    fi
+
+    if [ -z "$INPUT_TOKEN" ]; then
+        printf "${GREEN}=======================================================${NC}\n"
+        printf "${GREEN}    手动修改 Komari Agent 节点 Token 令牌             ${NC}\n"
+        printf "${GREEN}=======================================================${NC}\n"
+        printf "  当前主控地址 : ${CYAN}%s${NC}\n" "$PARSED_URL"
+        printf "  当前旧 Token : ${YELLOW}%s${NC}\n" "${PARSED_TOKEN:-无}"
+        printf "  保留附加参数 : ${GREEN}%s${NC}\n" "${PARSED_EXTRA:-无}"
+        printf "${GREEN}-------------------------------------------------------${NC}\n"
+        printf "${YELLOW}👉 请输入新的 Token 令牌（支持直接粘贴密钥或完整命令）：${NC}\n"
+        read -r INPUT_TOKEN < /dev/tty
+    fi
+
+    # 兼容直接粘贴纯 Token 或粘贴包含 -t xxx 的命令行
+    CLEAN_INPUT=$(printf '%s' "$INPUT_TOKEN" | tr '\r\n\t\\' '    ' | tr -d "\"'" | sed -E 's/ +/ /g; s/^ //; s/ $//')
+    case " $CLEAN_INPUT " in
+        *" -t "*)
+            NEW_TOKEN=$(printf ' %s ' "$CLEAN_INPUT" | grep -oE ' -t[= ]+[^ ]+' | head -n1 | sed -E 's/^ -t[= ]+//')
+            ;;
+        *)
+            NEW_TOKEN=$(printf '%s' "$CLEAN_INPUT" | awk '{print $1}')
+            ;;
+    esac
+
+    if [ -z "$NEW_TOKEN" ]; then
+        printf "${RED}❌ 输入为空，未提取到有效的 Token，已取消修改！${NC}\n"
+        [ "$SILENT_CLI" != "1" ] && { printf "按回车键返回主菜单..."; read -r _ < /dev/tty; }
+        return 1
+    fi
+
+    # 若原进程使用官方路径 /opt/komari/agent，将其同步迁移至 BIN_PATH 免重新下载
+    if [ ! -x "$BIN_PATH" ] && [ -x /opt/komari/agent ]; then
+        mkdir -p "$(dirname "$BIN_PATH")"
+        cp -f /opt/komari/agent "$BIN_PATH" && chmod +x "$BIN_PATH"
+    fi
+
+    if [ ! -x "$BIN_PATH" ]; then
+        printf "${RED}❌ 未找到 komari-agent 可执行文件，请使用菜单 [1] 重新部署！${NC}\n"
+        [ "$SILENT_CLI" != "1" ] && { printf "按回车键返回主菜单..."; read -r _ < /dev/tty; }
+        return 1
+    fi
+
+    printf "\n${YELLOW}正在写入新 Token 并重启守护服务...${NC}\n"
+    # 若为精简容器无 Systemd/OpenRC，先结束旧进程防止双开
+    if [ ! -f /sbin/openrc-run ] && { [ ! -d /etc/init.d ] || [ -d /run/systemd/system ]; } && { ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; }; then
+        kill_running_agent
+        sleep 1
+    fi
+
+    setup_service "$PARSED_URL" "$NEW_TOKEN" "$PARSED_EXTRA"
+    sleep 2
+    PROCESS_COUNT=$(ps -ef 2>/dev/null | grep -E '[k]omari-agent|[/]komari/agent' | wc -l | tr -d ' ')
+
+    printf "${GREEN}=======================================================${NC}\n"
+    if [ "${PROCESS_COUNT:-0}" -ge 1 ]; then
+        printf "${GREEN} ✔ Token 修改成功并已生效！${NC}\n"
+        printf "   新 Token 令牌 : ${YELLOW}%s${NC}\n" "$NEW_TOKEN"
+        printf "   保留附加参数  : ${GREEN}%s${NC}\n" "${PARSED_EXTRA:-无}"
+        printf "   当前活跃进程  : ${YELLOW}%s${NC}\n" "$PROCESS_COUNT"
+    else
+        printf "${RED} ⚠️ Token 已写入，但进程未检测到存活，请用菜单 [6] 查看日志！${NC}\n"
+    fi
+    printf "${GREEN}=======================================================${NC}\n"
 
     if [ "$SILENT_CLI" != "1" ]; then
         printf "按回车键返回主菜单..."
@@ -442,12 +528,13 @@ show_menu() {
     printf "  ${YELLOW}[2]${NC} 手动重启 Komari Agent 探针\n"
     printf "  ${YELLOW}[3]${NC} 保留原配置，原地升级 Agent 内核\n"
     printf "  ${YELLOW}[4]${NC} 查看当前节点配置与 Token 令牌\n"
-    printf "  ${YELLOW}[5]${NC} 查看 Agent 运行状态与报错日志\n"
-    printf "  ${YELLOW}[6]${NC} 一键升级 tz 脚本自身\n"
-    printf "  ${YELLOW}[7]${NC} 彻底卸载 Komari Agent\n"
+    printf "  ${YELLOW}[5]${NC} 手动修改当前节点 Token 令牌\n"
+    printf "  ${YELLOW}[6]${NC} 查看 Agent 运行状态与报错日志\n"
+    printf "  ${YELLOW}[7]${NC} 一键升级 tz 脚本自身\n"
+    printf "  ${YELLOW}[8]${NC} 彻底卸载 Komari Agent\n"
     printf "  ${YELLOW}[0]${NC} 退出工具箱\n"
     printf "${GREEN}=======================================================${NC}\n"
-    printf "请选择操作 [0-7]: "
+    printf "请选择操作 [0-8]: "
     read -r CHOICE < /dev/tty
 
     case "$CHOICE" in
@@ -455,9 +542,10 @@ show_menu() {
         2) restart_agent "0"; show_menu ;;
         3) upgrade_agent_binary; show_menu ;;
         4) show_token_info "0"; show_menu ;;
-        5) check_status; show_menu ;;
-        6) upgrade_myself ;;
-        7) uninstall_agent; show_menu ;;
+        5) change_token "" "0"; show_menu ;;
+        6) check_status; show_menu ;;
+        7) upgrade_myself ;;
+        8) uninstall_agent; show_menu ;;
         0) printf "\n退出成功！\n"; exit 0 ;;
         *) printf "${RED}输入错误！${NC}\n"; sleep 1; show_menu ;;
     esac
@@ -468,6 +556,7 @@ if [ $# -gt 0 ]; then
     case "$1" in
         restart) restart_agent "1" ;;
         token) show_token_info "1" ;;
+        set-token) change_token "$2" "1" ;;
         update) upgrade_myself ;;
         status) check_status ;;
         uninstall) uninstall_agent ;;
