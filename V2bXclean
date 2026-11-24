@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # =========================================================================
-#  Linux 全局日志全量秒清 & 尺寸硬性熔断哨兵 (全系统满血终极版)
+#  麦卖云 V2bX & Linux 全局日志秒清与尺寸硬性熔断哨兵 (v3.1.0-Pro)
+#  路径：V2bXclean
 #  适配系统: Alpine (OpenRC/BusyBox), Debian, Ubuntu, CentOS, Rocky, Alma
 # =========================================================================
+sh_ver="3.1.0-Pro"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'
@@ -26,7 +28,7 @@ auto_install_deps() {
 auto_install_deps
 
 echo -e "\n${cyan}================================================================${plain}"
-echo -e "${cyan}   🚀 Linux 全系统日志全量清剿 & 尺寸硬性熔断哨兵 (高兼容版)     ${plain}"
+echo -e "${cyan}   🚀 麦卖云全系统日志秒清 & 尺寸硬性熔断哨兵 v${sh_ver}         ${plain}"
 echo -e "${cyan}================================================================${plain}"
 
 # =========================================================================
@@ -57,7 +59,7 @@ else
 fi
 
 # =========================================================================
-# 阶段 2：Docker 容器全局源头限额
+# 阶段 2：Docker 容器全局源头限额 (平滑热重载，不重启现有容器)
 # =========================================================================
 echo -e "\n${yellow}[2/6] 正在检查 Docker 容器引擎日志限额...${plain}"
 if command -v docker &>/dev/null; then
@@ -73,9 +75,10 @@ if command -v docker &>/dev/null; then
   }
 }
 EOF
-        command -v systemctl &>/dev/null && systemctl restart docker >/dev/null 2>&1
-        command -v rc-service &>/dev/null && rc-service docker restart >/dev/null 2>&1
-        echo -e "${green}✔ 已注入 Docker 全局单容器 5MB 日志上限${plain}"
+        if pgrep -x dockerd >/dev/null 2>&1; then
+            kill -HUP "$(pgrep -x dockerd | head -n1)" >/dev/null 2>&1
+        fi
+        echo -e "${green}✔ 已注入 Docker 全局单容器 5MB 日志上限 (平滑生效)${plain}"
     else
         echo -e "${green}✔ Docker 配置文件已存在，维持安全监听${plain}"
     fi
@@ -84,14 +87,21 @@ else
 fi
 
 # =========================================================================
-# 阶段 3：配置通用 Logrotate 规则 (全量匹配)
+# 阶段 3：配置专属 Logrotate 规则 (避开系统自带规则防重名冲突)
 # =========================================================================
-echo -e "\n${yellow}[3/6] 正在写入 Logrotate 5MB 轮转截断规则...${plain}"
+echo -e "\n${yellow}[3/6] 正在写入 V2bX 与隧道专属 Logrotate 5MB 轮转规则...${plain}"
 mkdir -p /etc/logrotate.d 2>/dev/null
-cat << 'EOF' > /etc/logrotate.d/global_log_limit
-/var/log/*
-/var/log/*/*
+rm -f /etc/logrotate.d/global_log_limit /etc/logrotate.d/v2bx_anti_explode /etc/logrotate.d/v2bx_all 2>/dev/null
+
+cat << 'EOF' > /etc/logrotate.d/v2bx_sentinel_limit
+/var/log/V2bX/*.log
+/var/log/v2bx*.log
+/var/log/v2bx*.err
+/var/log/cf-*.log
+/var/log/cloudflared*.log
+/etc/V2bX/error.log
 {
+    su root root
     size 5M
     rotate 0
     missingok
@@ -101,33 +111,34 @@ cat << 'EOF' > /etc/logrotate.d/global_log_limit
     nodateext
 }
 EOF
-echo -e "${green}✔ Logrotate 全目录适配配置完毕${plain}"
+echo -e "${green}✔ Logrotate 专属截断规则配置完毕 (零冲突)${plain}"
 
 # =========================================================================
-# 阶段 4：生成极速羽量级巡检执行体 (兼容 Alpine BusyBox)
+# 阶段 4：生成极速羽量级巡检执行体 (纯 POSIX /bin/sh，兼容 BusyBox)
 # =========================================================================
 echo -e "\n${yellow}[4/6] 正在生成常驻防爆巡检守护核心...${plain}"
 cat << 'EOF' > /usr/local/bin/mega_log_sentinel.sh
 #!/bin/sh
-LOCK_DIR="/tmp/log_sentinel.lock"
+LOCK_DIR="/var/run/mega_log_sentinel.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     lock_age=$(find "$LOCK_DIR" -prune -mmin +5 2>/dev/null)
     if [ -n "$lock_age" ]; then
         rm -rf "$LOCK_DIR"
+        mkdir "$LOCK_DIR" 2>/dev/null || exit 0
     else
         exit 0
     fi
 fi
 trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
 
-# 1. 穿透释放被锁死的已删除幽灵句柄 (精准定位 /var/log 和 /tmp，防止误伤系统数据库)
+# 1. 穿透释放被锁死的已删除幽灵句柄
 for fd in /proc/[0-9]*/fd/*; do
     [ -e "$fd" ] || continue
     t=$(readlink "$fd" 2>/dev/null)
     case "$t" in
         *"(deleted)"*)
             case "$t" in
-                /var/log/*|/tmp/*|/var/tmp/*)
+                /var/log/*|/etc/V2bX/*|/tmp/*|/var/tmp/*)
                     : > "$fd" 2>/dev/null
                     ;;
             esac
@@ -135,46 +146,50 @@ for fd in /proc/[0-9]*/fd/*; do
     esac
 done
 
-# 2. 轮转检查
-[ -x /usr/sbin/logrotate ] && /usr/sbin/logrotate -f /etc/logrotate.d/global_log_limit >/dev/null 2>&1
+# 2. 执行专属 Logrotate 轮转与 Journald 空间回收
+[ -x /usr/sbin/logrotate ] && /usr/sbin/logrotate -f /etc/logrotate.d/v2bx_sentinel_limit >/dev/null 2>&1
+command -v journalctl >/dev/null 2>&1 && journalctl --vacuum-size=10M >/dev/null 2>&1
 
-# 3. 磁盘水位与无差别限额截断
+# 3. 磁盘水位与无差别限额截断 (跳过稀疏文件与二进制 journal)
 disk_used=$(df -P / 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print $5}')
 [ -z "$disk_used" ] && disk_used=0
 
 if [ "$disk_used" -ge 85 ]; then
-    # 85% 紧急熔断：无视后缀名，秒清 /var/log 下所有常规文件
-    find /var/log -type f -exec sh -c ': > "$1"' _ {} \; 2>/dev/null
-    rm -rf /tmp/* /var/tmp/* 2>/dev/null
+    find /var/log -type f ! -name "lastlog" ! -name "faillog" ! -name "*.journal" ! -name "*.journal~" \
+        -exec sh -c 'for f do : > "$f"; done' _ {} + 2>/dev/null
+    find /etc/V2bX -maxdepth 2 -type f -name "*.log" \
+        -exec sh -c 'for f do : > "$f"; done' _ {} + 2>/dev/null
+    find /tmp /var/tmp ! -path /tmp ! -path /var/tmp -mmin +60 ! -name "systemd-private-*" ! -name "mega_log_sentinel.lock" \
+        -exec rm -rf {} + 2>/dev/null
 else
-    # 常规限制：只要 /var/log 下任何文件超过 5MB，瞬间抽干
-    find /var/log -type f -size +5M -exec sh -c ': > "$1"' _ {} \; 2>/dev/null
+    find /var/log -type f -size +5M ! -name "lastlog" ! -name "faillog" ! -name "*.journal" ! -name "*.journal~" \
+        -exec sh -c 'for f do : > "$f"; done' _ {} + 2>/dev/null
+    find /etc/V2bX -maxdepth 2 -type f -name "*.log" -size +5M \
+        -exec sh -c 'for f do : > "$f"; done' _ {} + 2>/dev/null
 
     if [ -d "/var/lib/docker/containers" ]; then
         find /var/lib/docker/containers/ -type f -name "*-json.log" -size +5M \
-            -exec sh -c ': > "$1"' _ {} \; 2>/dev/null
+            -exec sh -c 'for f do : > "$f"; done' _ {} + 2>/dev/null
     fi
 fi
 
-# 清理归档旧压缩垃圾
-find /var/log -type f \( -name "*.gz" -o -name "*.xz" -o -name "*.[0-9]" -o -name "*.old" \) -delete 2>/dev/null
+# 4. 清理归档旧压缩日志垃圾
+find /var/log /etc/V2bX -maxdepth 3 -type f \( -name "*.gz" -o -name "*.xz" -o -name "*.[0-9]" -o -name "*.old" \) -delete 2>/dev/null
 EOF
 chmod +x /usr/local/bin/mega_log_sentinel.sh
 echo -e "${green}✔ 守护核心就绪${plain}"
 
 # =========================================================================
-# 阶段 5：跨系统调度挂载 (Systemd Cron.d & Alpine Crontab)
+# 阶段 5：跨系统双保险调度挂载 (同时兼容 cron.d 与 Alpine crontabs)
 # =========================================================================
 echo -e "\n${yellow}[5/6] 正在向系统挂载每 15 分钟高频调度...${plain}"
-if [ -d "/etc/cron.d" ]; then
-    cat << 'EOF' > /etc/cron.d/mega_log_sentinel
+mkdir -p /etc/cron.d 2>/dev/null
+cat << 'EOF' > /etc/cron.d/mega_log_sentinel
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 */15 * * * * root /usr/local/bin/mega_log_sentinel.sh >/dev/null 2>&1
 EOF
-    chmod 644 /etc/cron.d/mega_log_sentinel
-    echo -e "${green}✔ 已挂载至 /etc/cron.d/mega_log_sentinel${plain}"
-fi
+chmod 644 /etc/cron.d/mega_log_sentinel
 
 if [ -f /etc/alpine-release ] || command -v apk &>/dev/null; then
     mkdir -p /etc/crontabs
@@ -186,26 +201,32 @@ if [ -f /etc/alpine-release ] || command -v apk &>/dev/null; then
         rc-update add crond default >/dev/null 2>&1
         rc-service crond restart >/dev/null 2>&1
     fi
-    echo -e "${green}✔ 已挂载至 Alpine /etc/crontabs/root 并激活 crond${plain}"
+    echo -e "${green}✔ 已双路挂载至 Alpine (/etc/cron.d 与 /etc/crontabs/root) 并激活 crond${plain}"
+else
+    if command -v systemctl &>/dev/null; then
+        systemctl enable --now cron >/dev/null 2>&1 || systemctl enable --now crond >/dev/null 2>&1
+    fi
+    echo -e "${green}✔ 已挂载至 /etc/cron.d/mega_log_sentinel 并激活定时服务${plain}"
 fi
 
 # =========================================================================
-# 阶段 6：首次执行——全量无差别秒清所有现存日志
+# 阶段 6：首次执行——全量秒清所有现存日志
 # =========================================================================
 echo -e "\n${yellow}[6/6] 正在执行全量识别与首次彻底清零...${plain}"
 
-# 1. 首次全盘日志原地彻底归零 (无视后缀，只要是 /var/log/ 下的文件全部抽干)
-find /var/log -type f -exec sh -c ': > "$1"' _ {} \; 2>/dev/null
+find /var/log -type f ! -name "lastlog" ! -name "faillog" ! -name "*.journal" ! -name "*.journal~" \
+    -exec sh -c 'for f do : > "$f"; done' _ {} + 2>/dev/null
+find /etc/V2bX -maxdepth 2 -type f -name "*.log" \
+    -exec sh -c 'for f do : > "$f"; done' _ {} + 2>/dev/null
 
-# 2. 运行哨兵释放残留幽灵句柄
 /usr/local/bin/mega_log_sentinel.sh
 
 echo -e "\n${cyan}================================================================${plain}"
 echo -e "${green}🎉 全系统清理与尺寸熔断机制已 100% 部署完毕！${plain}"
-echo -e "🧹 ${bold}全系统清洗${plain}: 取消特定软件限制，直接抽干 /var/log 下所有服务日志文件"
-echo -e "📏 ${bold}高兼容适配${plain}: 采用纯正 POSIX find 语法，完美解决 Alpine/BusyBox 漏清 Bug"
-echo -e "🚨 ${bold}应急熔断${plain}: 磁盘水位达 ${red}85%${plain} 时启动全面抽干，永不撑爆"
-echo -e "👻 ${bold}幽灵释放${plain}: 穿透监听 /proc，仅解脱 /var/log 与 /tmp 孤儿句柄，保障数据安全"
+echo -e "🧹 ${bold}全盘清洗${plain}: 原地抽干 /var/log 与 /etc/V2bX/*.log，不破坏程序文件句柄"
+echo -e "🛡️  ${bold}安全避障${plain}: 跳过稀疏文件 lastlog 与二进制 journal，零冲突轮转"
+echo -e "🚨 ${bold}应急熔断${plain}: 磁盘水位达 ${red}85%${plain} 时启动全面抽干，仅清理陈旧临时文件"
+echo -e "👻 ${bold}幽灵释放${plain}: 穿透监听 /proc，即时释放已删除日志文件占用的磁盘块"
 echo -e "${cyan}================================================================${plain}\n"
 
 echo -e "${cyan}当前主磁盘空间状态：${plain}"
