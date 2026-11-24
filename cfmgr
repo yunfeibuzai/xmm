@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # =================================================================
-# 麦卖云 Cloudflare Argo Tunnel 交互式管理引擎 (全系统终极容错版)
-# 升级：修复 grep 误认参数 Bug、多维探针绝对解析、配置强制物理写入
+# 麦卖云 Cloudflare Argo Tunnel 交互式管理引擎 (v2.4.0-Pro 终极无瑕版)
+# 路径：cfmgr
 # =================================================================
+sh_ver="2.4.0-Pro"
 
 if [ -z "$BASH_VERSION" ]; then
     if command -v apk >/dev/null 2>&1; then
         echo -e "\033[33m检测到 Alpine 环境，正在自动准备 bash...\033[0m"
-        apk update >/dev/null 2>&1 && apk add --no-cache bash grep sed gawk psmisc >/dev/null 2>&1
+        apk update >/dev/null 2>&1; apk add --no-cache bash grep sed gawk psmisc >/dev/null 2>&1
         exec bash "$0" "$@"
     else
         echo "错误：请使用 bash 运行此脚本 (例如: bash $0)"
@@ -22,15 +23,16 @@ magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'; dim='\033[
 
 check_pid_alive() {
     local pid="$1"
-    [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] && kill -0 "$pid" 2>/dev/null
+    [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 && -d "/proc/$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
-# 终极强悍的 YAML 解析引擎 (免疫各种奇葩缩进、空格、双引号)
+# 终极 YAML 解析引擎 (免疫缩进、空格、引号及行尾注释)
 get_yaml_value() {
     local key="$1"
     local file="$2"
     awk -F':' -v k="$key" 'tolower($1) ~ "^[ \t]*"tolower(k)"[ \t]*$" {
         val=$0; sub(/^[^:]*:/, "", val);
+        sub(/[ \t]+#.*$/, "", val);
         gsub(/^[ \t\r\n\047"]+|[ \t\r\n\047"]+$/, "", val);
         print val; exit
     }' "$file"
@@ -46,13 +48,18 @@ get_tunnel_status() {
     # 1. Systemd 状态检查
     if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
         local svc=""
-        if systemctl list-unit-files "cf-${target}.service" &>/dev/null; then svc="cf-${target}"
-        elif systemctl list-unit-files "cloudflared.service" &>/dev/null; then svc="cloudflared"
+        if [[ -f "/etc/systemd/system/cf-${target}.service" ]]; then
+            svc="cf-${target}"
+        elif [[ -f "/etc/systemd/system/cloudflared.service" ]]; then
+            if [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" ]] || \
+               grep -qE -- "(--config|-c)([[:space:]]+|=).*/${target}\.ya?ml" "/etc/systemd/system/cloudflared.service" 2>/dev/null; then
+                svc="cloudflared"
+            fi
         fi
         if [[ -n "$svc" ]]; then
-            if systemctl is-active "$svc" &>/dev/null; then
-                local pid; pid=$(systemctl show -p MainPID "$svc" 2>/dev/null | cut -d= -f2)
-                if [[ -n "$pid" && "$pid" -ne 0 ]]; then
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                local pid; pid=$(systemctl show -p MainPID --value "$svc" 2>/dev/null)
+                if check_pid_alive "$pid"; then
                     STATUS_RUNNING=1; STATUS_PID="$pid"; STATUS_DESC="${green}● 运行中 (PID: ${pid} | Systemd)${plain}"
                 else
                     STATUS_RUNNING=1; STATUS_DESC="${green}● 运行中 (Systemd 托管)${plain}"
@@ -64,9 +71,16 @@ get_tunnel_status() {
 
     # 2. OpenRC 状态检查
     if command -v rc-service &>/dev/null; then
-        local rc_svc="cf-${target}"
-        [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" ]] && rc_svc="cloudflared"
-        if [[ -f "/etc/init.d/${rc_svc}" ]]; then
+        local rc_svc=""
+        if [[ -f "/etc/init.d/cf-${target}" ]]; then
+            rc_svc="cf-${target}"
+        elif [[ -f "/etc/init.d/cloudflared" ]]; then
+            if [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" ]] || \
+               grep -qE -- "(--config|-c)([[:space:]]+|=).*/${target}\.ya?ml" "/etc/init.d/cloudflared" 2>/dev/null; then
+                rc_svc="cloudflared"
+            fi
+        fi
+        if [[ -n "$rc_svc" ]]; then
             if rc-service "$rc_svc" status 2>/dev/null | grep -qiE 'started|running'; then
                 local pid=""
                 [[ -f "/run/${rc_svc}.pid" ]] && pid=$(cat "/run/${rc_svc}.pid" 2>/dev/null)
@@ -88,7 +102,7 @@ get_tunnel_status() {
         if [[ "$cmdline" == *"cloudflared "* ]]; then
             local is_match=0
             if [[ "$target" == "Token_Managed_Tunnel" && "$cmdline" == *"--token "* ]]; then is_match=1
-            elif [[ -n "$target" && "$target" != "cloudflared" && "$cmdline" =~ tunnel[[:space:]]+run[[:space:]]+${target} ]]; then is_match=1
+            elif [[ -n "$target" && "$target" != "cloudflared" && "$cmdline" =~ tunnel[[:space:]]+run[[:space:]]+${target}([[:space:]]|$) ]]; then is_match=1
             elif [[ -n "$cfg_name" && "$cmdline" == *"$cfg_name"* ]]; then is_match=1
             elif [[ "$target" == "cloudflared" && "$cmdline" =~ tunnel[[:space:]]+run ]]; then is_match=1
             fi
@@ -111,13 +125,36 @@ scan_all_local_tunnels() {
         for f in /etc/systemd/system/cf-*.service; do
             [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//;s/\.service$//')")
         done
-        [[ -f "/etc/systemd/system/cloudflared.service" ]] && discovered+=("cloudflared")
+        if [[ -f "/etc/systemd/system/cloudflared.service" ]]; then
+            if grep -qi -e "--token" "/etc/systemd/system/cloudflared.service" 2>/dev/null; then
+                discovered+=("Token_Managed_Tunnel")
+            else
+                local scfg; scfg=$(grep -oE -e '(--config|-c)([[:space:]]+|=)[^[:space:]"'\'']+' "/etc/systemd/system/cloudflared.service" 2>/dev/null | head -n 1 | sed -E 's/^(--config|-c)([[:space:]]+|=)//')
+                if [[ -n "$scfg" ]]; then
+                    discovered+=("$(basename "$scfg" | sed 's/\.yml$//;s/\.yaml$//')")
+                else
+                    discovered+=("cloudflared")
+                fi
+            fi
+        fi
     fi
+
     if command -v rc-service &>/dev/null || [[ -d "/etc/init.d" ]]; then
         for f in /etc/init.d/cf-*; do
             [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//')")
         done
-        [[ -f "/etc/init.d/cloudflared" ]] && discovered+=("cloudflared")
+        if [[ -f "/etc/init.d/cloudflared" ]]; then
+            if grep -qi -e "--token" "/etc/init.d/cloudflared" 2>/dev/null; then
+                discovered+=("Token_Managed_Tunnel")
+            else
+                local rcfg; rcfg=$(grep -oE -e '(--config|-c)([[:space:]]+|=)[^[:space:]"'\'']+' "/etc/init.d/cloudflared" 2>/dev/null | head -n 1 | sed -E 's/^(--config|-c)([[:space:]]+|=)//')
+                if [[ -n "$rcfg" ]]; then
+                    discovered+=("$(basename "$rcfg" | sed 's/\.yml$//;s/\.yaml$//')")
+                else
+                    discovered+=("cloudflared")
+                fi
+            fi
+        fi
     fi
     
     for dir in "/etc/cloudflared" "/root/.cloudflared"; do
@@ -125,7 +162,7 @@ scan_all_local_tunnels() {
             for yml in "$dir"/*.yml "$dir"/*.yaml; do
                 [[ -f "$yml" ]] || continue
                 local base; base=$(basename "$yml" | sed 's/\.yml$//;s/\.yaml$//')
-                [[ "$base" == "cert" || "$base" == "config" ]] && continue
+                [[ "$base" == "cert" ]] && continue
                 discovered+=("$base")
             done
         fi
@@ -139,10 +176,10 @@ scan_all_local_tunnels() {
                 discovered+=("Token_Managed_Tunnel")
             elif [[ "$cmd" =~ tunnel[[:space:]]+run[[:space:]]+([^[:space:]\-][^[:space:]]*) ]]; then
                 discovered+=("${BASH_REMATCH[1]}")
-            elif [[ "$cmd" =~ --config[[:space:]=]+([^[:space:]]+) ]]; then
-                local cfg="${BASH_REMATCH[1]}"
+            elif [[ "$cmd" =~ (--config|-c)([[:space:]]+|=)([^[:space:]]+) ]]; then
+                local cfg="${BASH_REMATCH[3]}"
                 local base; base=$(basename "$cfg" | sed 's/\.yml$//;s/\.yaml$//')
-                [[ "$base" != "config" && "$base" != "cert" ]] && discovered+=("$base")
+                [[ "$base" != "cert" ]] && discovered+=("$base")
             fi
         fi
     done
@@ -154,14 +191,21 @@ scan_all_local_tunnels() {
 
 check_if_token_tunnel() {
     local target="$1"
+    [[ "$target" == "Token_Managed_Tunnel" ]] && return 0
+
     for p in /proc/[0-9]*; do
         [[ -d "$p" ]] || continue
         local cmd; cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
-        if [[ "$cmd" == *"cloudflared "* && "$cmd" == *"--token "* ]]; then return 0; fi
+        if [[ "$cmd" == *"cloudflared "* && "$cmd" == *"--token "* && "$cmd" == *"$target"* ]]; then
+            return 0
+        fi
     done
-    local svc_files=("/etc/systemd/system/cf-${target}.service" "/etc/systemd/system/cloudflared.service" "/etc/init.d/cf-${target}" "/etc/init.d/cloudflared")
+
+    local svc_files=("/etc/systemd/system/cf-${target}.service" "/etc/init.d/cf-${target}")
+    if [[ "$target" == "cloudflared" ]]; then
+        svc_files+=("/etc/systemd/system/cloudflared.service" "/etc/init.d/cloudflared")
+    fi
     for sf in "${svc_files[@]}"; do
-        # 修复 grep 参数识别错误 (加入 -e)
         if [[ -f "$sf" ]] && grep -qi -e "--token" "$sf" 2>/dev/null; then return 0; fi
     done
     return 1
@@ -169,12 +213,17 @@ check_if_token_tunnel() {
 
 find_config_file() {
     local target="$1"
-    local svc_files=("/etc/systemd/system/cf-${target}.service" "/etc/systemd/system/cloudflared.service" "/etc/init.d/cf-${target}" "/etc/init.d/cloudflared")
+    local svc_files=("/etc/systemd/system/cf-${target}.service" "/etc/init.d/cf-${target}" "/etc/systemd/system/cloudflared.service" "/etc/init.d/cloudflared")
+
     for sf in "${svc_files[@]}"; do
         if [[ -f "$sf" ]]; then
-            # 修复 grep 参数识别错误 (加入 -e)
-            local cfg; cfg=$(grep -oE -e '--config[ =][^[:space:]]+' "$sf" 2>/dev/null | head -n 1 | sed 's/--config[ =]//' | tr -d '"' | tr -d "'")
-            if [[ -n "$cfg" && -f "$cfg" ]]; then echo "$cfg"; return; fi
+            local cfg; cfg=$(grep -oE -e '(--config|-c)([[:space:]]+|=)[^[:space:]"'\'']+' "$sf" 2>/dev/null | head -n 1 | sed -E 's/^(--config|-c)([[:space:]]+|=)//')
+            if [[ -n "$cfg" && -f "$cfg" ]]; then
+                local cfg_base; cfg_base=$(basename "$cfg" | sed 's/\.yml$//;s/\.yaml$//')
+                if [[ "$target" == "cloudflared" || "$cfg_base" == "$target" ]]; then
+                    echo "$cfg"; return
+                fi
+            fi
         fi
     done
     
@@ -182,16 +231,17 @@ find_config_file() {
         [[ -f "$p" ]] || continue
         local cmd; cmd=$(tr '\0' ' ' < "$p" 2>/dev/null)
         if [[ "$cmd" == *"cloudflared "* && "$cmd" == *"$target"* ]]; then
-            if [[ "$cmd" =~ --config[[:space:]]+([^[:space:]]+) || "$cmd" =~ --config=([^[:space:]]+) ]]; then
-                if [[ -f "${BASH_REMATCH[1]}" ]]; then echo "${BASH_REMATCH[1]}"; return; fi
+            if [[ "$cmd" =~ (--config|-c)([[:space:]]+|=)([^[:space:]]+) ]]; then
+                if [[ -f "${BASH_REMATCH[3]}" ]]; then echo "${BASH_REMATCH[3]}"; return; fi
             fi
         fi
     done
 
     local candidates=(
-        "/etc/cloudflared/${target}.yml" "/etc/cloudflared/${target}.yaml" "/etc/cloudflared/config.yml"
-        "/root/.cloudflared/${target}.yml" "/root/.cloudflared/${target}.yaml" "/root/.cloudflared/config.yml"
+        "/etc/cloudflared/${target}.yml" "/etc/cloudflared/${target}.yaml"
+        "/root/.cloudflared/${target}.yml" "/root/.cloudflared/${target}.yaml"
     )
+    [[ "$target" == "cloudflared" ]] && candidates+=("/etc/cloudflared/config.yml" "/root/.cloudflared/config.yml")
     for c in "${candidates[@]}"; do
         if [[ -f "$c" ]]; then echo "$c"; return; fi
     done
@@ -221,34 +271,29 @@ inspect_tunnel_card() {
         return
     fi
 
-    # 使用强化 awk 引擎解析
     local tunnel_id cred_file hostnames forward_urls current_protocol=""
     tunnel_id=$(get_yaml_value "tunnel" "$config")
     cred_file=$(get_yaml_value "credentials-file" "$config")
-    hostnames=$(grep -iE '^[[:space:]]*-[[:space:]]*hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
-    forward_urls=$(grep -iE '^[[:space:]]*service[[:space:]]*:' "$config" 2>/dev/null | grep -iv 'http_status' | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
+    hostnames=$(grep -iE '^[[:space:]]*(-[[:space:]]*)?hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://;s/[[:space:]]\+#.*$//' | tr -d ' "\047\r\t')
+    forward_urls=$(grep -iE '^[[:space:]]*service[[:space:]]*:' "$config" 2>/dev/null | grep -iv 'http_status' | sed 's/^[^:]*://;s/[[:space:]]\+#.*$//' | tr -d ' "\047\r\t')
     
-    # ---------------- 协议探针引擎 (完美修复版) ----------------
-    # 探针 1：尝试从运行中的内存进程命令行嗅探协议 (最高优先级)
+    # 探针 1：从运行中内存进程命令行嗅探协议 (最高优先级)
     if [[ -n "$STATUS_PID" && -f "/proc/$STATUS_PID/cmdline" ]]; then
         local cmd_proto
-        # 使用 -e 解决 grep 报错，并使用 awk 安全提取 http2 / quic
-        cmd_proto=$(tr '\0' ' ' < "/proc/$STATUS_PID/cmdline" | grep -ioE -e '--protocol[ =][a-zA-Z0-9]+' 2>/dev/null | awk -F'[ =]' '{print $NF}' | tr 'A-Z' 'a-z')
+        cmd_proto=$(tr '\0' ' ' < "/proc/$STATUS_PID/cmdline" | grep -ioE -e '--protocol([[:space:]]+|=)[a-zA-Z0-9]+' 2>/dev/null | awk -F'[ =]' '{print $NF}' | tr 'A-Z' 'a-z')
         [[ -n "$cmd_proto" ]] && current_protocol="$cmd_proto"
     fi
 
-    # 探针 2：若进程中没指明，则从 YAML 配置文件中严谨提取
+    # 探针 2：从 YAML 配置文件提取
     if [[ -z "$current_protocol" ]]; then
         current_protocol=$(get_yaml_value "protocol" "$config" | tr 'A-Z' 'a-z')
     fi
 
-    # 探针判断结果渲染
     if [[ -z "$current_protocol" ]]; then
         current_protocol="${yellow}quic (未配置, 默认值)${plain}"
     else
         current_protocol="${magenta}${current_protocol}${plain}"
     fi
-    # ------------------------------------------------------------
 
     echo -e "${cyan}│${plain} 配置文件: ${green}${config}${plain}"
     echo -e "${cyan}│${plain} 隧道 ID : ${yellow}${tunnel_id:-<未读取到>}${plain}"
@@ -277,12 +322,13 @@ backup_config_file() {
     local config="$1"
     local bak="${config}.bak.$(date +%Y%m%d_%H%M%S)"
     cp "$config" "$bak"
+    ls -1t "${config}.bak."* 2>/dev/null | tail -n +6 | xargs -r rm -f 2>/dev/null
     echo -e "${green}✔ 已自动备份原始配置至:${plain} ${bak}"
 }
 
 modify_hostname() {
     local config="$1"
-    local current_hosts; current_hosts=$(grep -iE '^[[:space:]]*-[[:space:]]*hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://' | tr -d ' "\047\r\t')
+    local current_hosts; current_hosts=$(grep -iE '^[[:space:]]*(-[[:space:]]*)?hostname[[:space:]]*:' "$config" 2>/dev/null | sed 's/^[^:]*://;s/[[:space:]]\+#.*$//' | tr -d ' "\047\r\t')
     if [[ -z "$current_hosts" ]]; then echo -e "${red}错误：配置文件中未找到 hostname 节点。${plain}"; return; fi
     local old_host=""; local count; count=$(echo "$current_hosts" | grep -c .)
     if [[ $count -eq 1 ]]; then
@@ -292,42 +338,112 @@ modify_hostname() {
         echo -e "\n${green}当前配置文件绑定了多个域名：${plain}"
         local i=1; local arr_hosts=()
         while IFS= read -r h; do [[ -z "$h" ]] && continue; echo -e "  [${i}] ${h}"; arr_hosts+=("$h"); ((i++)); done <<< "$current_hosts"
-        read -rp "请选择需要修改的域名序号 [1-${#arr_hosts[@]}]: " h_sel
+        read -rp "请选择需要修改的域名序号 [1-${#arr_hosts[@]}]: " h_sel < /dev/tty
         if ! [[ "$h_sel" =~ ^[0-9]+$ ]] || (( h_sel < 1 || h_sel > ${#arr_hosts[@]} )); then echo -e "${red}输入无效，已取消。${plain}"; return; fi
         old_host="${arr_hosts[$((h_sel-1))]}"
     fi
     echo ""
-    read -rp "请输入新域名 (如: vpn.domain.com): " new_host; new_host=$(echo "$new_host" | xargs)
+    read -rp "请输入新域名 (如: vpn.domain.com): " new_host < /dev/tty
+    new_host=$(echo "$new_host" | xargs | sed -E 's|^https?://||i; s|/.*$||' | tr -d '"\047' | tr 'A-Z' 'a-z')
+
     if [[ -z "$new_host" ]]; then echo -e "${red}域名不能为空！${plain}"; return; fi
-    if [[ "$new_host" == "$old_host" ]]; then echo -e "${yellow}新旧域名一致，未做修改。${plain}"; return; fi
+    if [[ ! "$new_host" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]; then
+        echo -e "${red}错误：域名格式不合法 [${new_host}]，请检查是否包含非法字符或缺少后缀！${plain}"
+        return
+    fi
+    if [[ "${new_host,,}" == "${old_host,,}" ]]; then echo -e "${yellow}新旧域名一致，未做修改。${plain}"; return; fi
+
+    # 冲突检测 1：检查当前同一 YAML 内是否已绑定了该域名 (忽略大小写精确整行比对)
+    if echo "$current_hosts" | grep -Fixq "$new_host"; then
+        echo -e "\n${red}⚠ 严重冲突预警：域名 [${new_host}] 已存在于当前配置文件的另一条规则中！${plain}"
+        echo -e "${yellow}  说明：Cloudflare 隧道同一域名只能命中第一条转发规则，强行重复会导致后一条端口失联！${plain}"
+        read -rp "是否仍要强制写入重复域名？[y/N]: " force_dup < /dev/tty
+        [[ ! "$force_dup" =~ ^[Yy]$ ]] && echo -e "${yellow}已安全取消修改。${plain}" && return
+    fi
+
+    # 冲突检测 2：检查本机其他隧道 YAML 是否已占用该域名
+    local conflict_file=""
+    for dir in "/etc/cloudflared" "/root/.cloudflared"; do
+        [[ -d "$dir" ]] || continue
+        for yml in "$dir"/*.yml "$dir"/*.yaml; do
+            [[ -f "$yml" && "$yml" != "$config" ]] || continue
+            local other_hosts; other_hosts=$(grep -iE '^[[:space:]]*(-[[:space:]]*)?hostname[[:space:]]*:' "$yml" 2>/dev/null | sed 's/^[^:]*://;s/[[:space:]]\+#.*$//' | tr -d ' "\047\r\t')
+            if echo "$other_hosts" | grep -Fixq "$new_host"; then
+                conflict_file="$yml"
+                break 2
+            fi
+        done
+    done
+    if [[ -n "$conflict_file" ]]; then
+        echo -e "\n${red}⚠ 跨隧道冲突预警：域名 [${new_host}] 已被本机另一隧道占用！${plain}"
+        echo -e "  占用文件: ${cyan}${conflict_file}${plain}"
+        read -rp "是否仍要继续写入？[y/N]: " force_other < /dev/tty
+        [[ ! "$force_other" =~ ^[Yy]$ ]] && echo -e "${yellow}已安全取消修改。${plain}" && return
+    fi
 
     backup_config_file "$config"
-    sed -i "s|hostname[[:space:]]*:[[:space:]]*${old_host}|hostname: ${new_host}|g" "$config"
+
+    awk -v old="$old_host" -v new="$new_host" '
+    {
+        line = $0
+        if (tolower(line) ~ /^[ \t]*(-[ \t]*)?hostname[ \t]*:/) {
+            prefix = line
+            sub(/[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee][ \t]*:.*/, "hostname: ", prefix)
+            val = line
+            sub(/^[ \t]*(-[ \t]*)?[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee][ \t]*:[ \t]*/, "", val)
+            comment = ""
+            if (match(val, /[ \t]+#.*/)) {
+                comment = substr(val, RSTART)
+                val = substr(val, 1, RSTART - 1)
+            }
+            gsub(/^[ \t\r\n\047"]+|[ \t\r\n\047"]+$/, "", val)
+            if (tolower(val) == tolower(old)) {
+                print prefix new comment
+                next
+            }
+        }
+        print line
+    }' "$config" > "${config}.tmp" && mv -f "${config}.tmp" "$config"
+
+    local tid; tid=$(get_yaml_value "tunnel" "$config")
     echo -e "\n${green}✔ 域名修改完成！${plain}"
     echo -e "  原域名: ${red}${old_host}${plain}  ➔  新域名: ${green}${new_host}${plain}"
+    echo -e "${yellow}💡 DNS 提醒：请确保 Cloudflare DNS 中已添加 CNAME 记录：${plain}"
+    echo -e "   ${cyan}${new_host}${plain} ➔ ${cyan}${tid:-<Tunnel-UUID>}.cfargotunnel.com${plain} (小黄云开启)"
 }
 
 modify_tunnel_id() {
     local config="$1"
     local old_id; old_id=$(get_yaml_value "tunnel" "$config")
     echo -e "\n当前 Tunnel ID (UUID) 为: ${yellow}${old_id:-未定义}${plain}"
-    read -rp "请输入全新的 Tunnel UUID: " new_id; new_id=$(echo "$new_id" | xargs)
+    read -rp "请输入全新的 Tunnel UUID: " new_id < /dev/tty
+    new_id=$(echo "$new_id" | xargs | tr -d '"\047')
     if [[ -z "$new_id" ]]; then echo -e "${red}Tunnel ID 不能为空！${plain}"; return; fi
     if [[ "$new_id" == "$old_id" ]]; then echo -e "${yellow}新旧 ID 相同，跳过修改。${plain}"; return; fi
 
     backup_config_file "$config"
     
-    # 绝对兼容 Alpine 的写入方式
     local tmp_cfg="${config}.tmp"
-    echo "tunnel: ${new_id}" > "$tmp_cfg"
-    grep -ivE '^[[:space:]]*tunnel[[:space:]]*:' "$config" >> "$tmp_cfg"
+    if head -n 1 "$config" | grep -qE '^---[[:space:]]*$'; then
+        echo "---" > "$tmp_cfg"
+        echo "tunnel: ${new_id}" >> "$tmp_cfg"
+        tail -n +2 "$config" | grep -ivE '^[[:space:]]*tunnel[[:space:]]*:' >> "$tmp_cfg"
+    else
+        echo "tunnel: ${new_id}" > "$tmp_cfg"
+        grep -ivE '^[[:space:]]*tunnel[[:space:]]*:' "$config" >> "$tmp_cfg"
+    fi
     mv -f "$tmp_cfg" "$config"
 
     if [[ -n "$old_id" ]] && grep -q "$old_id" "$config"; then
-        read -rp "检测到凭证文件名与旧 ID 关联，是否同步更新 UUID？[Y/n]: " sync_cred
+        read -rp "检测到凭证文件名与旧 ID 关联，是否同步更新 UUID？[Y/n]: " sync_cred < /dev/tty
         if [[ "${sync_cred:-Y}" =~ ^[Yy]$ ]]; then
             sed -i "s|${old_id}|${new_id}|g" "$config"
-            echo -e "${green}✔ 凭据配置路径已联动修改为新 UUID。${plain}"
+            local new_cred; new_cred=$(get_yaml_value "credentials-file" "$config")
+            if [[ -n "$new_cred" && ! -f "$new_cred" ]]; then
+                echo -e "${yellow}⚠ 凭据路径已更新为 ${new_cred}，但当前文件尚不存在，请记得上传新凭证！${plain}"
+            else
+                echo -e "${green}✔ 凭据配置路径已联动修改为新 UUID。${plain}"
+            fi
         fi
     fi
     echo -e "\n${green}✔ Tunnel ID 修改完成！${plain}"
@@ -335,10 +451,9 @@ modify_tunnel_id() {
 
 modify_protocol() {
     local config="$1"
+    local target="$2"
     
-    # 精准提取当前协议
     local raw_protocol; raw_protocol=$(get_yaml_value "protocol" "$config" | tr 'A-Z' 'a-z')
-    
     local current_protocol_val="quic"
     [[ -n "$raw_protocol" ]] && current_protocol_val="$raw_protocol"
     
@@ -350,24 +465,36 @@ modify_protocol() {
 
     echo -e "\n当前 YAML 配置文件内传输协议为: ${yellow}${display_proto}${plain}"
     echo -e " ${cyan}提示：防御运营商 UDP 阻断或 QoS 降速，推荐强制切换至 http2。恢复性能可切回 quic。${plain}"
-    read -rp "是否将协议切换并物理写入为 [${target_protocol}]？[Y/n]: " switch_ans
+    read -rp "是否将协议切换并物理写入为 [${target_protocol}]？[Y/n]: " switch_ans < /dev/tty
     
     if [[ "${switch_ans:-Y}" =~ ^[Yy]$ ]]; then
         backup_config_file "$config"
         
-        # 【终极修复区】
-        # 放弃使用 Alpine 支持极差的 sed -i '1i' 模式，
-        # 改为安全的临时文件绝对重组写入模式，保证 100% 写入成功。
         local tmp_cfg="${config}.tmp"
-        
-        # 将新协议强制写在文件绝对的头部
-        echo "protocol: ${target_protocol}" > "$tmp_cfg"
-        
-        # 过滤掉原本的 protocol 字段，将剩余原配置安全追加到后方
-        grep -ivE '^[[:space:]]*protocol[[:space:]]*:' "$config" >> "$tmp_cfg"
-        
-        # 强行覆盖旧文件
+        if head -n 1 "$config" | grep -qE '^---[[:space:]]*$'; then
+            echo "---" > "$tmp_cfg"
+            echo "protocol: ${target_protocol}" >> "$tmp_cfg"
+            tail -n +2 "$config" | grep -ivE '^[[:space:]]*protocol[[:space:]]*:' >> "$tmp_cfg"
+        else
+            echo "protocol: ${target_protocol}" > "$tmp_cfg"
+            grep -ivE '^[[:space:]]*protocol[[:space:]]*:' "$config" >> "$tmp_cfg"
+        fi
         mv -f "$tmp_cfg" "$config"
+
+        # 同步清理服务文件中可能存在的硬编码 --protocol CLI 覆盖参数
+        local svc_files=("/etc/systemd/system/cf-${target}.service" "/etc/init.d/cf-${target}" "/etc/systemd/system/cloudflared.service" "/etc/init.d/cloudflared")
+        local cleaned_cli=0
+        for sf in "${svc_files[@]}"; do
+            if [[ -f "$sf" ]] && grep -qE -- '--protocol([[:space:]]+|=)[a-zA-Z0-9]+' "$sf"; then
+                if [[ "$sf" == *"cf-${target}"* ]] || grep -qE -- "(--config|-c)([[:space:]]+|=).*/${target}\.ya?ml" "$sf" 2>/dev/null; then
+                    sed -i -E 's/[[:space:]]*--protocol([[:space:]]+|=)[a-zA-Z0-9]+//g' "$sf"
+                    cleaned_cli=1
+                fi
+            fi
+        done
+        if [[ $cleaned_cli -eq 1 ]] && command -v systemctl &>/dev/null; then
+            systemctl daemon-reload 2>/dev/null
+        fi
         
         echo -e "\n${green}✔ 协议已成功切换并强制写入为: ${target_protocol}${plain}"
     else
@@ -375,44 +502,95 @@ modify_protocol() {
     fi
 }
 
+stop_standalone_processes() {
+    local target="$1"
+    local config="$2"
+    local cfg_name; cfg_name=$(basename "$config" 2>/dev/null)
+    local pids=""
+    for p in /proc/[0-9]*/cmdline; do
+        [[ -f "$p" ]] || continue
+        local pid; pid=$(echo "$p" | awk -F'/' '{print $3}')
+        [[ "$pid" == "$$" || "$pid" == "$PPID" ]] && continue
+        local cmd; cmd=$(tr '\0' ' ' < "$p" 2>/dev/null)
+        if [[ "$cmd" == *"cloudflared "* ]]; then
+            if [[ "$target" == "cloudflared" ]] || [[ -n "$cfg_name" && "$cmd" == *"$cfg_name"* ]] || [[ "$cmd" =~ tunnel[[:space:]]+run[[:space:]]+${target}([[:space:]]|$) ]]; then
+                pids+=" $pid"
+            fi
+        fi
+    done
+    if [[ -n "$pids" ]]; then
+        kill $pids 2>/dev/null
+        sleep 1
+    fi
+}
+
 manage_service() {
-    local target="$1"; local action="$2"
+    local target="$1"; local action="$2"; local config="$3"
     local action_zh="启动"; [[ "$action" == "stop" ]] && action_zh="停止"; [[ "$action" == "restart" ]] && action_zh="重启"
     echo -e "\n${cyan}正在执行操作: ${action_zh}隧道服务...${plain}"
 
     local svc_name="cf-${target}"
-    [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" || "$target" == "cloudflared_process" ]] && svc_name="cloudflared"
+    [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" ]] && svc_name="cloudflared"
 
     local service_handled=0
 
     if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
-        if systemctl list-unit-files "${svc_name}.service" &>/dev/null || systemctl list-unit-files "cloudflared.service" &>/dev/null; then
-            systemctl "$action" "$svc_name" 2>/dev/null || systemctl "$action" cloudflared 2>/dev/null
+        if [[ -f "/etc/systemd/system/${svc_name}.service" ]]; then
+            systemctl "$action" "$svc_name" 2>/dev/null
             service_handled=1
+        elif [[ -f "/etc/systemd/system/cloudflared.service" ]]; then
+            if [[ "$svc_name" == "cloudflared" ]] || grep -qE -- "(--config|-c)([[:space:]]+|=).*/${target}\.ya?ml" "/etc/systemd/system/cloudflared.service" 2>/dev/null; then
+                svc_name="cloudflared"
+                systemctl "$action" "cloudflared" 2>/dev/null
+                service_handled=1
+            fi
         fi
     fi
 
     if [[ $service_handled -eq 0 ]] && command -v rc-service &>/dev/null; then
-        local rc_target="$svc_name"; [[ ! -f "/etc/init.d/$rc_target" && -f "/etc/init.d/cloudflared" ]] && rc_target="cloudflared"
+        local rc_target="$svc_name"
         if [[ -f "/etc/init.d/$rc_target" ]]; then
             rc-service "$rc_target" "$action" 2>/dev/null
             service_handled=1
+        elif [[ -f "/etc/init.d/cloudflared" ]]; then
+            if [[ "$rc_target" == "cloudflared" ]] || grep -qE -- "(--config|-c)([[:space:]]+|=).*/${target}\.ya?ml" "/etc/init.d/cloudflared" 2>/dev/null; then
+                rc-service "cloudflared" "$action" 2>/dev/null
+                service_handled=1
+            fi
         fi
     fi
 
-    sleep 1
     if [[ "$action" == "stop" ]]; then
-        local pids=$(pgrep -f "cloudflared.*${target}")
-        [[ -z "$pids" && "$target" == "cloudflared" ]] && pids=$(pgrep -x "cloudflared")
-        if [[ -n "$pids" ]]; then
-            kill $pids 2>/dev/null
-        fi
+        stop_standalone_processes "$target" "$config"
         echo -e "${green}✔ 服务/进程停止命令已下发。${plain}"
     else
         if [[ $service_handled -eq 1 ]]; then
-            echo -e "${green}✔ 服务 ${action_zh} 指令已下发。${plain}"
+            sleep 1.5
+            get_tunnel_status "$target" "$config"
+            if [[ $STATUS_RUNNING -eq 1 ]]; then
+                echo -e "${green}✔ 服务 ${action_zh} 成功且运行正常！${plain}"
+            else
+                echo -e "${red}⚠ 警告：服务 ${action_zh} 后未保持运行，可能配置有误！最近日志：${plain}"
+                if command -v journalctl &>/dev/null && [[ -d /run/systemd/system ]]; then
+                    journalctl -u "$svc_name" -n 8 --no-pager 2>/dev/null
+                fi
+            fi
+        elif [[ -n "$config" && -f "$config" ]] && command -v cloudflared &>/dev/null; then
+            # 独立后台进程模式自动重载拉起
+            [[ "$action" == "restart" ]] && stop_standalone_processes "$target" "$config"
+            local cf_bin; cf_bin=$(command -v cloudflared)
+            local log_f="/var/log/cloudflared_${target}.log"
+            nohup "$cf_bin" tunnel --config "$config" run >"$log_f" 2>&1 &
+            sleep 1.5
+            get_tunnel_status "$target" "$config"
+            if [[ $STATUS_RUNNING -eq 1 ]]; then
+                echo -e "${green}✔ 独立后台进程 ${action_zh} 成功！日志路径: ${log_f}${plain}"
+            else
+                echo -e "${red}⚠ 独立进程启动失败，最近日志：${plain}"
+                tail -n 8 "$log_f" 2>/dev/null
+            fi
         else
-            echo -e "${yellow}未发现注册的标准服务。若为命令行直接运行，请手动执行启动命令。${plain}"
+            echo -e "${yellow}未发现注册的系统服务，且未找到本地配置文件或 cloudflared 主程序。${plain}"
         fi
     fi
 }
@@ -421,15 +599,15 @@ delete_tunnel() {
     local target="$1"
     local config="$2"
     local svc_name="cf-${target}"
-    [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" || "$target" == "cloudflared_process" ]] && svc_name="cloudflared"
+    [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" ]] && svc_name="cloudflared"
 
     echo -e "\n${red}===================================================${plain}"
     echo -e "${red} ⚠️ 危险操作：您正在尝试彻底删除隧道 [${target}]${plain}"
     echo -e "${red}===================================================${plain}"
-    read -rp "是否确认停止并卸载该隧道服务？ [y/N]: " confirm_del
+    read -rp "是否确认停止并卸载该隧道服务？ [y/N]: " confirm_del < /dev/tty
     [[ ! "$confirm_del" =~ ^[Yy]$ ]] && echo -e "${yellow}已取消删除操作。${plain}" && return 1
 
-    manage_service "$target" "stop"
+    manage_service "$target" "stop" "$config"
 
     local removed_svc=0
     if command -v systemctl &>/dev/null; then
@@ -451,30 +629,35 @@ delete_tunnel() {
     [[ $removed_svc -eq 1 ]] && echo -e "${green}✔ 系统服务文件已卸载。${plain}"
 
     if [[ -n "$config" && -f "$config" ]]; then
-        read -rp "是否一并删除关联的 YAML 配置文件及 JSON 密钥凭证？[y/N]: " del_cfg
+        read -rp "是否一并删除关联的 YAML 配置文件及 JSON 密钥凭证？[y/N]: " del_cfg < /dev/tty
         if [[ "$del_cfg" =~ ^[Yy]$ ]]; then
-            local cred_file; cred_file=$(grep -iE '^[[:space:]]*credentials-file[[:space:]]*:' "$config" | sed 's/^[^:]*://' | tr -d ' "\047\r')
+            local cred_file; cred_file=$(get_yaml_value "credentials-file" "$config")
             if [[ -n "$cred_file" && -f "$cred_file" ]]; then
                 rm -f "$cred_file"
                 echo -e "${green}✔ JSON 凭证文件已删除: ${cred_file}${plain}"
             fi
-            rm -f "$config"
-            echo -e "${green}✔ YAML 配置文件已删除: ${config}${plain}"
+            rm -f "$config" "${config}.bak."*
+            echo -e "${green}✔ YAML 配置文件及备份已删除: ${config}${plain}"
         else
             echo -e "${yellow}已保留配置文件: ${config}${plain}"
         fi
     fi
 
+    local remain; remain=$(scan_all_local_tunnels)
+    if [[ -z "$remain" ]]; then
+        echo -e "\n${green}🎉 隧道实例 [${target}] 已彻底清理！当前机器已无剩余隧道，退出管理控制台。${plain}"
+        exit 0
+    fi
+
     echo -e "\n${green}🎉 隧道实例 [${target}] 清理完成！按回车键重新加载面板...${plain}"
-    read -r
-    
+    read -r < /dev/tty
     exec bash "$0" "$@"
 }
 
 main() {
     clear
     echo -e "${cyan}================================================================${plain}"
-    echo -e "${cyan}   🚀 Cloudflare Argo Tunnel 交互式管理引擎 (全能进阶版)       ${plain}"
+    echo -e "${cyan}   🚀 Cloudflare Argo Tunnel 交互式管理引擎 v${sh_ver}           ${plain}"
     echo -e "${cyan}================================================================${plain}"
 
     local raw_tunnels; raw_tunnels=$(scan_all_local_tunnels)
@@ -483,9 +666,10 @@ main() {
 
     if [[ ${#tunnels[@]} -eq 0 ]]; then
         echo -e "${yellow}未在系统服务或进程中找到运行的隧道，进入手动模式。${plain}"
-        read -rp "请输入 cloudflared yml 配置文件的完整绝对路径: " config_file
+        read -rp "请输入 cloudflared yml 配置文件的完整绝对路径 (直接回车退出): " config_file < /dev/tty
+        [[ -z "$config_file" ]] && exit 0
         if [[ ! -f "$config_file" ]]; then echo -e "${red}文件不存在，退出。${plain}"; exit 1; fi
-        target_name="custom"
+        target_name=$(basename "$config_file" | sed 's/\.yml$//;s/\.yaml$//')
     else
         echo -e "${green}已识别到本机存在以下隧道实例/服务：${plain}\n"
         local i=1
@@ -501,7 +685,7 @@ main() {
             echo -e "${green}检测到当前机器仅有 1 个隧道目标，已自动选定: ${cyan}${tunnels[0]}${plain}"
             target_name="${tunnels[0]}"
         else
-            read -rp "请输入要进入管理的隧道序号 [1-${#tunnels[@]}]: " t_sel
+            read -rp "请输入要进入管理的隧道序号 [1-${#tunnels[@]}]: " t_sel < /dev/tty
             if ! [[ "$t_sel" =~ ^[0-9]+$ ]] || (( t_sel < 1 || t_sel > ${#tunnels[@]} )); then echo -e "${red}输入无效，退出。${plain}"; exit 1; fi
             target_name="${tunnels[$((t_sel-1))]}"
         fi
@@ -514,7 +698,7 @@ main() {
     if [[ -z "$config_file" || ! -f "$config_file" ]]; then
         if [[ $is_token -eq 0 ]]; then
             echo -e "\n${yellow}⚠ 未能自动定位 [${target_name}] 的 YAML 配置文件！${plain}"
-            read -rp "请手动输入绝对路径 (若确认无配置文件，请直接回车进入查看模式): " config_file
+            read -rp "请手动输入绝对路径 (若确认无配置文件，请直接回车进入查看模式): " config_file < /dev/tty
             if [[ -n "$config_file" && ! -f "$config_file" ]]; then
                 echo -e "${red}路径无效！将以“无配置安全模式”进入控制面板。${plain}"
                 config_file=""
@@ -544,7 +728,7 @@ main() {
         echo -e "  ${green}7.${plain} ${red}彻底删除隧道 (卸载服务/配置文件)${plain}"
         echo -e "  ${green}0.${plain} 退出程序"
         echo ""
-        read -rp "请输入菜单选项 [0-7]: " opt
+        read -rp "请输入菜单选项 [0-7]: " opt < /dev/tty
 
         case "$opt" in
             1|2|3|4)
@@ -553,20 +737,20 @@ main() {
                 elif [[ -z "$config_file" || ! -f "$config_file" ]]; then
                     echo -e "\n${red}⚠ 缺少本地 YAML 配置文件，此功能已被禁用。${plain}"
                 else
-                    if [ "$opt" -eq 1 ]; then modify_hostname "$config_file"; read -rp "是否立即重启生效？[Y/n]: " r_ans; [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart"; fi
-                    if [ "$opt" -eq 2 ]; then modify_tunnel_id "$config_file"; read -rp "是否立即重启生效？[Y/n]: " r_ans; [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart"; fi
-                    if [ "$opt" -eq 3 ]; then modify_tunnel_id "$config_file"; echo -e "${magenta}--------------------------------${plain}"; modify_hostname "$config_file"; read -rp "是否立即重启生效？[Y/n]: " r_ans; [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart"; fi
-                    if [ "$opt" -eq 4 ]; then modify_protocol "$config_file"; read -rp "是否立即重启生效？[Y/n]: " r_ans; [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart"; fi
+                    if [ "$opt" -eq 1 ]; then modify_hostname "$config_file"; read -rp "是否立即重启生效？[Y/n]: " r_ans < /dev/tty; [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart" "$config_file"; fi
+                    if [ "$opt" -eq 2 ]; then modify_tunnel_id "$config_file"; read -rp "是否立即重启生效？[Y/n]: " r_ans < /dev/tty; [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart" "$config_file"; fi
+                    if [ "$opt" -eq 3 ]; then modify_tunnel_id "$config_file"; echo -e "${magenta}--------------------------------${plain}"; modify_hostname "$config_file"; read -rp "是否立即重启生效？[Y/n]: " r_ans < /dev/tty; [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart" "$config_file"; fi
+                    if [ "$opt" -eq 4 ]; then modify_protocol "$config_file" "$target_name"; read -rp "是否立即重启生效？[Y/n]: " r_ans < /dev/tty; [[ "${r_ans:-Y}" =~ ^[Yy]$ ]] && manage_service "$target_name" "restart" "$config_file"; fi
                 fi
                 ;;
-            5) manage_service "$target_name" "restart" ;;
-            6) [[ $STATUS_RUNNING -eq 1 ]] && manage_service "$target_name" "stop" || manage_service "$target_name" "start" ;;
+            5) manage_service "$target_name" "restart" "$config_file" ;;
+            6) [[ $STATUS_RUNNING -eq 1 ]] && manage_service "$target_name" "stop" "$config_file" || manage_service "$target_name" "start" "$config_file" ;;
             7) delete_tunnel "$target_name" "$config_file" ;;
             0) echo -e "\n${green}操作完成，已安全退出。${plain}\n"; exit 0 ;;
             *) echo -e "${red}无效输入，请重新选择。${plain}" ;;
         esac
 
-        echo ""; read -rp "按回车键刷新面板..."; clear
+        echo ""; read -rp "按回车键刷新面板..." < /dev/tty; clear
     done
 }
 
