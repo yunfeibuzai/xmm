@@ -1,315 +1,641 @@
-#!/bin/bash
-# 麦卖云 (Maimai Cloud) - SOCKS5 自动化落地脚本 (底层全劫持版)
-# 适配: Debian/Ubuntu (Systemd) + Alpine (OpenRC)
-# 核心: 抛弃不可靠的面板路由，强制采用网卡级透明劫持，100%防漏流
-# 更新地址: https://github.com/yunfeibuzai/xmm/blob/main/all/xmm_24
+#!/usr/bin/env bash
+# =========================================================================
+#  麦卖云 (Maimai Cloud) - SOCKS5 底层透明劫持落地引擎 (v4.0.0-Ultimate)
+#  路径：all/xmm_24
+#  适配: Debian / Ubuntu (Systemd) + Alpine (OpenRC) + 单/多进程 V2bX
+# =========================================================================
+sh_ver="4.0.0-Ultimate"
+
+if [ -z "$BASH_VERSION" ]; then
+    if command -v apk >/dev/null 2>&1; then
+        apk update >/dev/null 2>&1 && apk add --no-cache bash >/dev/null 2>&1
+        exec bash "$0" "$@"
+    else
+        echo "错误：请使用 bash 运行此脚本！"
+        exit 1
+    fi
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-SCRIPT_URL="https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm_24"
+SCRIPT_URLS=(
+    "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm_24"
+    "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm_24"
+    "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/all/xmm_24"
+)
 
 if [ "$(id -u)" != "0" ]; then
     echo -e "${RED}错误: 必须使用 root 权限运行！${NC}"
     exit 1
 fi
 
-# ==================== 智能环境探测 ====================
+# ==================== 1. 智能环境探测与基础依赖补齐 ====================
 if command -v apt-get >/dev/null 2>&1; then
     PKG_MAN="apt"
 elif command -v apk >/dev/null 2>&1; then
     PKG_MAN="apk"
+elif command -v yum >/dev/null 2>&1; then
+    PKG_MAN="yum"
 else
-    echo -e "${RED}不支持的系统，仅支持 Debian/Ubuntu/Alpine${NC}"
+    echo -e "${RED}不支持的系统，仅支持 Debian/Ubuntu/CentOS/Alpine${NC}"
     exit 1
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     SYS_MAN="systemd"
-elif command -v rc-service >/dev/null 2>&1; then
+elif command -v rc-service >/dev/null 2>&1 || [ -f /etc/alpine-release ]; then
     SYS_MAN="openrc"
 else
     echo -e "${RED}无法识别服务管理器 (systemd/openrc)${NC}"
     exit 1
 fi
 
-command -v python3 >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get update && apt-get install -y python3 || apk add python3; }
-command -v iptables >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get update && apt-get install -y iptables || apk add iptables iptables-openrc; }
-command -v nano >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get install -y nano || apk add nano; }
-command -v ss >/dev/null 2>&1 || { [ "$PKG_MAN" == "apt" ] && apt-get install -y iproute2 || apk add iproute2; }
+ensure_base_deps() {
+    local need=0
+    for c in python3 iptables ip6tables ss curl wget; do
+        command -v "$c" >/dev/null 2>&1 || need=1
+    done
+    if [ "$need" -eq 1 ]; then
+        echo -e "${YELLOW}正在自动补齐底层依赖 (python3 / iptables / iproute2 / curl)...${NC}"
+        if [ "$PKG_MAN" == "apt" ]; then
+            apt-get update -y -q >/dev/null 2>&1
+            apt-get install -y --no-install-recommends python3 iptables iproute2 curl wget ca-certificates >/dev/null 2>&1
+        elif [ "$PKG_MAN" == "apk" ]; then
+            apk update >/dev/null 2>&1
+            apk add --no-cache python3 iptables ip6tables iptables-openrc iproute2 curl wget ca-certificates >/dev/null 2>&1
+        elif [ "$PKG_MAN" == "yum" ]; then
+            yum install -y python3 iptables iptables-services iproute curl wget ca-certificates >/dev/null 2>&1
+        fi
+    fi
+}
+ensure_base_deps
 
-# ==================== 工具函数 ====================
-resolve_domain() {
-    python3 -c "import socket, sys; print(socket.gethostbyname(sys.argv[1]))" "$1" 2>/dev/null
+is_multi_mode() {
+    if [[ -f /etc/V2bX/nodes/.multi_enabled ]] || \
+       compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/v2bx.node_*" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
 }
 
-get_panel_ip() {
+# ==================== 2. 工具函数 ====================
+resolve_domain_ipv4() {
     python3 -c "
-import json, re
+import socket, sys
 try:
-    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
-    host = json.loads(content)['Nodes'][0]['ApiHost'].split('//')[-1].split('/')[0].split(':')[0]
-    import socket
-    print(socket.gethostbyname(host))
-except:
+    infos = socket.getaddrinfo(sys.argv[1].strip('[]'), None, socket.AF_INET)
+    ips = sorted(set(i[4][0] for i in infos))
+    if ips: print(ips[0])
+except Exception:
     pass
+" "$1" 2>/dev/null
+}
+
+get_all_panel_ips() {
+    python3 -c "
+import json, re, socket, os
+ips = set()
+cfg_files = ['/etc/V2bX/config.json']
+if os.path.isdir('/etc/V2bX/nodes'):
+    for fn in os.listdir('/etc/V2bX/nodes'):
+        if fn.startswith('node_') and fn.endswith('.json'):
+            cfg_files.append(os.path.join('/etc/V2bX/nodes', fn))
+
+for cf in cfg_files:
+    if not os.path.exists(cf): continue
+    try:
+        raw = open(cf, encoding='utf-8').read()
+        try: data = json.loads(raw)
+        except Exception: data = json.loads(re.sub(r'(?<!:)//.*', '', raw))
+        for n in data.get('Nodes', []):
+            ah = n.get('ApiHost', '')
+            if ah:
+                host = ah.split('//')[-1].split('/')[0].split(':')[0]
+                for info in socket.getaddrinfo(host, None, socket.AF_INET):
+                    ips.add(info[4][0])
+    except Exception:
+        pass
+print(' '.join(sorted(ips)))
 " 2>/dev/null
 }
 
-restart_service() {
-    local srv=$1
-    [ "$SYS_MAN" == "systemd" ] && systemctl restart "$srv" || rc-service "$srv" restart
-}
-
-enable_service() {
-    local srv=$1
-    [ "$SYS_MAN" == "systemd" ] && systemctl enable "$srv" || rc-update add "$srv" default
-}
-
-# ==================== 核心: 底层透明代理全劫持 ====================
-deploy_universal_hijack() {
-    echo -e "${CYAN}--- 开始配置网卡级 S5 底层透明劫持 ---${NC}"
-    
-    # 1. 净化历史上可能残留的失效路由注入
+test_s5_handshake() {
+    export TEST_HOST="$1" TEST_PORT="$2"
     python3 -c "
-import json, re
+import socket, time, os
+host = os.environ['TEST_HOST'].strip('[]')
+port = int(os.environ['TEST_PORT'])
+t0 = time.time()
 try:
-    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
-    cfg = json.loads(content)
-    for core in cfg.get('Cores', []):
-        core.pop('OutboundConfigPath', None)
-        core.pop('RouteConfigPath', None)
-    for node in cfg.get('Nodes', []):
-        node.pop('OutboundConfigPath', None)
-        node.pop('RouteConfigPath', None)
-    with open('/etc/V2bX/config.json', 'w') as f:
-        json.dump(cfg, f, indent=2)
-except:
-    pass
-" 2>/dev/null
-    restart_service "V2bX" 2>/dev/null
+    s = socket.create_connection((host, port), timeout=4.0)
+    s.settimeout(3.0)
+    s.sendall(b'\x05\x02\x00\x02')
+    resp = s.recv(2)
+    ms = round((time.time() - t0) * 1000)
+    s.close()
+    if len(resp) == 2 and resp[0] == 5:
+        print(f'OK|{ms}')
+    else:
+        print('WARN|端口已通但非标准SOCKS5协议')
+except Exception as e:
+    print(f'FAIL|{e}')
+"
+}
 
-    S5_IP=$(resolve_domain "$S5_HOST")
-    if [ -z "$S5_IP" ]; then
-        echo -e "${RED}错误: 无法解析域名 ${S5_HOST}${NC}"
-        return 1
+restart_v2bx_all() {
+    if is_multi_mode; then
+        if [ "$SYS_MAN" == "systemd" ]; then
+            systemctl daemon-reload 2>/dev/null
+            for nf in /etc/V2bX/nodes/node_*.json; do
+                [[ -f "$nf" ]] || continue
+                systemctl restart "v2bx@$(basename "$nf" .json).service" 2>/dev/null
+            done
+        else
+            for rcf in /etc/init.d/v2bx.node_*; do
+                [[ -f "$rcf" ]] || continue
+                rc-service "$(basename "$rcf")" restart 2>/dev/null
+            done
+        fi
+        return
     fi
-    
-    if [[ "$S5_IP" == "127.0.0"* ]]; then
-        echo -e "${YELLOW}⚠️ 检测到目标 S5 为本机内网 IP！请确保本地 S5 服务是由非 root 用户运行，否则会死循环！${NC}"
-        read -p "确定要强行继续吗？(y/n): " force_local
-        [ "$force_local" != "y" ] && return
-    fi
-    
-    PANEL_IP=$(get_panel_ip)
-    
-    read -p "请输入当前节点的 [回源监听端口] (非常重要，如 443, 填错会导致断网): " NODE_PORT
-    if [[ -z "$NODE_PORT" || ! "$NODE_PORT" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}必须输入有效的数字端口！${NC}"
-        return 1
-    fi
-    SPORT_ARGS="22,${NODE_PORT}"
 
-    if [ "$PKG_MAN" == "apt" ]; then
-        apt-get install -y redsocks iptables-persistent
+    if [ "$SYS_MAN" == "systemd" ]; then
+        systemctl daemon-reload 2>/dev/null
+        systemctl restart V2bX 2>/dev/null
     else
-        apk add redsocks
+        rc-service V2bX restart 2>/dev/null || /etc/init.d/V2bX restart 2>/dev/null
+    fi
+}
+
+# 绑定或解除 V2bX 专属用户组 (用于 iptables --gid-owner 精准分流，不伤 SSH/隧道/探针)
+configure_v2bx_group() {
+    local mode="$1" # bind | unbind
+    if [ "$mode" == "bind" ]; then
+        getent group v2bx >/dev/null 2>&1 || groupadd -r v2bx 2>/dev/null || addgroup -S v2bx 2>/dev/null
+        if [ "$SYS_MAN" == "systemd" ]; then
+            for sf in /etc/systemd/system/V2bX.service /etc/systemd/system/v2bx@.service; do
+                [[ -f "$sf" ]] || continue
+                sed -i '/^Group=/d' "$sf"
+                sed -i '/^User=root/a Group=v2bx' "$sf"
+            done
+            systemctl daemon-reload 2>/dev/null
+        else
+            for rcf in /etc/init.d/V2bX /etc/init.d/v2bx.node_*; do
+                [[ -f "$rcf" ]] || continue
+                sed -i '/^command_user=/d' "$rcf"
+                sed -i '/^command=/a command_user="root:v2bx"' "$rcf"
+                chmod +x "$rcf"
+            done
+        fi
+    else
+        if [ "$SYS_MAN" == "systemd" ]; then
+            for sf in /etc/systemd/system/V2bX.service /etc/systemd/system/v2bx@.service; do
+                [[ -f "$sf" ]] || continue
+                sed -i '/^Group=v2bx/d' "$sf"
+            done
+            systemctl daemon-reload 2>/dev/null
+        else
+            for rcf in /etc/init.d/V2bX /etc/init.d/v2bx.node_*; do
+                [[ -f "$rcf" ]] || continue
+                sed -i '/^command_user="root:v2bx"/d' "$rcf"
+                chmod +x "$rcf"
+            done
+        fi
+    fi
+}
+
+# ==================== 3. 透明重定向引擎部署 (Redsocks + Alpine Gost 自动兜底) ====================
+install_and_start_redirector() {
+    local s5_ip="$1" s5_port="$2" s5_user="$3" s5_pass="$4"
+    local engine="none"
+
+    if command -v redsocks >/dev/null 2>&1; then
+        engine="redsocks"
+    elif [ "$PKG_MAN" == "apt" ]; then
+        apt-get install -y --no-install-recommends redsocks >/dev/null 2>&1
+        command -v redsocks >/dev/null 2>&1 && engine="redsocks"
+    elif [ "$PKG_MAN" == "apk" ]; then
+        apk add --no-cache redsocks >/dev/null 2>&1
+        command -v redsocks >/dev/null 2>&1 && engine="redsocks"
     fi
 
-    DAEMON_MODE="off"
-    [ "$SYS_MAN" == "openrc" ] && DAEMON_MODE="on"
+    # Alpine 仓库默认不含 redsocks，自动部署轻量级静态 gost 透明重定向器作为完美替代
+    if [ "$engine" == "none" ]; then
+        echo -e "${yellow}当前系统源无 redsocks 包，正在部署轻量级透明重定向引擎 (gost)...${NC}"
+        if [ ! -x /usr/local/bin/gost_redir ]; then
+            local arch; arch=$(uname -m)
+            local g_arch="amd64"
+            case "$arch" in
+                x86_64|amd64) g_arch="amd64" ;;
+                aarch64|arm64) g_arch="arm64" ;;
+                armv7*) g_arch="armv7" ;;
+                *) echo -e "${RED}不支持的架构: ${arch}${NC}"; return 1 ;;
+            esac
+            local g_urls=(
+                "https://ghp.ci/https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-${g_arch}-2.11.5.gz"
+                "https://mirror.ghproxy.net/https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-${g_arch}-2.11.5.gz"
+                "https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-${g_arch}-2.11.5.gz"
+            )
+            for gu in "${g_urls[@]}"; do
+                if wget -q --timeout=15 -O /tmp/gost.gz "$gu" || curl -sL --connect-timeout 10 "$gu" -o /tmp/gost.gz; then
+                    if [ -s /tmp/gost.gz ] && gzip -dc /tmp/gost.gz > /usr/local/bin/gost_redir 2>/dev/null; then
+                        if head -c 4 /usr/local/bin/gost_redir | grep -q 'ELF'; then
+                            chmod +x /usr/local/bin/gost_redir
+                            rm -f /tmp/gost.gz
+                            break
+                        fi
+                    fi
+                fi
+                rm -f /tmp/gost.gz /usr/local/bin/gost_redir
+            done
+        fi
+        if [ -x /usr/local/bin/gost_redir ]; then
+            engine="gost"
+        else
+            echo -e "${RED}❌ 透明重定向组件下载失败，已中止操作（未修改任何防火墙规则，网络完全安全）。${NC}"
+            return 1
+        fi
+    fi
 
-    cat << EOF > /etc/redsocks.conf
+    # 停止旧实例
+    if [ "$SYS_MAN" == "systemd" ]; then
+        systemctl stop maimai-s5-redir 2>/dev/null
+        systemctl stop redsocks 2>/dev/null
+        systemctl disable redsocks 2>/dev/null
+    else
+        rc-service maimai-s5-redir stop 2>/dev/null
+        rc-service redsocks stop 2>/dev/null
+    fi
+    pkill -9 -f "gost_redir|redsocks" 2>/dev/null
+
+    local exec_cmd=""
+    if [ "$engine" == "redsocks" ]; then
+        local auth_block=""
+        if [ -n "$s5_user" ]; then
+            auth_block="    login = \"${s5_user}\";
+    password = \"${s5_pass}\";"
+        fi
+        cat << EOF > /etc/redsocks.conf
 base {
     log_debug = off;
-    log_info = on;
+    log_info = off;
     log = "stderr";
-    daemon = ${DAEMON_MODE};
+    daemon = off;
+    user = nobody;
     redirector = iptables;
 }
 redsocks {
     local_ip = 127.0.0.1;
     local_port = 12345;
-    ip = ${S5_IP};
-    port = ${S5_PORT};
+    ip = ${s5_ip};
+    port = ${s5_port};
     type = socks5;
-    login = "${S5_USER}";
-    password = "${S5_PASS}";
+${auth_block}
 }
 EOF
+        chmod 600 /etc/redsocks.conf
+        exec_cmd="/usr/sbin/redsocks -c /etc/redsocks.conf"
+    else
+        local s5_uri="socks5://${s5_ip}:${s5_port}"
+        if [ -n "$s5_user" ]; then
+            local enc_creds
+            enc_creds=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]) + ':' + urllib.parse.quote(sys.argv[2]))" "$s5_user" "$s5_pass")
+            s5_uri="socks5://${enc_creds}@${s5_ip}:${s5_port}"
+        fi
+        cat << EOF > /etc/maimai_s5_redir.env
+GOST_ARGS="-L=red://127.0.0.1:12345 -F=${s5_uri}"
+EOF
+        chmod 600 /etc/maimai_s5_redir.env
+        exec_cmd="/usr/local/bin/gost_redir -L=red://127.0.0.1:12345 -F=${s5_uri}"
+    fi
 
+    # 统一注册为 maimai-s5-redir 服务 (以 nobody 身份运行，彻底杜绝死循环)
     if [ "$SYS_MAN" == "systemd" ]; then
-        cat << 'EOF' > /etc/systemd/system/redsocks.service
+        local run_user="nobody"
+        [ "$engine" == "redsocks" ] && run_user="root" # redsocks 内部自行降权为 user = nobody
+        cat << EOF > /etc/systemd/system/maimai-s5-redir.service
 [Unit]
-Description=Redsocks transparent proxy
+Description=Maimai Cloud Transparent SOCKS5 Redirector (${engine})
 After=network.target
 
 [Service]
 Type=simple
-User=root
-ExecStart=/usr/sbin/redsocks -c /etc/redsocks.conf
+User=${run_user}
+ExecStart=${exec_cmd}
 Restart=always
+RestartSec=3
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
+        systemctl enable maimai-s5-redir >/dev/null 2>&1
+        systemctl restart maimai-s5-redir
+    else
+        local rc_user="nobody"
+        [ "$engine" == "redsocks" ] && rc_user="root"
+        cat << EOF > /etc/init.d/maimai-s5-redir
+#!/sbin/openrc-run
+description="Maimai Cloud Transparent SOCKS5 Redirector (${engine})"
+command="${exec_cmd%% *}"
+command_args="${exec_cmd#* }"
+command_user="${rc_user}"
+command_background=true
+pidfile="/run/maimai-s5-redir.pid"
+output_log="/var/log/maimai-s5-redir.log"
+error_log="/var/log/maimai-s5-redir.log"
+
+depend() {
+    need net
+}
+EOF
+        chmod +x /etc/init.d/maimai-s5-redir
+        rc-update add maimai-s5-redir default >/dev/null 2>&1
+        rc-service maimai-s5-redir restart
     fi
 
-    enable_service "redsocks"
-    restart_service "redsocks"
+    # 关键防断网校验：必须确认 127.0.0.1:12345 已成功监听才允许写入 iptables！
+    sleep 1.5
+    if ! ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:12345[[:space:]]'; then
+        echo -e "${RED}❌ 致命错误: 本地透明代理端口 127.0.0.1:12345 未能成功启动监听！${NC}"
+        echo -e "${yellow}已触发安全熔断：未向内核注入任何 iptables 规则，您的服务器网络不受任何影响。${NC}"
+        if [ "$SYS_MAN" == "systemd" ]; then
+            journalctl -u maimai-s5-redir -n 10 --no-pager 2>/dev/null
+        else
+            tail -n 10 /var/log/maimai-s5-redir.log 2>/dev/null
+        fi
+        return 1
+    fi
 
-    # 清除旧规则
+    echo -e "${green}✔ 透明重定向引擎 [${engine}] 已就绪并成功监听 127.0.0.1:12345！${NC}"
+    return 0
+}
+
+# ==================== 4. 清理防火墙劫持规则 ====================
+clear_hijack_iptables() {
+    while iptables -t nat -D OUTPUT -p tcp -m owner --gid-owner v2bx -j REDSOCKS 2>/dev/null; do :; done
     while iptables -t nat -D OUTPUT -p tcp -j REDSOCKS 2>/dev/null; do :; done
     iptables -t nat -F REDSOCKS 2>/dev/null
     iptables -t nat -X REDSOCKS 2>/dev/null
 
-    iptables -t nat -N REDSOCKS
-    iptables -t nat -A REDSOCKS -d 127.0.0.0/8 -j RETURN
-    iptables -t nat -A REDSOCKS -d 10.0.0.0/8 -j RETURN
-    iptables -t nat -A REDSOCKS -d 172.16.0.0/12 -j RETURN
-    iptables -t nat -A REDSOCKS -d 192.168.0.0/16 -j RETURN
-    
-    iptables -t nat -A REDSOCKS -d ${S5_IP}/32 -j RETURN
-    [ -n "$PANEL_IP" ] && iptables -t nat -A REDSOCKS -d ${PANEL_IP}/32 -j RETURN
-
-    # 关键防漏流与防断网放行
-    iptables -t nat -A REDSOCKS -p tcp -m multiport --sports ${SPORT_ARGS} -j RETURN
-    
-    # 强制将剩余所有 TCP 塞入 Redsocks
-    iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports 12345
-    iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
-
-    if [ "$PKG_MAN" == "apt" ]; then
-        netfilter-persistent save 2>/dev/null
-    else
-        /etc/init.d/iptables save 2>/dev/null || rc-service iptables save 2>/dev/null
-        rc-update add iptables default 2>/dev/null
-    fi
-    echo -e "${GREEN}✅ 底层透明劫持落地配置完毕！不管内核怎么乱跑，出网 100% 锁定 HKT！${NC}"
+    # 清理防漏流规则
+    while iptables -D OUTPUT -p udp --dport 443 -m owner --gid-owner v2bx -j REJECT 2>/dev/null; do :; done
+    while ip6tables -D OUTPUT -m owner --gid-owner v2bx -j REJECT 2>/dev/null; do :; done
+    while ip6tables -D OUTPUT -p tcp ! -d ::1/128 -m comment --comment "maimai-s5-v6block" -j REJECT 2>/dev/null; do :; done
+    while iptables -D OUTPUT -p udp --dport 443 -m comment --comment "maimai-s5-quicblock" -j REJECT 2>/dev/null; do :; done
 }
 
-# ==================== 诊断与卸载 ====================
+save_iptables_rules() {
+    if [ "$PKG_MAN" == "apt" ]; then
+        command -v netfilter-persistent >/dev/null 2>&1 || apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1
+        netfilter-persistent save >/dev/null 2>&1
+    elif [ "$PKG_MAN" == "apk" ]; then
+        /etc/init.d/iptables save >/dev/null 2>&1 || rc-service iptables save >/dev/null 2>&1
+        /etc/init.d/ip6tables save >/dev/null 2>&1 || rc-service ip6tables save >/dev/null 2>&1
+        rc-update add iptables default >/dev/null 2>&1
+        rc-update add ip6tables default >/dev/null 2>&1
+    else
+        service iptables save >/dev/null 2>&1
+    fi
+}
+
+# ==================== 5. 核心部署流程 ====================
+deploy_universal_hijack() {
+    echo -e "${CYAN}--- 开始配置底层 S5 透明劫持 (零漏流+零断网版) ---${NC}"
+
+    # 1. 剥离可能冲突的旧 Xray 外部路由注入
+    python3 -c "
+import json, re, os
+if os.path.exists('/etc/V2bX/config.json'):
+    try:
+        content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json', encoding='utf-8').read())
+        cfg = json.loads(content)
+        for core in cfg.get('Cores', []):
+            core.pop('OutboundConfigPath', None)
+            core.pop('RouteConfigPath', None)
+        for node in cfg.get('Nodes', []):
+            node.pop('OutboundConfigPath', None)
+            node.pop('RouteConfigPath', None)
+        with open('/etc/V2bX/config.json', 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+" 2>/dev/null
+
+    local S5_IP
+    S5_IP=$(resolve_domain_ipv4 "$S5_HOST")
+    if [ -z "$S5_IP" ]; then
+        echo -e "${RED}错误: 无法解析 S5 服务器域名 [${S5_HOST}]${NC}"
+        return 1
+    fi
+
+    echo -e "${cyan}正在对目标 SOCKS5 (${S5_IP}:${S5_PORT}) 进行协议握手预检...${NC}"
+    local hs_res; hs_res=$(test_s5_handshake "$S5_IP" "$S5_PORT")
+    local hs_st; hs_st=$(echo "$hs_res" | cut -d'|' -f1)
+    local hs_info; hs_info=$(echo "$hs_res" | cut -d'|' -f2)
+    if [ "$hs_st" == "OK" ]; then
+        echo -e "${green}✔ SOCKS5 握手成功 (延迟: ${hs_info}ms)${NC}"
+    else
+        echo -e "${YELLOW}⚠️ 警告: 目标 S5 预检异常 (${hs_info})${NC}"
+        read -rp "仍要继续部署吗？(y/N): " force_s5 < /dev/tty
+        [[ ! "$force_s5" =~ ^[Yy]$ ]] && return
+    fi
+
+    # 探测内核是否支持 xt_owner (UID/GID 精确进程隔离)
+    local has_owner_mod=0
+    if iptables -t nat -N MAIMAI_TEST 2>/dev/null; then
+        if iptables -t nat -A MAIMAI_TEST -m owner --uid-owner 0 -j RETURN 2>/dev/null; then
+            has_owner_mod=1
+        fi
+        iptables -t nat -F MAIMAI_TEST 2>/dev/null
+        iptables -t nat -X MAIMAI_TEST 2>/dev/null
+    fi
+
+    local scope_mode="global"
+    if [ "$has_owner_mod" -eq 1 ]; then
+        echo -e "\n${cyan}请选择劫持范围策略：${NC}"
+        echo -e "  ${green}1. 精准劫持 V2bX 全部节点出站 (推荐)${NC} — 不影响 SSH、Cloudflare 隧道、探针监控与系统更新"
+        echo -e "  ${yellow}2. 全机全局 TCP 出站劫持${NC} — 整台小鸡所有程序全部强制走 S5 代理"
+        read -rp "请选择策略 [1-2] (默认 1): " sc_ans < /dev/tty
+        [[ "$sc_ans" != "2" ]] && scope_mode="v2bx_only"
+    else
+        echo -e "${yellow}ℹ 当前容器内核不支持 xt_owner 进程识别，自动使用全机全局安全劫持模式。${NC}"
+    fi
+
+    local block_leak="y"
+    read -rp "是否开启防漏流护盾 (封堵出站 IPv6 与 UDP 443 QUIC，防止双栈网站暴露机房原生 IP)？[Y/n]: " leak_ans < /dev/tty
+    [[ "$leak_ans" =~ ^[Nn]$ ]] && block_leak="n"
+
+    # 启动本地透明重定向服务并校验 12345 端口监听
+    install_and_start_redirector "$S5_IP" "$S5_PORT" "$S5_USER" "$S5_PASS" || return 1
+
+    # 清理旧规则
+    clear_hijack_iptables
+
+    # 构建 REDSOCKS NAT 链
+    iptables -t nat -N REDSOCKS
+    iptables -t nat -A REDSOCKS -d 0.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 100.64.0.0/10 -j RETURN
+    iptables -t nat -A REDSOCKS -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 169.254.0.0/16 -j RETURN
+    iptables -t nat -A REDSOCKS -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A REDSOCKS -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A REDSOCKS -d 224.0.0.0/4 -j RETURN
+    iptables -t nat -A REDSOCKS -d 240.0.0.0/4 -j RETURN
+
+    # 放行 nobody 用户 (彻底防止重定向器自身流量循环)
+    [ "$has_owner_mod" -eq 1 ] && iptables -t nat -A REDSOCKS -m owner --uid-owner nobody -j RETURN
+
+    # 放行目标 S5 服务器 IP 与所有面板 IP
+    iptables -t nat -A REDSOCKS -d "${S5_IP}/32" -j RETURN
+    local PANEL_IPS; PANEL_IPS=$(get_all_panel_ips)
+    for pip in $PANEL_IPS; do
+        [ -n "$pip" ] && iptables -t nat -A REDSOCKS -d "${pip}/32" -j RETURN
+    done
+
+    # 将剩余 TCP 流量导入本地 12345 透明重定向端口
+    iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports 12345
+
+    if [ "$scope_mode" == "v2bx_only" ]; then
+        configure_v2bx_group "bind"
+        iptables -t nat -A OUTPUT -p tcp -m owner --gid-owner v2bx -j REDSOCKS
+        if [ "$block_leak" == "y" ]; then
+            iptables -A OUTPUT -p udp --dport 443 -m owner --gid-owner v2bx -j REJECT 2>/dev/null
+            ip6tables -A OUTPUT -m owner --gid-owner v2bx -j REJECT 2>/dev/null
+        fi
+    else
+        configure_v2bx_group "unbind"
+        iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
+        if [ "$block_leak" == "y" ]; then
+            iptables -A OUTPUT -p udp --dport 443 -m comment --comment "maimai-s5-quicblock" -j REJECT 2>/dev/null
+            ip6tables -A OUTPUT -p tcp ! -d ::1/128 -m comment --comment "maimai-s5-v6block" -j REJECT 2>/dev/null
+        fi
+    fi
+
+    restart_v2bx_all
+    save_iptables_rules
+
+    echo -e "\n${GREEN}================================================================${NC}"
+    echo -e "${GREEN}✅ 底层 S5 透明劫持部署完成！${NC}"
+    echo -e " 🎯 劫持模式: ${CYAN}$([[ "$scope_mode" == "v2bx_only" ]] && echo "V2bX 全节点精准劫持 (SSH/隧道/探针不受影响)" || echo "全机全局 TCP 劫持")${NC}"
+    echo -e " 🌐 落地出口: ${CYAN}${S5_HOST} (${S5_IP}:${S5_PORT})${NC}"
+    echo -e " 🛡️  防漏护盾: ${CYAN}$([[ "$block_leak" == "y" ]] && echo "已开启 (已封堵 IPv6 与 QUIC UDP 443 泄漏)" || echo "未开启")${NC}"
+    echo -e "${GREEN}================================================================${NC}\n"
+}
+
+# ==================== 6. 诊断与一键剥离 ====================
 diagnose_env() {
     echo -e "\n${CYAN}===========================================${NC}"
-    echo -e "${YELLOW}🩺 正在深度体检 V2bX 配置与本地 S5 环境...${NC}"
+    echo -e "${YELLOW}🩺 底层 S5 透明劫持 & V2bX 深度体检${NC}"
     echo -e "${CYAN}===========================================${NC}"
-    
-    python3 -c "
-import json, os, re
-print('[\033[0;36m配置检查\033[0m] 分析 /etc/V2bX/config.json 依赖...')
-try:
-    if not os.path.exists('/etc/V2bX/config.json'):
-        print('  [\033[0;31m致命\033[0m] /etc/V2bX/config.json 不存在！')
-        exit(0)
-    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
-    cfg = json.loads(content)
-    for idx, node in enumerate(cfg.get('Nodes', [])):
-        cert = node.get('CertConfig', {})
-        cf = cert.get('CertFile')
-        kf = cert.get('KeyFile')
-        if cf:
-            if os.path.exists(cf): print(f'  [\033[0;32m正常\033[0m] TLS 证书存在: {cf}')
-            else: print(f'  [\033[0;31m致命\033[0m] TLS 证书丢失: {cf}')
-        if kf:
-            if os.path.exists(kf): print(f'  [\033[0;32m正常\033[0m] TLS 私钥存在: {kf}')
-            else: print(f'  [\033[0;31m致命\033[0m] TLS 私钥丢失: {kf}')
-except Exception as e:
-    print(f'  [\033[0;31m错误\033[0m] 解析失败: {e}')
-"
-    
-    echo -e "\n[\033[0;36m端口扫描\033[0m] 检测本地已知代理与隧道进程..."
-    TUNNELS=$(ss -tulnp | grep -iE 'v2bx|xray|sing-box|gost|danted|microsocks|socat|sshd|redsocks')
-    if [ -z "$TUNNELS" ]; then
-        echo -e "  ${GREEN}未检测到本地运行的其他代理隧道服务。${NC}"
+
+    if ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:12345[[:space:]]'; then
+        echo -e " [${GREEN}正常${NC}] 本地透明重定向端口 127.0.0.1:12345 正在监听"
     else
-        printf "  ${CYAN}%-20s %-10s %-25s${NC}\n" "进程名称" "PID" "监听地址:端口"
-        echo "  --------------------------------------------------------"
-        echo "$TUNNELS" | while read -r line; do
-            port=$(echo "$line" | awk '{print $5}')
-            proc=$(echo "$line" | grep -o 'users:((".*"' | cut -d '"' -f2)
-            pid=$(echo "$line" | grep -o 'pid=[0-9]*' | cut -d '=' -f2 | head -n 1)
-            [ -n "$proc" ] && printf "  ${GREEN}%-20s${NC} ${YELLOW}%-10s${NC} %-25s\n" "$proc" "$pid" "$port"
-        done
+        echo -e " [${RED}未运行${NC}] 本地透明重定向端口 127.0.0.1:12345 未监听"
     fi
+
+    if iptables -t nat -L OUTPUT -n 2>/dev/null | grep -q "REDSOCKS"; then
+        echo -e " [${GREEN}已挂载${NC}] 内核 NAT OUTPUT -> REDSOCKS 劫持链已激活"
+        iptables -t nat -L REDSOCKS -n -v 2>/dev/null | awk 'NR>2 {print "   " $0}'
+    else
+        echo -e " [${YELLOW}未挂载${NC}] 当前未启用 iptables 底层劫持规则"
+    fi
+
+    echo -e "\n[${CYAN}出口验证${NC}] 正在通过 V2bX 所属组探测真实出网 IP..."
+    local test_ip=""
+    if getent group v2bx >/dev/null 2>&1 && command -v sg >/dev/null 2>&1; then
+        test_ip=$(sg v2bx -c "curl -4 -s --max-time 6 https://api.ip.sb/ip" 2>/dev/null)
+    fi
+    [ -z "$test_ip" ] && test_ip=$(curl -4 -s --max-time 6 https://api.ip.sb/ip 2>/dev/null)
+    echo -e " 当前生效出口 IPv4: ${GREEN}${test_ip:-探测超时}${NC}"
     echo -e "${CYAN}===========================================${NC}"
 }
 
 uninstall_all() {
-    echo -e "\n${RED}⚠️ 警告: 这将彻底清除 S5 落地，将出口恢复为 VPS 原生机房直连。${NC}"
-    read -p "确定要继续吗？(y/n): " confirm
-    [ "$confirm" != "y" ] && return
-    
-    echo -e "${YELLOW}正在剥离底层 iptables 劫持规则...${NC}"
-    while iptables -t nat -D OUTPUT -p tcp -j REDSOCKS 2>/dev/null; do :; done
-    iptables -t nat -F REDSOCKS 2>/dev/null
-    iptables -t nat -X REDSOCKS 2>/dev/null
-    
-    if [ "$PKG_MAN" == "apt" ]; then
-        netfilter-persistent save 2>/dev/null
-    else
-        /etc/init.d/iptables save 2>/dev/null || rc-service iptables save 2>/dev/null
-    fi
+    echo -e "\n${RED}⚠️ 警告: 这将彻底清除 S5 底层透明劫持，恢复为 VPS 原生机房直连。${NC}"
+    read -rp "确定要继续吗？(y/N): " confirm < /dev/tty
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && return
 
-    echo -e "${YELLOW}正在停止并禁用 Redsocks...${NC}"
+    echo -e "${YELLOW}正在剥离底层 iptables / ip6tables 劫持规则...${NC}"
+    clear_hijack_iptables
+    save_iptables_rules
+
+    echo -e "${YELLOW}正在停止并卸载透明重定向服务...${NC}"
     if [ "$SYS_MAN" == "systemd" ]; then
-        systemctl stop redsocks 2>/dev/null
-        systemctl disable redsocks 2>/dev/null
+        systemctl stop maimai-s5-redir redsocks 2>/dev/null
+        systemctl disable maimai-s5-redir redsocks 2>/dev/null
+        rm -f /etc/systemd/system/maimai-s5-redir.service
+        systemctl daemon-reload 2>/dev/null
     else
+        rc-service maimai-s5-redir stop 2>/dev/null
         rc-service redsocks stop 2>/dev/null
+        rc-update del maimai-s5-redir default 2>/dev/null
         rc-update del redsocks default 2>/dev/null
+        rm -f /etc/init.d/maimai-s5-redir
     fi
-    
-    echo -e "${YELLOW}正在剥离 V2bX 外部注入路由...${NC}"
-    python3 -c "
-import json, re
-try:
-    content = re.sub(r'(?<!:)//.*', '', open('/etc/V2bX/config.json').read())
-    cfg = json.loads(content)
-    for core in cfg.get('Cores', []):
-        core.pop('OutboundConfigPath', None)
-        core.pop('RouteConfigPath', None)
-    for node in cfg.get('Nodes', []):
-        node.pop('OutboundConfigPath', None)
-        node.pop('RouteConfigPath', None)
-    with open('/etc/V2bX/config.json', 'w') as f:
-        json.dump(cfg, f, indent=2)
-except:
-    pass
-" 2>/dev/null
-    restart_service "V2bX" 2>/dev/null
+    pkill -9 -f "gost_redir|redsocks" 2>/dev/null
+    rm -f /etc/redsocks.conf /etc/maimai_s5_redir.env
+
+    configure_v2bx_group "unbind"
+    restart_v2bx_all
 
     echo -e "${GREEN}✅ 清理完毕！已完美回滚为原生机房直连。${NC}"
 }
 
-# ==================== 主菜单调度 ====================
+# ==================== 7. 主菜单调度 ====================
 setup_s5() {
-    echo -e "${YELLOW}--- 强制底层 SOCKS5 劫持部署 ---${NC}"
-    read -p "服务器(支持域名或IP, 本机S5填127.0.0.1): " S5_HOST
-    read -p "端口: " S5_PORT
-    read -p "用户名 (无则留空): " S5_USER
-    read -p "密码 (无则留空): " S5_PASS
-    
+    echo -e "${YELLOW}--- 底层 SOCKS5 透明劫持部署 ---${NC}"
+    read -rp "S5 服务器 (支持域名或IP, 本地填 127.0.0.1): " RAW_HOST < /dev/tty
+    read -rp "S5 端口: " RAW_PORT < /dev/tty
+    read -rp "S5 用户名 (无则直接回车): " S5_USER < /dev/tty
+    read -rp "S5 密码 (无则直接回车): " S5_PASS < /dev/tty
+
+    S5_HOST=$(echo "$RAW_HOST" | tr -d ' ' | sed -E 's#^[a-zA-Z0-9]+://##; s#/.*$##')
+    if [[ "$S5_HOST" =~ ^([^:]+):([0-9]+)$ ]]; then
+        S5_HOST="${BASH_REMATCH[1]}"
+        [ -z "$RAW_PORT" ] && S5_PORT="${BASH_REMATCH[2]}" || S5_PORT="$RAW_PORT"
+    else
+        S5_PORT="$RAW_PORT"
+    fi
+
+    if [ -z "$S5_HOST" ] || [[ ! "$S5_PORT" =~ ^[0-9]+$ ]] || [ "$S5_PORT" -lt 1 ] || [ "$S5_PORT" -gt 65535 ]; then
+        echo -e "${RED}错误: 服务器地址或端口号无效！${NC}"
+        return 1
+    fi
+
     deploy_universal_hijack
 }
 
 view_logs() {
-    echo -e "\n${CYAN}1) V2bX 日志  2) Redsocks 日志${NC}"
-    read -p "请选择(1/2): " log_choice
-    echo -e "${YELLOW}💡 提示：正在实时滚动日志，随时按 [Ctrl+C] 可安全退出查看并返回主菜单。${NC}\n"
+    echo -e "\n${CYAN}1) V2bX 运行日志  2) 透明重定向器日志${NC}"
+    read -rp "请选择 (1/2): " log_choice < /dev/tty
+    echo -e "${YELLOW}💡 提示：正在实时滚动日志，随时按 [Ctrl+C] 可安全退出返回菜单。${NC}\n"
     trap '' INT
     (
         trap - INT
-        if command -v journalctl >/dev/null 2>&1; then
-            [ "$log_choice" == "1" ] && journalctl -u V2bX -n 100 -f
-            [ "$log_choice" == "2" ] && journalctl -u redsocks -n 100 -f
+        if [ "$log_choice" == "1" ]; then
+            if is_multi_mode && [ "$SYS_MAN" == "systemd" ]; then
+                journalctl -u "v2bx@*" -n 100 -f --no-pager
+            elif [ "$SYS_MAN" == "systemd" ]; then
+                journalctl -u V2bX -n 100 -f --no-pager
+            else
+                tail -n 100 -f /var/log/V2bX/*.log /var/log/v2bx*.log /etc/V2bX/*.log 2>/dev/null
+            fi
         else
-            echo -e "${YELLOW}当前为 Alpine OpenRC 环境：${NC}"
-            [ "$log_choice" == "1" ] && tail -f /var/log/V2bX* /etc/V2bX/*.log 2>/dev/null
-            [ "$log_choice" == "2" ] && tail -f /var/log/messages | grep redsocks
+            if [ "$SYS_MAN" == "systemd" ]; then
+                journalctl -u maimai-s5-redir -n 100 -f --no-pager
+            else
+                tail -n 100 -f /var/log/maimai-s5-redir.log 2>/dev/null
+            fi
         fi
     )
     trap - INT
@@ -318,31 +644,51 @@ view_logs() {
 
 update_self() {
     echo -e "${YELLOW}正在更新脚本...${NC}"
-    wget -qO "$0" "$SCRIPT_URL"
-    if [ $? -eq 0 ]; then
-        chmod +x "$0"
-        echo -e "${GREEN}✅ 更新成功！重启中...${NC}"
+    local tmp_up="/tmp/xmm24_up_${RANDOM}.sh"
+    local ok=0
+    for u in "${SCRIPT_URLS[@]}"; do
+        if wget -q --timeout=10 -O "$tmp_up" "$u" || curl -sL --connect-timeout 8 "$u" -o "$tmp_up"; then
+            if [ -s "$tmp_up" ] && grep -q "sh_ver=" "$tmp_up"; then
+                ok=1; break
+            fi
+        fi
+    done
+    if [ "$ok" -eq 1 ]; then
+        mkdir -p /usr/local/bin
+        mv -f "$tmp_up" /usr/local/bin/xmm_24
+        chmod +x /usr/local/bin/xmm_24
+        [[ -f "$0" && "$0" != /tmp/* ]] && cp -f /usr/local/bin/xmm_24 "$0" 2>/dev/null
+        echo -e "${GREEN}✅ 更新成功！正在重新加载...${NC}"
         sleep 1
-        exec bash "$0"
+        exec bash /usr/local/bin/xmm_24
     else
-        echo -e "${RED}更新失败！${NC}"
+        rm -f "$tmp_up"
+        echo -e "${RED}更新失败，请检查网络连接！${NC}"
     fi
 }
 
-# ==================== 入口 ====================
 while true; do
+    MODE_TAG="${CYAN}未启用${NC}"
+    if iptables -t nat -L OUTPUT -n 2>/dev/null | grep -q "REDSOCKS"; then
+        if iptables -t nat -L OUTPUT -n 2>/dev/null | grep -q "owner GID match"; then
+            MODE_TAG="${GREEN}V2bX 精准劫持中${NC}"
+        else
+            MODE_TAG="${YELLOW}全机全局劫持中${NC}"
+        fi
+    fi
+
     echo -e "\n${CYAN}===========================================${NC}"
-    echo -e "${GREEN}  Maimai Cloud - S5 落地智能路由 (全劫持版) ${NC}"
-    echo -e "  环境: ${YELLOW}${SYS_MAN^^}${NC} | 状态: ${YELLOW}强制底层劫持 (通杀漏流)${NC}"
+    echo -e "${GREEN}  Maimai Cloud - S5 底层透明劫持 v${sh_ver}${NC}"
+    echo -e "  环境: ${YELLOW}${SYS_MAN^^}${NC} | 状态: ${MODE_TAG}"
     echo -e "${CYAN}===========================================${NC}"
-    echo "  1. 部署 S5 落地 (强制接管一切内核漏流)"
+    echo "  1. 部署 S5 落地 (支持单/多进程 & 全内核防漏流)"
     echo "  2. 查看服务运行日志"
-    echo "  3. 深度诊断 (配置体检 & 端口探针)"
+    echo "  3. 深度诊断 (端口监听 / NAT计数 / 出口IP验证)"
     echo "  4. 一键剥离 S5 落地 (回滚原生机房直连)"
     echo "  8. 更新当前脚本"
     echo "  9. 退出"
     echo -e "${CYAN}===========================================${NC}"
-    read -p "请输入指令: " opt
+    read -rp "请输入指令: " opt < /dev/tty
 
     case $opt in
         1) setup_s5 ;;
