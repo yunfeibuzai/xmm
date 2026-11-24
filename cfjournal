@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # =================================================================
-# 麦卖云 Cloudflare Argo Tunnel 智能诊断引擎 (终极满血版)
-# 独创：全系统兼容底层探针、配置自动剖析、端口盲审避障
-# 修复：Windows CRLF 换行符导致的控制台乱码重叠问题
+# 麦卖云 Cloudflare Argo Tunnel 智能诊断引擎 (v2.5.0-Pro 全兼容版)
+# 路径：cfjournal
 # =================================================================
+sh_ver="2.5.0-Pro"
 
-# 1. 自动修补 Alpine 执行环境 (拦截 sh 执行或缺失 bash 的情境)
+# 1. 自动修补 Alpine 执行环境
 if [ -z "$BASH_VERSION" ]; then
     if command -v apk >/dev/null 2>&1; then
         echo -e "\033[33m检测到 Alpine 环境，正在自愈加载 bash...\033[0m"
-        apk update >/dev/null 2>&1 && apk add --no-cache bash grep sed gawk net-tools coreutils >/dev/null 2>&1
+        apk update >/dev/null 2>&1 && apk add --no-cache bash grep sed gawk iproute2 coreutils >/dev/null 2>&1
         exec bash "$0" "$@"
     else
         echo "错误：请使用 bash 执行脚本！"
@@ -17,80 +17,148 @@ if [ -z "$BASH_VERSION" ]; then
     fi
 fi
 
-# 2. 初始化标准控制台颜色
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'; dim='\033[2m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
-# 3. 跨系统底层进程防误探针 (兼容 BusyBox)
 check_pid_alive() {
     local pid="$1"
-    [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] && kill -0 "$pid" 2>/dev/null
+    [[ -n "$pid" && "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 && -d "/proc/$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
-# 清理字符串中所有不可见控制字符 (解决 CRLF 乱码重叠的核心函数)
 clean_string() {
     echo "$1" | tr -d '\r' | tr -d '\000-\011\013-\037' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
-# 4. 主干逻辑
-view_cf_tunnel_logs() {
-    clear
-    echo -e "${cyan}================================================================${plain}"
-    echo -e "${cyan}       🚀 Cloudflare Argo Tunnel 实时智能诊断雷达引擎           ${plain}"
-    echo -e "${cyan}================================================================${plain}"
+get_yaml_value() {
+    local key="$1"
+    local file="$2"
+    awk -F':' -v k="$key" 'tolower($1) ~ "^[ \t]*"tolower(k)"[ \t]*$" {
+        val=$0; sub(/^[^:]*:/, "", val);
+        sub(/[ \t]+#.*$/, "", val);
+        gsub(/^[ \t\r\n\047"]+|[ \t\r\n\047"]+$/, "", val);
+        print val; exit
+    }' "$file"
+}
 
-    local discovered_tunnels=()
+# 与 cfmgr 对齐的统一隧道发现引擎
+scan_all_local_tunnels() {
+    local discovered=()
 
-    # Systemd 层扫描
-    if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
+    if command -v systemctl &>/dev/null; then
         for f in /etc/systemd/system/cf-*.service; do
-            [[ -f "$f" ]] && discovered_tunnels+=("$(basename "$f" | sed 's/^cf-//;s/\.service$//')")
+            [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//;s/\.service$//')")
         done
-        [[ -f "/etc/systemd/system/cloudflared.service" ]] && discovered_tunnels+=("cloudflared")
+        if [[ -f "/etc/systemd/system/cloudflared.service" ]]; then
+            if grep -qi -e "--token" "/etc/systemd/system/cloudflared.service" 2>/dev/null; then
+                discovered+=("Token_Managed_Tunnel")
+            else
+                local scfg; scfg=$(grep -oE -e '(--config|-c)([[:space:]]+|=)[^[:space:]"'\'']+' "/etc/systemd/system/cloudflared.service" 2>/dev/null | head -n 1 | sed -E 's/^(--config|-c)([[:space:]]+|=)//')
+                if [[ -n "$scfg" ]]; then
+                    discovered+=("$(basename "$scfg" | sed 's/\.yml$//;s/\.yaml$//')")
+                else
+                    discovered+=("cloudflared")
+                fi
+            fi
+        fi
     fi
 
-    # Alpine OpenRC 层扫描
     if command -v rc-service &>/dev/null || [[ -d "/etc/init.d" ]]; then
         for f in /etc/init.d/cf-*; do
-            [[ -f "$f" ]] && discovered_tunnels+=("$(basename "$f" | sed 's/^cf-//')")
+            [[ -f "$f" ]] && discovered+=("$(basename "$f" | sed 's/^cf-//')")
         done
-        [[ -f "/etc/init.d/cloudflared" ]] && discovered_tunnels+=("cloudflared")
+        if [[ -f "/etc/init.d/cloudflared" ]]; then
+            if grep -qi -e "--token" "/etc/init.d/cloudflared" 2>/dev/null; then
+                discovered+=("Token_Managed_Tunnel")
+            else
+                local rcfg; rcfg=$(grep -oE -e '(--config|-c)([[:space:]]+|=)[^[:space:]"'\'']+' "/etc/init.d/cloudflared" 2>/dev/null | head -n 1 | sed -E 's/^(--config|-c)([[:space:]]+|=)//')
+                if [[ -n "$rcfg" ]]; then
+                    discovered+=("$(basename "$rcfg" | sed 's/\.yml$//;s/\.yaml$//')")
+                else
+                    discovered+=("cloudflared")
+                fi
+            fi
+        fi
     fi
 
-    # 兜底文件扫描 (跳过非配置 yml)
     for dir in "/etc/cloudflared" "/root/.cloudflared"; do
         if [[ -d "$dir" ]]; then
             for yml in "$dir"/*.yml "$dir"/*.yaml; do
                 [[ -f "$yml" ]] || continue
                 local base; base=$(basename "$yml" | sed 's/\.yml$//;s/\.yaml$//')
-                [[ "$base" != "cert" && "$base" != "config" ]] && discovered_tunnels+=("$base")
+                [[ "$base" == "cert" ]] && continue
+                discovered+=("$base")
             done
         fi
     done
 
-    # 进程级扫描兜底
     for p in /proc/[0-9]*/cmdline; do
         [[ -f "$p" ]] || continue
         local cmd; cmd=$(tr '\0' ' ' < "$p" 2>/dev/null)
         if [[ "$cmd" == *"cloudflared "* ]]; then
-            if [[ "$cmd" =~ tunnel[[:space:]]+run[[:space:]]+([^[:space:]\-][^[:space:]]*) ]]; then
-                discovered_tunnels+=("${BASH_REMATCH[1]}")
+            if [[ "$cmd" == *"--token "* ]]; then
+                discovered+=("Token_Managed_Tunnel")
+            elif [[ "$cmd" =~ tunnel[[:space:]]+run[[:space:]]+([^[:space:]\-][^[:space:]]*) ]]; then
+                discovered+=("${BASH_REMATCH[1]}")
+            elif [[ "$cmd" =~ (--config|-c)([[:space:]]+|=)([^[:space:]]+) ]]; then
+                local cfg="${BASH_REMATCH[3]}"
+                local base; base=$(basename "$cfg" | sed 's/\.yml$//;s/\.yaml$//')
+                [[ "$base" != "cert" ]] && discovered+=("$base")
             fi
         fi
     done
 
-    # 极简安全的数组去重
-    local tunnels=()
-    for t in "${discovered_tunnels[@]}"; do
-        [[ -z "$t" ]] && continue
-        local is_duplicate=0
-        for exist in "${tunnels[@]}"; do
-            [[ "$t" == "$exist" ]] && is_duplicate=1 && break
-        done
-        [[ $is_duplicate -eq 0 ]] && tunnels+=("$t")
+    if [[ ${#discovered[@]} -gt 0 ]]; then
+        echo "${discovered[@]}" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' '
+    fi
+}
+
+find_config_file() {
+    local target="$1"
+    local svc_files=("/etc/systemd/system/cf-${target}.service" "/etc/init.d/cf-${target}" "/etc/systemd/system/cloudflared.service" "/etc/init.d/cloudflared")
+
+    for sf in "${svc_files[@]}"; do
+        if [[ -f "$sf" ]]; then
+            local cfg; cfg=$(grep -oE -e '(--config|-c)([[:space:]]+|=)[^[:space:]"'\'']+' "$sf" 2>/dev/null | head -n 1 | sed -E 's/^(--config|-c)([[:space:]]+|=)//')
+            if [[ -n "$cfg" && -f "$cfg" ]]; then
+                local cfg_base; cfg_base=$(basename "$cfg" | sed 's/\.yml$//;s/\.yaml$//')
+                if [[ "$target" == "cloudflared" || "$cfg_base" == "$target" ]]; then
+                    echo "$cfg"; return
+                fi
+            fi
+        fi
     done
+
+    for p in /proc/[0-9]*/cmdline; do
+        [[ -f "$p" ]] || continue
+        local cmd; cmd=$(tr '\0' ' ' < "$p" 2>/dev/null)
+        if [[ "$cmd" == *"cloudflared "* && "$cmd" == *"$target"* ]]; then
+            if [[ "$cmd" =~ (--config|-c)([[:space:]]+|=)([^[:space:]]+) ]]; then
+                if [[ -f "${BASH_REMATCH[3]}" ]]; then echo "${BASH_REMATCH[3]}"; return; fi
+            fi
+        fi
+    done
+
+    local candidates=(
+        "/etc/cloudflared/${target}.yml" "/etc/cloudflared/${target}.yaml"
+        "/root/.cloudflared/${target}.yml" "/root/.cloudflared/${target}.yaml"
+    )
+    [[ "$target" == "cloudflared" ]] && candidates+=("/etc/cloudflared/config.yml" "/root/.cloudflared/config.yml")
+    for c in "${candidates[@]}"; do
+        if [[ -f "$c" ]]; then echo "$c"; return; fi
+    done
+    echo ""
+}
+
+view_cf_tunnel_logs() {
+    clear
+    echo -e "${cyan}================================================================${plain}"
+    echo -e "${cyan}     🚀 Cloudflare Argo Tunnel 实时智能诊断雷达 v${sh_ver}       ${plain}"
+    echo -e "${cyan}================================================================${plain}"
+
+    local raw_tunnels; raw_tunnels=$(scan_all_local_tunnels)
+    local tunnels=($raw_tunnels)
 
     if [[ ${#tunnels[@]} -eq 0 ]]; then
         echo -e "\n${yellow}雷达未扫描到当前服务器存在任何部署的 CF 隧道实例！${plain}\n"
@@ -108,7 +176,7 @@ view_cf_tunnel_logs() {
             echo -e "  ${bold}${green}${i}.${plain} 隧道标识: ${cyan}${t}${plain}"
             ((i++))
         done
-        read -rp "请输入序号 [1-${#tunnels[@]}]: " sel
+        read -rp "请输入序号 [1-${#tunnels[@]}]: " sel < /dev/tty
         if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#tunnels[@]} )); then
             echo -e "${red}坐标无效，中止体检！${plain}"
             return
@@ -117,31 +185,66 @@ view_cf_tunnel_logs() {
         echo ""
     fi
 
-    echo -e "${cyan}====== [ 📡 阶段一：守护进程存活深扫 ] ======${plain}"
-    local pids=()
-    
-    # 获取 PID (多维度穿透)
+    local config_file=""
+    local is_token=0
+    [[ "$target" == "Token_Managed_Tunnel" ]] && is_token=1
+    [[ $is_token -eq 0 ]] && config_file=$(find_config_file "$target")
+
+    # 精确匹配归属当前 target 的 Systemd 服务名
+    local matched_sys_svc=""
     if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
-        local p
-        p=$(systemctl show -p MainPID "cf-${target}" 2>/dev/null | cut -d= -f2)
-        [[ -n "$p" && "$p" != "0" ]] && pids+=("$p")
-        p=$(systemctl show -p MainPID "cloudflared" 2>/dev/null | cut -d= -f2)
+        if [[ -f "/etc/systemd/system/cf-${target}.service" ]]; then
+            matched_sys_svc="cf-${target}"
+        elif [[ -f "/etc/systemd/system/cloudflared.service" ]]; then
+            if [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" ]] || \
+               grep -qE -- "(--config|-c)([[:space:]]+|=).*/${target}\.ya?ml" "/etc/systemd/system/cloudflared.service" 2>/dev/null; then
+                matched_sys_svc="cloudflared"
+            fi
+        fi
+    fi
+
+    # 精确匹配归属当前 target 的 OpenRC 服务脚本
+    local matched_rc_svc=""
+    if [[ -f "/etc/init.d/cf-${target}" ]]; then
+        matched_rc_svc="cf-${target}"
+    elif [[ -f "/etc/init.d/cloudflared" ]]; then
+        if [[ "$target" == "cloudflared" || "$target" == "Token_Managed_Tunnel" ]] || \
+           grep -qE -- "(--config|-c)([[:space:]]+|=).*/${target}\.ya?ml" "/etc/init.d/cloudflared" 2>/dev/null; then
+            matched_rc_svc="cloudflared"
+        fi
+    fi
+
+    echo -e "${cyan}====== [ 📡 阶段一：守护进程与传输协议深扫 ] ======${plain}"
+    local pids=()
+    if [[ -n "$matched_sys_svc" ]]; then
+        local p; p=$(systemctl show -p MainPID --value "$matched_sys_svc" 2>/dev/null)
         [[ -n "$p" && "$p" != "0" ]] && pids+=("$p")
     fi
-    for pf in "/run/cf-${target}.pid" "/var/run/cf-${target}.pid" "/run/cloudflared.pid" "/var/run/cloudflared.pid"; do
+    for pf in "/run/cf-${target}.pid" "/var/run/cf-${target}.pid"; do
         [[ -f "$pf" ]] && pids+=("$(cat "$pf" 2>/dev/null | tr -d '\r\n')")
     done
+    if [[ -n "$matched_rc_svc" ]]; then
+        for pf in "/run/${matched_rc_svc}.pid" "/var/run/${matched_rc_svc}.pid"; do
+            [[ -f "$pf" ]] && pids+=("$(cat "$pf" 2>/dev/null | tr -d '\r\n')")
+        done
+    fi
+
+    local cfg_name; cfg_name=$(basename "$config_file" 2>/dev/null)
     for proc_dir in /proc/[0-9]*; do
         [[ -d "$proc_dir" ]] || continue
         local p="${proc_dir##*/}"
-        [[ "$p" == "$$" ]] && continue
+        [[ "$p" == "$$" || "$p" == "$PPID" ]] && continue
         local cmdline; cmdline=$(tr '\0' ' ' < "$proc_dir/cmdline" 2>/dev/null)
-        if [[ "$cmdline" == *"cloudflared"* && "$cmdline" == *"$target"* ]]; then
-            pids+=("$p")
+        if [[ "$cmdline" == *"cloudflared "* ]]; then
+            if [[ $is_token -eq 1 && "$cmdline" == *"--token "* ]] || \
+               [[ -n "$cfg_name" && "$cmdline" == *"$cfg_name"* ]] || \
+               [[ "$target" != "cloudflared" && "$cmdline" =~ tunnel[[:space:]]+run[[:space:]]+${target}([[:space:]]|$) ]] || \
+               [[ "$target" == "cloudflared" && "$cmdline" =~ tunnel[[:space:]]+run ]]; then
+                pids+=("$p")
+            fi
         fi
     done
 
-    # PID 验活与去重
     local active_pid=""
     for p in "${pids[@]}"; do
         if check_pid_alive "$p"; then
@@ -150,78 +253,125 @@ view_cf_tunnel_logs() {
         fi
     done
 
+    # 提取当前传输协议 (CLI 优先于 YAML)
+    local active_proto=""
+    if [[ -n "$active_pid" && -f "/proc/$active_pid/cmdline" ]]; then
+        active_proto=$(tr '\0' ' ' < "/proc/$active_pid/cmdline" | grep -ioE -e '--protocol([[:space:]]+|=)[a-zA-Z0-9]+' 2>/dev/null | awk -F'[ =]' '{print $NF}' | tr 'A-Z' 'a-z')
+    fi
+    if [[ -z "$active_proto" && -n "$config_file" && -f "$config_file" ]]; then
+        active_proto=$(get_yaml_value "protocol" "$config_file" | tr 'A-Z' 'a-z')
+    fi
+    [[ -z "$active_proto" ]] && active_proto="quic (默认)"
+
     if [[ -n "$active_pid" ]]; then
-        echo -e "核心动脉: ${green}[●] 正常起搏 (主进程 PID: ${active_pid})${plain}"
+        echo -e "核心动脉: ${green}[●] 正常起搏 (PID: ${active_pid} | 协议: ${magenta}${active_proto}${green})${plain}"
     else
-        echo -e "核心动脉: ${red}[○] 心跳停止 (服务可能已停止，或配置文件致命错误导致坠毁)${plain}"
+        echo -e "核心动脉: ${red}[○] 心跳停止 (服务已停止，或配置/凭据致命错误导致坠毁)${plain}"
     fi
 
     echo -e "\n${cyan}====== [ 🎯 阶段二：端口内网穿透盲审 ] ======${plain}"
-    local config_file=""
-    for cand in "/etc/cloudflared/${target}.yml" "/etc/cloudflared/${target}.yaml" "/etc/cloudflared/config.yml" "/root/.cloudflared/${target}.yml" "/root/.cloudflared/${target}.yaml" "/root/.cloudflared/config.yml"; do
-        if [[ -f "$cand" ]]; then
-            config_file="$cand"
-            break
-        fi
-    done
+    if [[ $is_token -eq 1 ]]; then
+        echo -e "隧道模式: ${magenta}Token 远程托管 (Zero Trust Dashboard)${plain}"
+        echo -e "${dim}提示：穿透规则由 Cloudflare 网页后台下发，本地无 YAML 文件，跳过本地端口比对。${plain}"
+    elif [[ -n "$config_file" && -f "$config_file" ]]; then
+        echo -e "配置文件: ${green}${config_file}${plain}"
 
-    if [[ -f "$config_file" ]]; then
-        # 【防御核心】强制清理所有隐藏符，剥离注释，只取纯净的值
-        local forward_url_raw
-        forward_url_raw=$(grep -iE '^[[:space:]]*-[[:space:]]*service[[:space:]]*:' "$config_file" 2>/dev/null | \
-                          grep -iv 'http_status' | head -n 1 | \
-                          sed -e 's/^[[:space:]]*-[[:space:]]*service[[:space:]]*:[[:space:]]*//i' | \
-                          cut -d'#' -f1)
-        
-        local forward_url; forward_url=$(clean_string "$forward_url_raw")
-        
-        if [[ -n "$forward_url" ]]; then
-            local forward_port; forward_port=$(echo "$forward_url" | grep -oE '[0-9]+$')
-            echo -e "配置文件: ${green}${config_file}${plain}"
-            echo -e "接驳目标: ${yellow}${forward_url}${plain}"
+        # 解析所有 ingress 规则 (兼容有无横杠及任意字段顺序)
+        local rules_list
+        rules_list=$(awk '
+        function flush_rule() {
+            if (svc != "" && tolower(svc) !~ /^http_status:/) {
+                print (host != "" ? host : "(默认通配规则)") "|" svc
+            }
+            host = ""; svc = ""
+        }
+        {
+            line = $0
+            sub(/[ \t]+#.*$/, "", line)
+            gsub(/\r/, "", line)
+            if (line ~ /^[ \t]*-[ \t]*/) {
+                flush_rule()
+                sub(/^[ \t]*-[ \t]*/, "", line)
+            }
+            if (tolower(line) ~ /^[ \t]*hostname[ \t]*:/) {
+                val = line
+                sub(/^[ \t]*[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee][ \t]*:[ \t]*/, "", val)
+                gsub(/^[ \t\047"]+|[ \t\047"]+$/, "", val)
+                host = val
+            } else if (tolower(line) ~ /^[ \t]*service[ \t]*:/) {
+                val = line
+                sub(/^[ \t]*[Ss][Ee][Rr][Vv][Ii][Cc][Ee][ \t]*:[ \t]*/, "", val)
+                gsub(/^[ \t\047"]+|[ \t\047"]+$/, "", val)
+                svc = val
+            }
+        }
+        END { flush_rule() }
+        ' "$config_file")
 
-            if [[ -n "$forward_port" ]]; then
-                local listen_check=""
-                # 兼容全系统的网络侦测引擎
-                if command -v ss &>/dev/null; then
-                    listen_check=$(ss -tlnp 2>/dev/null | awk '{print $4}' | grep -E "(:|\])${forward_port}$")
-                elif command -v netstat &>/dev/null; then
-                    listen_check=$(netstat -tlnp 2>/dev/null | awk '{print $4}' | grep -E "(:|\.)${forward_port}$")
+        local listen_snapshot=""
+        listen_snapshot=$(ss -tln 2>/dev/null || netstat -tln 2>/dev/null)
+        local has_no_tls_verify=0
+        grep -qiE '^[[:space:]]*noTLSVerify[[:space:]]*:[[:space:]]*true' "$config_file" 2>/dev/null && has_no_tls_verify=1
+
+        if [[ -n "$rules_list" ]]; then
+            while IFS='|' read -r r_host r_svc; do
+                r_host=$(clean_string "$r_host")
+                r_svc=$(clean_string "$r_svc")
+                [[ -z "$r_svc" ]] && continue
+
+                echo -e "穿透规则: ${cyan}${r_host}${plain} ➔ ${yellow}${r_svc}${plain}"
+
+                if [[ "$r_svc" =~ ^https:// ]] && [[ $has_no_tls_verify -eq 0 ]]; then
+                    echo -e "TLS 校验: ${yellow}⚠ 回源为 https:// 但未检测到 noTLSVerify: true，若后端使用自签证书将报 502！${plain}"
                 fi
 
-                if [[ -n "$listen_check" ]]; then
-                    echo -e "隧道闸口: ${green}✔ 物理贯通！本地后端正严阵以待监听 ${forward_port} 端口。${plain}"
+                local host_port forward_port
+                host_port=$(echo "$r_svc" | sed -E 's|^[a-zA-Z0-9+.-]+://||; s|/.*$||')
+                forward_port=$(echo "$host_port" | grep -oE ':[0-9]+$' | tr -d ':')
+
+                if [[ -n "$forward_port" ]]; then
+                    if echo "$listen_snapshot" | awk '{print $4}' | grep -qE "(:|\]|\.)${forward_port}$"; then
+                        echo -e "隧道闸口: ${green}✔ 物理贯通！本地后端正在监听 ${forward_port} 端口。${plain}"
+                    else
+                        echo -e "隧道闸口: ${red}❌ 幽灵断层！本地没有任何服务监听 ${forward_port} 端口！${plain}"
+                        echo -e "          ${yellow}👉 致命结果：外网访问将触发 502/503 错误！请检查 V2bX/后端监听端口是否为 ${forward_port}。${plain}"
+                    fi
                 else
-                    echo -e "隧道闸口: ${red}❌ 幽灵断层！本地没有任何服务接管 ${forward_port} 端口！${plain}"
-                    echo -e "          ${yellow}👉 致命结果：外网访问将 100% 触发 503 Service Unavailable！${plain}"
-                    echo -e "          ${yellow}👉 解决指南：请核对后端核心(如 V2bX/Xray)的 Listen 端口是否为 ${forward_port}。${plain}"
+                    echo -e "隧道闸口: ${dim}非标准 TCP 端口地址 (${r_svc})，跳过端口监听检测。${plain}"
                 fi
-            else
-                echo -e "隧道闸口: ${yellow}解析失败，未能提取到纯数字端口，跳过监听检测。${plain}"
-            fi
+            done <<< "$rules_list"
         else
-            echo -e "${yellow}配置探针未能嗅探到本地 service 转发信标 (Ingress 规则异常)。${plain}"
+            echo -e "${yellow}配置探针未能嗅探到本地 service 转发规则 (Ingress 规则为空)。${plain}"
         fi
     else
         echo -e "${yellow}未找到适配的 YAML 配置文件，端口透扫跳过。${plain}"
     fi
 
-    echo -e "\n${cyan}====== [ 📜 阶段三：黑匣子解码 (最近日志输出) ] ======${plain}"
+    echo -e "\n${cyan}====== [ 📜 阶段三：黑匣子解码 (最近 40 条运行日志) ] ======${plain}"
     echo -e "${magenta}----------------------------------------------------------------${plain}"
-    
+
     local log_found=0
-    # 日志输出强制过滤 CRLF，防止系统日志残留 Windows 换行符
-    if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
-        if systemctl is-active "cf-${target}.service" &>/dev/null || systemctl is-failed "cf-${target}.service" &>/dev/null; then
-            journalctl -u "cf-${target}" -n 40 --no-pager | tr -d '\r' && log_found=1
-        elif systemctl is-active "cloudflared.service" &>/dev/null || systemctl is-failed "cloudflared.service" &>/dev/null; then
-            journalctl -u cloudflared -n 40 --no-pager | tr -d '\r' && log_found=1
+    if [[ -n "$matched_sys_svc" ]]; then
+        if journalctl -u "$matched_sys_svc" -n 40 --no-pager 2>/dev/null | grep -q .; then
+            journalctl -u "$matched_sys_svc" -n 40 --no-pager | tr -d '\r'
+            log_found=1
         fi
     fi
 
+    if [[ $log_found -eq 0 && -n "$matched_rc_svc" && -f "/etc/init.d/${matched_rc_svc}" ]]; then
+        for key in "error_log" "output_log"; do
+            local rc_log; rc_log=$(get_yaml_value "$key" "/etc/init.d/${matched_rc_svc}" | tr -d '"'\''')
+            if [[ -n "$rc_log" && -f "$rc_log" && -s "$rc_log" ]]; then
+                tail -n 40 "$rc_log" | tr -d '\r'
+                log_found=1
+                break
+            fi
+        done
+    fi
+
     if [[ $log_found -eq 0 ]]; then
-        for log_f in "/var/log/cf-${target}.log" "/var/log/cf-${target}_err.log" "/var/log/cloudflared.log" "/var/log/cloudflared_err.log" "/root/.cloudflared/${target}.log"; do
-            if [[ -f "$log_f" ]]; then
+        for log_f in "/var/log/cloudflared_${target}.log" "/var/log/cf-${target}.log" "/var/log/cf-${target}_err.log" "/var/log/cloudflared.log" "/var/log/cloudflared_err.log" "/root/.cloudflared/${target}.log"; do
+            if [[ -f "$log_f" && -s "$log_f" ]]; then
                 tail -n 40 "$log_f" | tr -d '\r'
                 log_found=1
                 break
@@ -229,13 +379,13 @@ view_cf_tunnel_logs() {
         done
     fi
 
-    [[ $log_found -eq 0 ]] && echo -e "${yellow}未在内存日志树或磁盘中追踪到任何坠毁/运行记录。${plain}"
+    [[ $log_found -eq 0 ]] && echo -e "${yellow}未在系统日志树或磁盘中追踪到任何坠毁/运行记录。${plain}"
     echo -e "${magenta}----------------------------------------------------------------${plain}"
-    
+
     echo -e "\n${yellow}💡 【破壁指南】${plain}"
-    echo -e " 1. 拦截到 ${red}Failed to serve quic connection${plain} ? ${dim}➔ UDP 阻断，请去管理面板将协议切为 http2。${plain}"
-    echo -e " 2. 拦截到 ${red}connection refused${plain} ? ${dim}➔ 端口脱节，说明你的后端挂了，或隧道填错端口了。${plain}"
-    echo -e " 3. 拦截到 ${red}Unable to reach the origin service${plain} ? ${dim}➔ TLS证书验证失败，配置需加 noTLSVerify: true。${plain}"
+    echo -e " 1. 看到 ${red}Failed to serve quic connection${plain} ${dim}➔ 运营商 UDP 阻断，进主菜单 [22] 将协议切为 http2。${plain}"
+    echo -e " 2. 看到 ${red}connection refused${plain} ${dim}➔ 端口脱节，后端 V2bX 未启动或面板下发端口与隧道配置不一致。${plain}"
+    echo -e " 3. 看到 ${red}Unable to reach the origin service${plain} / ${red}x509${plain} ${dim}➔ 后端开启了自签 TLS，需在隧道 YAML 中加 noTLSVerify: true。${plain}"
     echo ""
 }
 
