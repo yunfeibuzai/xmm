@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 
 # =========================================================================
-#  Repository:  https://github.com/your-username/linux-tcp-optimizer
-#  Project:     Linux Mega-Concurrency TCP Optimizer (C10M Edition)
-#  Description: 突破 Linux 默认内核限制，全自动自适应解锁千万级并发 (C10M)。
-#               动态探测极限：KVM 强制解锁千万，LXC/容器 智能榨干母鸡极限。
-#  License:     MIT
+#  Project:     麦卖云 Linux 自适应高并发与 TCP/QUIC 网络调优引擎
+#  Description: 根据物理内存与虚拟化架构(KVM/LXC)自动分级调优，兼顾高吞吐与防OOM
 # =========================================================================
 
-# --- [ 1. 基础设置与 UI 组件 ] ---
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; PLAIN='\033[0m'
 
 msg_info() { echo -e "${CYAN}[INFO] $1${PLAIN}"; }
@@ -17,16 +13,16 @@ msg_warn() { echo -e "${YELLOW}[WARN] $1${PLAIN}"; }
 msg_err()  { echo -e "${RED}[ERR ] $1${PLAIN}"; }
 
 if [[ $EUID -ne 0 ]]; then
-    msg_err "必须使用 root 用户或 sudo 运行此脚本！\n"
+    msg_err "必须使用 root 用户运行此脚本！\n"
     exit 1
 fi
 
 clear
 echo -e "${YELLOW}=====================================================================${PLAIN}"
-echo -e "${CYAN}      🚀 Linux TCP C10M Optimizer - 千万级极端高并发内核注入      ${PLAIN}"
+echo -e "${CYAN}      🚀 麦卖云 Linux 自适应高并发与 TCP/QUIC 内核优化引擎           ${PLAIN}"
 echo -e "${YELLOW}=====================================================================${PLAIN}"
 
-# --- [ 2. 环境与架构智能检测 ] ---
+# --- [ 1. 虚拟化架构与物理内存扫描 ] ---
 IS_CONTAINER=false
 VIRT_TYPE="unknown"
 
@@ -34,65 +30,80 @@ if [ -f /proc/1/environ ] && grep -qa container= /proc/1/environ; then
     IS_CONTAINER=true; VIRT_TYPE="container"
 elif command -v systemd-detect-virt &>/dev/null; then
     VIRT_TYPE=$(systemd-detect-virt 2>/dev/null)
-    [[ "$VIRT_TYPE" =~ (lxc|openvz|docker|wsl) ]] && IS_CONTAINER=true
+    [[ "$VIRT_TYPE" =~ (lxc|openvz|docker|podman|systemd-nspawn|wsl) ]] && IS_CONTAINER=true
 fi
 
 if [ "$VIRT_TYPE" = "unknown" ] || [ -z "$VIRT_TYPE" ]; then
     if [ -d /proc/vz ]; then
         IS_CONTAINER=true; VIRT_TYPE="openvz"
-    elif grep -iq "kvm" /proc/cpuinfo 2>/dev/null || dmesg 2>/dev/null | grep -iq "kvm"; then
+    elif grep -iq "kvm\|qemu" /proc/cpuinfo 2>/dev/null || dmesg 2>/dev/null | grep -iq "kvm"; then
         VIRT_TYPE="kvm"
     fi
 fi
 
-msg_info "底层架构扫描完成: [${VIRT_TYPE^^}] | 容器沙盒环境: ${IS_CONTAINER}"
+MEM_TOTAL_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null)
+MEM_MB=$(( ${MEM_TOTAL_KB:-524288} / 1024 ))
+
+msg_info "架构扫描: [${VIRT_TYPE^^}] | 容器环境: ${IS_CONTAINER} | 物理内存: ${MEM_MB} MiB"
 
 if [ "$IS_CONTAINER" = false ]; then
     modprobe nf_conntrack 2>/dev/null
     modprobe tcp_bbr 2>/dev/null
+    modprobe sch_fq 2>/dev/null
 fi
 
-# --- [ 3. 动态探测并榨干极限 (核心逻辑升级) ] ---
-TARGET_FILES="10485760"
-MAX_SYS_FILES="65535000"
-MAX_CONNTRACK="10485760"
-
-msg_info "正在向系统底层施压，尝试推高全局总线铁闸..."
-
-# 无差别尝试提额：KVM 会生效，LXC/Docker 会静默忽略
-sysctl -w fs.file-max=${MAX_SYS_FILES} >/dev/null 2>&1
-sysctl -w fs.nr_open=${TARGET_FILES} >/dev/null 2>&1
-
-# 读取系统当下*真正的*物理天花板
-KERNEL_MAX=$(cat /proc/sys/fs/nr_open 2>/dev/null || echo "1048576")
-
-if [ "$KERNEL_MAX" -lt "$TARGET_FILES" ]; then
-    # 如果天花板依然低于千万级，说明这是被母鸡锁死的 LXC 容器
-    TARGET_FILES="$KERNEL_MAX"
-    msg_warn "检测到共享内核(LXC/母鸡)物理硬锁，已自动自适应，尝试推至母鸡允许的极限: ${TARGET_FILES}"
+# --- [ 2. 按物理内存自动分级计算安全内核参数 (杜绝缓冲区撑爆内存) ] ---
+if [ "$MEM_MB" -le 600 ]; then
+    # 128M ~ 512M 小内存 NAT/VPS：对齐 Shannon-x 推荐 4MB 缓冲上限，严防内核态 OOM
+    PROFILE_NAME="小内存防爆档 (<=512MB)"
+    TCP_BUF_MAX=4194304      # 4 MB
+    UDP_BUF_MIN=16384
+    MAX_CONNTRACK=131072     # 13万连接追踪
+    SOMAXCONN=32768
+    TW_BUCKETS=65536
+elif [ "$MEM_MB" -le 2200 ]; then
+    # 1GB ~ 2GB 主流 VPS：兼顾高并发与大带宽吞吐
+    PROFILE_NAME="主流均衡档 (1GB~2GB)"
+    TCP_BUF_MAX=16777216     # 16 MB
+    UDP_BUF_MIN=32768
+    MAX_CONNTRACK=524288     # 52万连接追踪
+    SOMAXCONN=131072
+    TW_BUCKETS=262144
 else
-    msg_succ "底层硬锁已解开，通道已拓宽至千万级上限: ${TARGET_FILES}"
+    # 4GB 及以上高配机：解锁 32MB 巨型窗口与百万级追踪
+    PROFILE_NAME="高配狂飙档 (>=4GB)"
+    TCP_BUF_MAX=33554432     # 32 MB
+    UDP_BUF_MIN=65536
+    MAX_CONNTRACK=2097152    # 209万连接追踪
+    SOMAXCONN=524288
+    TW_BUCKETS=1048576
 fi
 
-# 开始真实设置 ulimit
-if ulimit -Hn ${TARGET_FILES} 2>/dev/null && ulimit -Sn ${TARGET_FILES} 2>/dev/null; then
-    if [ "$TARGET_FILES" -ge "10485760" ]; then
-        msg_succ "✅ 千万级 (C10M) 单进程并发上限解锁成功！"
-    else
-        msg_succ "✅ 已成功榨干当前母鸡环境允许的最高极限并发！"
-    fi
-else
-    # 终极防爆防线：如果上述设置依然被某些奇葩策略拦截，获取真正的上限
-    ACTUAL_MAX=$(ulimit -Hn 2>/dev/null)
-    TARGET_FILES="$ACTUAL_MAX"
+msg_succ "已自动匹配调优档位: ${PROFILE_NAME} (单Socket缓冲上限: $((TCP_BUF_MAX / 1048576))MB)"
+
+# --- [ 3. 文件描述符安全解锁 (锁定 PAM 安全上限 1048576，防止重启后 SSH 失联) ] ---
+SAFE_MAX_FILES=1048576
+SYS_FILE_MAX=2097152
+
+sysctl -w fs.file-max=${SYS_FILE_MAX} >/dev/null 2>&1
+sysctl -w fs.nr_open=${SAFE_MAX_FILES} >/dev/null 2>&1
+
+KERNEL_NR_OPEN=$(cat /proc/sys/fs/nr_open 2>/dev/null || echo "1048576")
+TARGET_FILES=${SAFE_MAX_FILES}
+if [ "$KERNEL_NR_OPEN" -lt "$TARGET_FILES" ]; then
+    TARGET_FILES="$KERNEL_NR_OPEN"
+    msg_warn "受限于容器母鸡天花板，最大文件描述符自动适配为: ${TARGET_FILES}"
+fi
+
+if ! ulimit -Hn ${TARGET_FILES} 2>/dev/null; then
+    ACTUAL_MAX=$(ulimit -Hn 2>/dev/null || echo "65535")
+    [[ "$ACTUAL_MAX" =~ ^[0-9]+$ ]] && TARGET_FILES="$ACTUAL_MAX"
     ulimit -Hn ${TARGET_FILES} 2>/dev/null
-    ulimit -Sn ${TARGET_FILES} 2>/dev/null
-    msg_warn "触发终极兼容防线，最大文件描述符安全降级至: ${TARGET_FILES}"
 fi
+ulimit -Sn ${TARGET_FILES} 2>/dev/null
+msg_succ "单进程并发连接上限 (NOFILE) 已锁定为: ${TARGET_FILES}"
 
-# --- [ 4. 解锁系统与服务并发上限 ] ---
-msg_info "正在固化 ulimit 与 Systemd 守护进程限制..."
-
+# --- [ 4. 固化 ulimit 与守护进程限制 ] ---
 if [ -d "/etc/security" ]; then
     mkdir -p /etc/security/limits.d
     cat << EOF > /etc/security/limits.d/99-megaconcurrency.conf
@@ -113,11 +124,11 @@ fi
 if [ -d "/etc/profile.d" ]; then
     echo "ulimit -n ${TARGET_FILES} 2>/dev/null" > /etc/profile.d/99-megaconcurrency.sh
 else
-    grep -q "ulimit -n" /etc/profile || echo "ulimit -n ${TARGET_FILES} 2>/dev/null" >> /etc/profile
+    grep -q "ulimit -n" /etc/profile 2>/dev/null || echo "ulimit -n ${TARGET_FILES} 2>/dev/null" >> /etc/profile
 fi
 
-# --- [ 5. 激进内核网络调优 ] ---
-msg_info "正在注入内核网络参数..."
+# --- [ 5. 注入自适应 TCP & UDP/QUIC 内核网络参数 ] ---
+msg_info "正在注入 TCP 与 Hysteria2/TUIC(UDP) 内核网络参数..."
 SYSCTL_CONF="/etc/sysctl.d/99-c10m-network.conf"
 mkdir -p /etc/sysctl.d 2>/dev/null
 > "$SYSCTL_CONF"
@@ -130,52 +141,65 @@ inject_sysctl() {
     fi
 }
 
-inject_sysctl "fs.file-max" "${MAX_SYS_FILES}"
+inject_sysctl "fs.file-max" "${SYS_FILE_MAX}"
 inject_sysctl "fs.nr_open" "${TARGET_FILES}"
 inject_sysctl "net.ipv4.ip_local_port_range" "1024 65535"
-inject_sysctl "net.core.somaxconn" "1048576"
-inject_sysctl "net.ipv4.tcp_max_syn_backlog" "1048576"
-inject_sysctl "net.ipv4.tcp_max_tw_buckets" "2097152"
-inject_sysctl "net.core.netdev_max_backlog" "1048576"
+inject_sysctl "net.core.somaxconn" "${SOMAXCONN}"
+inject_sysctl "net.ipv4.tcp_max_syn_backlog" "${SOMAXCONN}"
+inject_sysctl "net.core.netdev_max_backlog" "${SOMAXCONN}"
+inject_sysctl "net.ipv4.tcp_max_tw_buckets" "${TW_BUCKETS}"
 inject_sysctl "net.ipv4.tcp_tw_reuse" "1"
 inject_sysctl "net.ipv4.tcp_fin_timeout" "15"
+inject_sysctl "net.ipv4.tcp_keepalive_time" "300"
+inject_sysctl "net.ipv4.tcp_keepalive_intvl" "30"
+inject_sysctl "net.ipv4.tcp_keepalive_probes" "3"
 inject_sysctl "net.ipv4.tcp_syncookies" "1"
-inject_sysctl "net.netfilter.nf_conntrack_max" "${MAX_CONNTRACK}"
-inject_sysctl "net.nf_conntrack_max" "${MAX_CONNTRACK}"
-inject_sysctl "net.core.rmem_max" "67108864"
-inject_sysctl "net.core.wmem_max" "67108864"
-inject_sysctl "net.ipv4.tcp_rmem" "4096 87380 67108864"
-inject_sysctl "net.ipv4.tcp_wmem" "4096 65536 67108864"
+inject_sysctl "net.ipv4.tcp_slow_start_after_idle" "0"
+inject_sysctl "net.ipv4.tcp_mtu_probing" "1"
 inject_sysctl "net.ipv4.tcp_window_scaling" "1"
 inject_sysctl "net.ipv4.tcp_fastopen" "3"
 
-# --- [ 6. 智能 BBR 拥塞控制自适应 ] ---
-msg_info "正在探测最优 TCP 拥塞控制算法..."
+# 连接追踪上限
+inject_sysctl "net.netfilter.nf_conntrack_max" "${MAX_CONNTRACK}"
+inject_sysctl "net.nf_conntrack_max" "${MAX_CONNTRACK}"
 
+# TCP + UDP/QUIC 缓冲区 (兼顾 Hysteria2 / TUIC 吞吐与内存安全)
+inject_sysctl "net.core.rmem_default" "262144"
+inject_sysctl "net.core.wmem_default" "262144"
+inject_sysctl "net.core.rmem_max" "${TCP_BUF_MAX}"
+inject_sysctl "net.core.wmem_max" "${TCP_BUF_MAX}"
+inject_sysctl "net.ipv4.tcp_rmem" "4096 87380 ${TCP_BUF_MAX}"
+inject_sysctl "net.ipv4.tcp_wmem" "4096 65536 ${TCP_BUF_MAX}"
+inject_sysctl "net.ipv4.udp_rmem_min" "${UDP_BUF_MIN}"
+inject_sysctl "net.ipv4.udp_wmem_min" "${UDP_BUF_MIN}"
+
+# --- [ 6. 智能 BBR 拥塞控制与队列调度自适应 ] ---
+msg_info "正在探测最优 TCP 拥塞控制算法..."
 AVAILABLE_CC=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
 CURRENT_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
 
 if echo "$AVAILABLE_CC" | grep -qi "bbr"; then
-    msg_succ "检测到内核支持 BBR，正在激活..."
+    msg_succ "检测到内核支持 BBR，正在激活 fq + BBR..."
     inject_sysctl "net.core.default_qdisc" "fq"
     inject_sysctl "net.ipv4.tcp_congestion_control" "bbr"
+elif echo "$CURRENT_CC" | grep -qi "bbr"; then
+    msg_succ "检测到运行中的自定义 BBR 变体: [${CURRENT_CC}]"
+    inject_sysctl "net.core.default_qdisc" "fq"
+    inject_sysctl "net.ipv4.tcp_congestion_control" "${CURRENT_CC}"
 else
-    if echo "$CURRENT_CC" | grep -qi "bbr"; then
-         msg_succ "检测到运行中的自定义 BBR 变体: [${CURRENT_CC}]"
-         inject_sysctl "net.ipv4.tcp_congestion_control" "${CURRENT_CC}"
-    else
-         msg_warn "当前环境不支持 BBR，已自适应锁定为 Cubic 稳定算法。"
-         inject_sysctl "net.ipv4.tcp_congestion_control" "cubic"
-    fi
+    msg_warn "当前内核不支持 BBR，已自适应锁定为 fq_codel + Cubic 稳定算法。"
+    inject_sysctl "net.core.default_qdisc" "fq_codel"
+    inject_sysctl "net.ipv4.tcp_congestion_control" "cubic"
 fi
 
-sysctl --system >/dev/null 2>&1
-msg_succ "自适应网络调优参数已注入完成。"
+# 兼容 Systemd 与 Alpine BusyBox sysctl 的持久化重载
+sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1
+if command -v rc-update &>/dev/null; then
+    rc-update add sysctl boot >/dev/null 2>&1
+fi
 
-# --- [ 7. 结束提示 ] ---
 echo -e "\n${GREEN}=====================================================================${PLAIN}"
-echo -e "${GREEN}   ✅ 【极致高并发】网络底层核心优化已彻底完成！      ${PLAIN}"
+echo -e "${GREEN}   ✅ 自适应网络与高并发内核调优完成！[${PROFILE_NAME}]${PLAIN}"
 echo -e "${GREEN}=====================================================================${PLAIN}"
-echo -e "${YELLOW} 💡 环境验证指南：${PLAIN}"
-echo -e "${CYAN} 1. 请务必【断开当前 SSH 并重新连接】以刷新会话缓存。${PLAIN}"
-echo -e "${CYAN} 2. 重新连接后，输入命令 ${YELLOW}ulimit -n${CYAN} 进行验证，数值应成功显示为 ${YELLOW}${TARGET_FILES}${CYAN}。${PLAIN}\n"
+echo -e "${CYAN} • 当前拥塞算法 : ${YELLOW}$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)${CYAN} ($(sysctl -n net.core.default_qdisc 2>/dev/null))${PLAIN}"
+echo -e "${CYAN} • 单连接缓冲上限: ${YELLOW}$((TCP_BUF_MAX / 1048576)) MB${CYAN} | 并发上限: ${YELLOW}${TARGET_FILES}${PLAIN}\n"
