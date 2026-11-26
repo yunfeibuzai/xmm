@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="4.9.6-Pro"
+sh_ver="4.9.8-Pro"
 
 # 0. 跨系统 POSIX /bin/sh 自愈引导 (支持 sh maimai 与 Alpine 纯净环境)
 if [ -z "$BASH_VERSION" ]; then
@@ -22,6 +22,16 @@ magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'; dim='\033[2m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
+# 🌟 全局 GitHub 加速镜像池 (按优先级排序，末尾空字符串代表直连兜底)
+REPO_RAW_BASE="https://raw.githubusercontent.com/yunfeibuzai/xmm/main"
+GH_MIRRORS=(
+    "https://gh-proxy.com/"
+    "https://ghproxy.net/"
+    "https://github.akams.cn/"
+    "https://ghproxy.homeboyc.cn/"
+    ""
+)
+
 is_systemd() {
     command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]
 }
@@ -38,7 +48,7 @@ install_dependencies() {
         fi
     done
 
-    if ! command -v update-ca-certificates &>/dev/null && [ ! -d /etc/ssl/certs ]; then
+    if ! command -v update-ca-certificates &>/dev/null && [[ ! -d /etc/ssl/certs ]]; then
         needs_install=true
     fi
 
@@ -48,11 +58,11 @@ install_dependencies() {
         fi
     fi
 
-    if [ "$needs_install" = true ]; then
+    if [[ "$needs_install" = true ]]; then
         echo -e "${yellow}正在检查并补齐系统基础依赖与架构兼容层...${plain}"
         if command -v apt-get &>/dev/null; then
-            apt-get update -y -q >/dev/null 2>&1
-            apt-get install -y --no-install-recommends wget curl tar unzip jq nano sed openssl procps ca-certificates >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get update -y -q >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wget curl tar unzip jq nano sed openssl procps ca-certificates >/dev/null 2>&1
         elif command -v yum &>/dev/null; then
             yum install -y epel-release >/dev/null 2>&1
             yum install -y wget curl tar unzip jq nano sed openssl procps-ng ca-certificates >/dev/null 2>&1
@@ -64,75 +74,93 @@ install_dependencies() {
 }
 install_dependencies
 
-# 🌟 快捷命令注册 (兼容本地执行与 bash <(curl ...) 管道启动)
-register_shortcut() {
-    mkdir -p /usr/local/bin
-    rm -f /usr/bin/maimai /usr/bin/v2bx
-    
-    if [[ -f "$0" && "$0" != "bash" && "$0" != "-bash" && "$0" != "sh" ]] && grep -q "sh_ver=" "$0" 2>/dev/null; then
-        local current_abs_path
-        current_abs_path=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
-        if [[ "$current_abs_path" != "/usr/local/bin/maimai_core.sh" ]]; then
-            cp -f "$current_abs_path" /usr/local/bin/maimai_core.sh 2>/dev/null
-            chmod +x /usr/local/bin/maimai_core.sh
+# 🌟 统一 GitHub 文件多镜像极速拉取器 (curl+wget 双重兜底 + 脚本语法校验防纯文本报错污染)
+fetch_github_file() {
+    local raw_url="$1"
+    local dest_file="$2"
+    local verify_pattern="${3:-}"
+    local is_shell="${4:-true}"
+    local mirror full_url
+
+    for mirror in "${GH_MIRRORS[@]}"; do
+        full_url="${mirror}${raw_url}"
+        rm -f "$dest_file"
+
+        if command -v curl &>/dev/null; then
+            curl -fsSL --connect-timeout 4 --max-time 15 "$full_url" -o "$dest_file" 2>/dev/null
         fi
-    elif [[ ! -f /usr/local/bin/maimai_core.sh ]]; then
-        local boot_urls=(
-            "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
-            "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
-            "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
-        )
-        for bu in "${boot_urls[@]}"; do
-            if wget -q --timeout=8 -O /usr/local/bin/maimai_core.sh "$bu" || curl -fsSL --connect-timeout 6 --max-time 15 "$bu" -o /usr/local/bin/maimai_core.sh; then
-                if [[ -s /usr/local/bin/maimai_core.sh ]] && grep -q "sh_ver=" /usr/local/bin/maimai_core.sh; then
-                    chmod +x /usr/local/bin/maimai_core.sh
-                    break
+        # 若 curl 未安装或因证书/系统时间异常失败，自动降级尝试 wget 兜底
+        if [[ ! -s "$dest_file" ]] && command -v wget &>/dev/null; then
+            wget -q --timeout=6 --tries=1 --no-check-certificate -O "$dest_file" "$full_url" 2>/dev/null
+        fi
+
+        if [[ -s "$dest_file" ]] && ! head -n 5 "$dest_file" | grep -qiE '<!doctype|<html'; then
+            if [[ -n "$verify_pattern" ]] && ! grep -q "$verify_pattern" "$dest_file"; then
+                continue
+            fi
+            # 校验是否为合法 Shell 脚本，防止镜像返回纯文本/JSON限流报错被误执行
+            if [[ "$is_shell" == "true" ]]; then
+                if ! grep -qE '^(#!|echo|if |for |while |[a-zA-Z_][a-zA-Z0-9_]*=)' "$dest_file" || ! bash -n "$dest_file" 2>/dev/null; then
+                    continue
                 fi
             fi
-            rm -f /usr/local/bin/maimai_core.sh
-        done
+            return 0
+        fi
+    done
+
+    rm -f "$dest_file"
+    return 1
+}
+
+# 🌟 快捷命令注册 (兼容本地执行与 bash <(curl ...) 管道启动并自动同步版本)
+register_shortcut() {
+    mkdir -p /usr/local/bin
+    local core_script="/usr/local/bin/maimai_core.sh"
+
+    if [[ -f "$0" && ! -p "$0" && "$0" != /dev/fd/* && "$0" != /proc/self/fd/* && "$0" != "bash" && "$0" != "-bash" && "$0" != "sh" ]] && grep -q "sh_ver=" "$0" 2>/dev/null; then
+        local current_abs_path
+        current_abs_path=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
+        if [[ "$current_abs_path" != "$core_script" ]]; then
+            cp -f "$current_abs_path" "$core_script" 2>/dev/null
+            chmod +x "$core_script"
+        fi
+    elif [[ ! -s "$core_script" ]] || ! grep -q "sh_ver=\"${sh_ver}\"" "$core_script" 2>/dev/null; then
+        local tmp_core
+        tmp_core=$(mktemp "/tmp/maimai_core_XXXXXX.sh")
+        if fetch_github_file "${REPO_RAW_BASE}/maimai" "$tmp_core" "sh_ver=" "true"; then
+            mv -f "$tmp_core" "$core_script"
+            chmod +x "$core_script"
+        else
+            rm -f "$tmp_core"
+        fi
     fi
-    
-    if [[ -f /usr/local/bin/maimai_core.sh ]]; then
-        ln -sf /usr/local/bin/maimai_core.sh /usr/bin/maimai
-        ln -sf /usr/local/bin/maimai_core.sh /usr/bin/v2bx
+
+    if [[ -s "$core_script" ]]; then
+        ln -sf "$core_script" /usr/bin/maimai
+        ln -sf "$core_script" /usr/bin/v2bx
         chmod +x /usr/bin/maimai /usr/bin/v2bx
     fi
 }
 register_shortcut
 
-# 🌟 统一远程模块分发引擎 (支持子目录路径 + 镜像污染/假死熔断)
+# 🌟 统一远程模块分发引擎 (自动热修补子模块内残留的失效镜像)
 run_remote_module() {
     local mod_name="$1"
     local desc="$2"
     echo -e "${cyan}正在拉取并运行 ${desc}...${plain}"
 
     local safe_name="${mod_name//\//_}"
-    local tmp_file="/tmp/${safe_name}_${RANDOM}.sh"
-    local urls=(
-        "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/${mod_name}"
-        "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/${mod_name}"
-        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/${mod_name}"
-    )
+    local tmp_file
+    tmp_file=$(mktemp "/tmp/${safe_name}_XXXXXX.sh")
 
-    local success=false
-    for url in "${urls[@]}"; do
-        rm -f "$tmp_file"
-        if wget -q --timeout=10 -O "$tmp_file" "$url" || curl -fsSL --connect-timeout 8 --max-time 20 "$url" -o "$tmp_file"; then
-            if [[ -f "$tmp_file" && -s "$tmp_file" ]] && ! head -n 5 "$tmp_file" | grep -qiE '<!doctype|<html'; then
-                success=true
-                break
-            fi
-        fi
-    done
-
-    if [ "$success" = true ]; then
+    if fetch_github_file "${REPO_RAW_BASE}/${mod_name}" "$tmp_file" "" "true"; then
+        sed -i -E 's|https?://(ghp\.ci|mirror\.ghproxy\.net|mirror\.ghproxy\.com|ghproxy\.com)(/?)|https://gh-proxy.com\2|g' "$tmp_file" 2>/dev/null
         chmod +x "$tmp_file"
         bash "$tmp_file"
         rm -f "$tmp_file"
     else
         rm -f "$tmp_file"
-        echo -e "${red}错误：拉取模块 [${desc}] (${mod_name}) 失败，请检查网络或 GitHub 存储库！${plain}"
+        echo -e "${red}错误：拉取模块 [${desc}] (${mod_name}) 失败，请检查网络或顶部 GH_MIRRORS 配置！${plain}"
     fi
 }
 
@@ -203,14 +231,13 @@ inspect_logs() {
     echo -e "  ${green}2.${plain} 查看核心错误日志 (/etc/V2bX/error.log)"
     echo -e "  ${green}3.${plain} 查看用户连接日志 (/var/log/V2bX/access.log)"
     echo -e "  ${green}4.${plain} 返回上级菜单"
-    read -rp "请选择日志类型 [1-4] (默认 1): " log_type < /dev/tty
+    read -rp "请选择日志类型 [1-4] (默认 1): " log_type < /dev/tty || return
     [[ -z "$log_type" ]] && log_type=1
 
-    if [[ "$log_type" == "4" ]]; then return; fi
+    [[ "$log_type" == "4" ]] && return
 
     echo -e "${yellow}💡 提示：正在实时滚动日志，随时按 [Ctrl+C] 可安全退出查看并返回菜单。${plain}\n"
     
-    # 必须使用 ':' 空操作捕获而非 '' 忽略，否则子进程无法恢复 SIGINT 导致 Ctrl+C 失效
     trap ':' INT
     case "$log_type" in
         1)
@@ -229,9 +256,9 @@ inspect_logs() {
                 tail -n 50 -f /var/log/V2bX/error_*.log
             elif ls /var/log/V2bX/err_*.log >/dev/null 2>&1; then
                 tail -n 50 -f /var/log/V2bX/err_*.log
-            elif [ -f /etc/V2bX/error.log ]; then
+            elif [[ -f /etc/V2bX/error.log ]]; then
                 tail -n 50 -f /etc/V2bX/error.log
-            elif [ -f /var/log/v2bx_err.log ]; then
+            elif [[ -f /var/log/v2bx_err.log ]]; then
                 tail -n 50 -f /var/log/v2bx_err.log
             else
                 echo -e "${green}暂无独立错误日志，核心运行良好！${plain}"
@@ -240,7 +267,7 @@ inspect_logs() {
         3)
             if ls /var/log/V2bX/access_*.log >/dev/null 2>&1; then
                 tail -n 50 -f /var/log/V2bX/access_*.log
-            elif [ -f /var/log/V2bX/access.log ]; then
+            elif [[ -f /var/log/V2bX/access.log ]]; then
                 tail -n 50 -f /var/log/V2bX/access.log
             else
                 echo -e "${yellow}未找到连接日志 (可能连接日志已设为 none 或尚无连接)${plain}"
@@ -256,11 +283,9 @@ show_status() {
     local guard_status="${yellow}未开启 (原生态无锁)${plain}"
     local mode_status="${cyan}单进程${plain}"
 
-    if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
-        mode_status="${magenta}多进程隔离${plain}"
-    fi
+    [[ -f /etc/V2bX/nodes/.multi_enabled ]] && mode_status="${magenta}多进程隔离${plain}"
 
-    if [[ -f /usr/local/V2bX/V2bX && -s /usr/local/V2bX/V2bX ]]; then
+    if [[ -s /usr/local/V2bX/V2bX ]]; then
         if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
             local cnt
             cnt=$(pgrep -f "/usr/local/V2bX/V2bX server" 2>/dev/null | wc -l | tr -d ' ')
@@ -269,8 +294,7 @@ show_status() {
             else
                 core_status="${yellow}已停止${plain}"
             fi
-            if grep -q "MemoryMax\|GOMEMLIMIT" /etc/systemd/system/v2bx@.service 2>/dev/null || \
-               grep -q "GOMEMLIMIT" /etc/init.d/v2bx.node_* 2>/dev/null || \
+            if grep -qE "MemoryMax|GOMEMLIMIT" /etc/systemd/system/v2bx@.service /etc/init.d/v2bx.node_* 2>/dev/null || \
                grep -q "MemoryLimitPercent" /etc/V2bX/config.json 2>/dev/null; then
                 guard_status="${green}内核防爆已开启${plain}"
             fi
@@ -280,7 +304,7 @@ show_status() {
             else
                 core_status="${yellow}已停止${plain}"
             fi
-            if grep -q "MemoryMax\|GOMEMLIMIT" /etc/systemd/system/V2bX.service 2>/dev/null || \
+            if grep -qE "MemoryMax|GOMEMLIMIT" /etc/systemd/system/V2bX.service 2>/dev/null || \
                grep -q "MemoryLimitPercent" /etc/V2bX/config.json 2>/dev/null; then
                 guard_status="${green}内核防爆已开启${plain}"
             fi
@@ -339,7 +363,7 @@ ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
   ${green}22.${plain} 🛠️ CF 隧道交互式管理 (改域名/ID/监控/启停)
   ${green}23.${plain} 🌐 启动极简网络中转面板 (xmmzz)
   ${green}24.${plain} 🔀 部署 S5 落地智能路由 (xmm_24)
-  ${green}25.${plain} 彻底退出脚本
+  ${green}25.${plain} 彻底退出脚本 (或输入 q)
 --------------------------------------------
 EOF
 )
@@ -361,24 +385,12 @@ generate_x25519() {
     echo -e "  - ${green}Public key (公钥)${plain}  : 填入面板后台供客户端校验"
 }
 
-install_bbr() { 
-    local tmp_bbr="/tmp/tcp_bbr_${RANDOM}.sh"
-    local bbr_urls=(
-        "https://ghp.ci/https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh"
-        "https://mirror.ghproxy.net/https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh"
-        "https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh"
-    )
-    local bbr_ok=false
-    for u in "${bbr_urls[@]}"; do
-        rm -f "$tmp_bbr"
-        if wget -q --timeout=10 --no-check-certificate -O "$tmp_bbr" "$u" || curl -fsSL --connect-timeout 8 --max-time 20 "$u" -o "$tmp_bbr"; then
-            if [[ -s "$tmp_bbr" ]] && ! head -n 5 "$tmp_bbr" | grep -qiE '<!doctype|<html'; then
-                bbr_ok=true
-                break
-            fi
-        fi
-    done
-    if [ "$bbr_ok" = true ]; then
+install_bbr() {
+    local tmp_bbr
+    tmp_bbr=$(mktemp "/tmp/tcp_bbr_XXXXXX.sh")
+    local bbr_raw="https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh"
+
+    if fetch_github_file "$bbr_raw" "$tmp_bbr" "" "true"; then
         chmod +x "$tmp_bbr"
         ( cd /tmp && bash "$tmp_bbr" )
         rm -f "$tmp_bbr"
@@ -388,28 +400,13 @@ install_bbr() {
     fi
 }
 
-# 🌟 升级主控脚本
-update_shell() { 
+# 🌟 升级主控脚本 (内置语法校验防损坏)
+update_shell() {
     echo -e "${cyan}正在拉取主控脚本最新版本...${plain}"
-    local tmp_up="/tmp/maimai_update_${RANDOM}.sh"
-    local urls=(
-        "https://ghp.ci/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
-        "https://mirror.ghproxy.net/https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
-        "https://raw.githubusercontent.com/yunfeibuzai/xmm/main/maimai"
-    )
+    local tmp_up
+    tmp_up=$(mktemp "/tmp/maimai_update_XXXXXX.sh")
 
-    local ok=false
-    for url in "${urls[@]}"; do
-        rm -f "$tmp_up"
-        if wget -q --timeout=10 -O "$tmp_up" "$url" || curl -fsSL --connect-timeout 8 --max-time 20 "$url" -o "$tmp_up"; then
-            if [[ -f "$tmp_up" && -s "$tmp_up" ]] && grep -q "sh_ver=" "$tmp_up" && ! head -n 5 "$tmp_up" | grep -qiE '<!doctype|<html'; then
-                ok=true
-                break
-            fi
-        fi
-    done
-
-    if [ "$ok" = false ]; then
+    if ! fetch_github_file "${REPO_RAW_BASE}/maimai" "$tmp_up" "sh_ver=" "true"; then
         rm -f "$tmp_up"
         echo -e "${red}错误：拉取脚本更新失败，请检查网络！${plain}"
         return
@@ -419,10 +416,9 @@ update_shell() {
     mv -f "$tmp_up" /usr/local/bin/maimai_core.sh
     chmod +x /usr/local/bin/maimai_core.sh
 
-    if [[ -f "$0" && "$0" != "bash" && "$0" != "-bash" && "$0" != "sh" ]]; then
-        local real_run
+    if [[ -f "$0" && ! -p "$0" && "$0" != /dev/fd/* && "$0" != /proc/self/fd/* && "$0" != "bash" && "$0" != "-bash" && "$0" != "sh" ]]; then
+        local real_run real_core
         real_run=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")
-        local real_core
         real_core=$(readlink -f "/usr/local/bin/maimai_core.sh" 2>/dev/null || echo "/usr/local/bin/maimai_core.sh")
         if [[ "$real_run" != "$real_core" && "$0" != "/usr/bin/v2bx" && "$0" != "/usr/bin/maimai" ]]; then
             cp -f /usr/local/bin/maimai_core.sh "$real_run" 2>/dev/null
@@ -439,9 +435,10 @@ update_shell() {
 }
 
 process_run() {
-    local num; read -rp "请输入选择 [0-25]: " num < /dev/tty
+    local num
+    read -rp "请输入选择 [0-25]: " num < /dev/tty || exit 0
     case "$num" in
-    0) 
+    0)
         shopt -s nullglob
         local node_files=(/etc/V2bX/nodes/node_*.json)
         shopt -u nullglob
@@ -454,15 +451,15 @@ process_run() {
                 ((i++))
             done
             echo -e "  ${dim}0. 取消 / 返回主菜单${plain}"
-            read -rp "请输入要编辑的独立节点序号 [0-$((i-1))]: " edit_idx < /dev/tty
-            
+            read -rp "请输入要编辑的独立节点序号 [0-$((i-1))]: " edit_idx < /dev/tty || return
+
             if [[ "$edit_idx" =~ ^[1-9][0-9]*$ ]] && [ "$edit_idx" -lt "$i" ]; then
                 local target_file="${node_files[$((edit_idx-1))]}"
                 local inst_name
                 inst_name=$(basename "$target_file" .json)
-                
+
                 nano "$target_file"
-                
+
                 if command -v jq &>/dev/null && ! jq -e . "$target_file" >/dev/null 2>&1; then
                     echo -e "\n${red}✖ 警告：检测到 ${inst_name}.json 存在 JSON 语法错误（可能少写了逗号或括号），已取消重启以防服务崩溃！请重新编辑修正。${plain}"
                     return
@@ -485,7 +482,7 @@ process_run() {
                 fi
             fi
         else
-            if [ ! -f /etc/V2bX/config.json ]; then
+            if [[ ! -f /etc/V2bX/config.json ]]; then
                 echo -e "${yellow}配置文件不存在，请先执行向导生成配置！${plain}"
             else
                 nano /etc/V2bX/config.json
@@ -498,9 +495,9 @@ process_run() {
                 [[ "$ask_restart" =~ ^[Yy]$ ]] && manage_service restart
             fi
         fi
-        ;; 
-    1|2) run_remote_module "all/xmm1and2" "V2bX 核心部署与更新引擎" ;; 
-    3) 
+        ;;
+    1|2) run_remote_module "all/xmm1and2" "V2bX 核心部署与更新引擎" ;;
+    3)
         read -rp "是否保留节点配置文件和域名证书 (/etc/V2bX)？(y/n，默认 y): " keep_conf < /dev/tty
         [[ -z "$keep_conf" ]] && keep_conf="y"
 
@@ -519,37 +516,37 @@ process_run() {
         fi
 
         if is_systemd; then systemctl daemon-reload; fi
-        echo -e "${green}卸载完成！${plain}" 
+        echo -e "${green}卸载完成！${plain}"
         ;;
-    4) manage_service start ;; 
-    5) manage_service stop ;; 
-    6) manage_service restart ;; 
-    7) manage_service status ;; 
-    8) inspect_logs ;; 
-    9) manage_service enable ;; 
-    10) manage_service disable ;; 
-    11) run_remote_module "xmm2" "全新覆盖配置与多进程向导 (xmm2)" ;; 
-    12) run_remote_module "all/xmm12" "节点追加 / 红绿灯体检 / ACME证书中心 (xmm12)" ;;  
+    4) manage_service start ;;
+    5) manage_service stop ;;
+    6) manage_service restart ;;
+    7) manage_service status ;;
+    8) inspect_logs ;;
+    9) manage_service enable ;;
+    10) manage_service disable ;;
+    11) run_remote_module "xmm2" "全新覆盖配置与多进程向导 (xmm2)" ;;
+    12) run_remote_module "all/xmm12" "节点追加 / 红绿灯体检 / ACME证书中心 (xmm12)" ;;
     13) generate_x25519 ;;
-    14) update_shell ;; 
-    15) install_bbr ;; 
-    16) run_remote_module "lianjie" "高并发连接数与端口解锁" ;; 
-    17) run_remote_module "Linuxclean" "Linux 系统级深度净化" ;; 
+    14) update_shell ;;
+    15) install_bbr ;;
+    16) run_remote_module "lianjie" "高并发连接数与端口解锁" ;;
+    17) run_remote_module "Linuxclean" "Linux 系统级深度净化" ;;
     18) run_remote_module "V2bXclean" "日志深度防爆与轮转强控" ;;
-    19) run_remote_module "memory" "内存回收机制优化" ;; 
+    19) run_remote_module "memory" "内存回收机制优化" ;;
     20) run_remote_module "cf" "CDN 节点转 CF 隧道模块" ;;
-    21) run_remote_module "cfjournal" "CF 隧道日志排查诊断" ;; 
+    21) run_remote_module "cfjournal" "CF 隧道日志排查诊断" ;;
     22) run_remote_module "cfmgr" "CF 隧道交互式管理控制台" ;;
     23) run_remote_module "xmmzz" "极简网络中转管理面板" ;;
     24) run_remote_module "all/xmm_24" "S5 落地智能路由 (Pro Max)" ;;
-    25) exit 0 ;; 
+    25|q|Q) exit 0 ;;
     *) echo -e "${red}未知序号，请输入 0-25 之间的数字${plain}" ;;
     esac
 }
 
-while true; do 
+while true; do
     show_menu
     process_run
     echo ""
-    read -rp "按回车键返回主菜单..." < /dev/tty
+    read -rp "按回车键返回主菜单..." < /dev/tty || exit 0
 done
