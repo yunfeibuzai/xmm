@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="4.9.8-Pro"
+sh_ver="5.0.1-Pro"
 
-# 0. 跨系统 POSIX /bin/sh 自愈引导 (支持 sh maimai 与 Alpine 纯净环境)
+# 0. 跨系统 POSIX /bin/sh 自愈引导 (兼容 sh maimai、curl|sh 与 Alpine 纯净环境)
 if [ -z "$BASH_VERSION" ]; then
-    if command -v bash >/dev/null 2>&1; then
-        exec bash "$0" "$@"
-    elif command -v apk >/dev/null 2>&1; then
-        echo -e "\033[33m检测到 Alpine 环境，正在自动补齐 bash 运行环境...\033[0m"
-        apk update >/dev/null 2>&1 && apk add --no-cache bash >/dev/null 2>&1
+    if ! command -v bash >/dev/null 2>&1; then
+        if command -v apk >/dev/null 2>&1; then
+            printf '\033[33m检测到 Alpine 环境，正在自动补齐 bash 运行环境...\033[0m\n'
+            apk update >/dev/null 2>&1 && apk add --no-cache bash >/dev/null 2>&1
+        else
+            printf '错误：当前系统缺少 bash，请先安装 bash 后运行此脚本！\n'
+            exit 1
+        fi
+    fi
+    if [ -f "$0" ]; then
         exec bash "$0" "$@"
     else
-        echo "错误：当前系统缺少 bash，请先安装 bash 后运行此脚本！"
-        exit 1
+        exec bash -s -- "$@"
     fi
 fi
 
@@ -36,7 +40,30 @@ is_systemd() {
     command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]
 }
 
-# 🌟 基础依赖自动补齐 (兼容 Debian / Ubuntu / CentOS / Alpine)
+# 🌟 自动探测 OpenRC 单进程服务名 (兼容 V2bX 与 v2bx)
+get_openrc_main_svc() {
+    if [[ -f /etc/init.d/V2bX ]]; then
+        echo "V2bX"
+    elif [[ -f /etc/init.d/v2bx ]]; then
+        echo "v2bx"
+    else
+        echo "V2bX"
+    fi
+}
+
+# 🌟 跨系统安全临时文件生成器 (严格兼容 Alpine BusyBox mktemp 无后缀规范)
+make_temp_file() {
+    local prefix="${1:-maimai_tmp}"
+    local tmp
+    tmp=$(mktemp "/tmp/${prefix}_XXXXXX" 2>/dev/null)
+    if [[ -z "$tmp" ]]; then
+        tmp="/tmp/${prefix}_$$_${RANDOM}"
+        : > "$tmp"
+    fi
+    echo "$tmp"
+}
+
+# 🌟 基础依赖自动补齐 (核心工具与兼容层隔离安装，防源缺失连带失败)
 install_dependencies() {
     local cmds=("wget" "curl" "tar" "unzip" "jq" "nano" "sed" "openssl" "pgrep")
     local needs_install=false
@@ -53,7 +80,7 @@ install_dependencies() {
     fi
 
     if command -v apk &>/dev/null; then
-        if ! apk info -e gcompat &>/dev/null || ! apk info -e libc6-compat &>/dev/null; then
+        if ! apk info -e gcompat &>/dev/null; then
             needs_install=true
         fi
     fi
@@ -68,19 +95,22 @@ install_dependencies() {
             yum install -y wget curl tar unzip jq nano sed openssl procps-ng ca-certificates >/dev/null 2>&1
         elif command -v apk &>/dev/null; then
             apk update >/dev/null 2>&1
-            apk add --no-cache wget curl tar unzip jq nano sed openssl procps ca-certificates gcompat libc6-compat >/dev/null 2>&1
+            apk add --no-cache wget curl tar unzip jq nano sed openssl procps ca-certificates >/dev/null 2>&1
+            apk add --no-cache gcompat libc6-compat >/dev/null 2>&1 || apk add --no-cache gcompat >/dev/null 2>&1
         fi
     fi
 }
 install_dependencies
 
-# 🌟 统一 GitHub 文件多镜像极速拉取器 (curl+wget 双重兜底 + 脚本语法校验防纯文本报错污染)
+# 🌟 统一 GitHub 文件多镜像极速拉取器 (GNU/BusyBox 双兼容 + CRLF清洗 + 语法校验)
 fetch_github_file() {
     local raw_url="$1"
     local dest_file="$2"
     local verify_pattern="${3:-}"
     local is_shell="${4:-true}"
     local mirror full_url
+
+    [[ -z "$dest_file" ]] && return 1
 
     for mirror in "${GH_MIRRORS[@]}"; do
         full_url="${mirror}${raw_url}"
@@ -89,18 +119,28 @@ fetch_github_file() {
         if command -v curl &>/dev/null; then
             curl -fsSL --connect-timeout 4 --max-time 15 "$full_url" -o "$dest_file" 2>/dev/null
         fi
-        # 若 curl 未安装或因证书/系统时间异常失败，自动降级尝试 wget 兜底
+
         if [[ ! -s "$dest_file" ]] && command -v wget &>/dev/null; then
-            wget -q --timeout=6 --tries=1 --no-check-certificate -O "$dest_file" "$full_url" 2>/dev/null
+            if wget --help 2>&1 | grep -q -- '--tries'; then
+                wget -q --timeout=6 --tries=1 --no-check-certificate -O "$dest_file" "$full_url" 2>/dev/null
+            else
+                wget -q -T 6 -O "$dest_file" "$full_url" 2>/dev/null
+            fi
         fi
 
-        if [[ -s "$dest_file" ]] && ! head -n 5 "$dest_file" | grep -qiE '<!doctype|<html'; then
+        if [[ -s "$dest_file" ]]; then
+            if head -n 5 "$dest_file" | grep -qiE '<!doctype|<html'; then
+                continue
+            fi
+            if head -n 3 "$dest_file" | grep -qiE '^\s*(\{.*"error"|\{.*"message"|404:|502 |503 |504 |error code:)'; then
+                continue
+            fi
             if [[ -n "$verify_pattern" ]] && ! grep -q "$verify_pattern" "$dest_file"; then
                 continue
             fi
-            # 校验是否为合法 Shell 脚本，防止镜像返回纯文本/JSON限流报错被误执行
             if [[ "$is_shell" == "true" ]]; then
-                if ! grep -qE '^(#!|echo|if |for |while |[a-zA-Z_][a-zA-Z0-9_]*=)' "$dest_file" || ! bash -n "$dest_file" 2>/dev/null; then
+                sed -i 's/\r$//' "$dest_file" 2>/dev/null
+                if ! bash -n "$dest_file" 2>/dev/null; then
                     continue
                 fi
             fi
@@ -112,7 +152,7 @@ fetch_github_file() {
     return 1
 }
 
-# 🌟 快捷命令注册 (兼容本地执行与 bash <(curl ...) 管道启动并自动同步版本)
+# 🌟 快捷命令注册 (兼容本地执行与管道启动并自动同步版本)
 register_shortcut() {
     mkdir -p /usr/local/bin
     local core_script="/usr/local/bin/maimai_core.sh"
@@ -126,7 +166,7 @@ register_shortcut() {
         fi
     elif [[ ! -s "$core_script" ]] || ! grep -q "sh_ver=\"${sh_ver}\"" "$core_script" 2>/dev/null; then
         local tmp_core
-        tmp_core=$(mktemp "/tmp/maimai_core_XXXXXX.sh")
+        tmp_core=$(make_temp_file "maimai_core")
         if fetch_github_file "${REPO_RAW_BASE}/maimai" "$tmp_core" "sh_ver=" "true"; then
             mv -f "$tmp_core" "$core_script"
             chmod +x "$core_script"
@@ -151,10 +191,10 @@ run_remote_module() {
 
     local safe_name="${mod_name//\//_}"
     local tmp_file
-    tmp_file=$(mktemp "/tmp/${safe_name}_XXXXXX.sh")
+    tmp_file=$(make_temp_file "${safe_name}")
 
     if fetch_github_file "${REPO_RAW_BASE}/${mod_name}" "$tmp_file" "" "true"; then
-        sed -i -E 's|https?://(ghp\.ci|mirror\.ghproxy\.net|mirror\.ghproxy\.com|ghproxy\.com)(/?)|https://gh-proxy.com\2|g' "$tmp_file" 2>/dev/null
+        sed -i -E 's|https?://(ghp\.ci|mirror\.ghproxy\.net|mirror\.ghproxy\.com|ghproxy\.com|ghps\.cc|ghproxy\.cc)(/?)|https://gh-proxy.com\2|g' "$tmp_file" 2>/dev/null
         chmod +x "$tmp_file"
         bash "$tmp_file"
         rm -f "$tmp_file"
@@ -164,11 +204,12 @@ run_remote_module() {
     fi
 }
 
-# 🌟 智能内核服务管理器 (兼容单进程与多进程隔离模式)
+# 🌟 智能内核服务管理器 (兼容单进程与多进程隔离模式 + 真实状态校验)
 manage_service() {
     local action=$1
     if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
         if is_systemd; then
+            [[ "$action" == "start" || "$action" == "restart" ]] && systemctl stop V2bX 2>/dev/null
             local found=0
             for f in /etc/V2bX/nodes/node_*.json; do
                 [[ ! -f "$f" ]] && continue
@@ -177,14 +218,18 @@ manage_service() {
                 inst=$(basename "$f" .json)
                 case "$action" in
                     start|stop|restart|enable|disable)
-                        systemctl "$action" "v2bx@${inst}" 2>/dev/null
-                        echo -e "${green}✔ [v2bx@${inst}] 已执行 ${action}${plain}"
+                        if systemctl "$action" "v2bx@${inst}" 2>/dev/null; then
+                            echo -e "${green}✔ [v2bx@${inst}] 已执行 ${action}${plain}"
+                        else
+                            echo -e "${red}✖ [v2bx@${inst}] 执行 ${action} 失败，请通过选项 8 排查日志${plain}"
+                        fi
                         ;;
                     status) systemctl status "v2bx@${inst}" --no-pager ;;
                 esac
             done
             [[ $found -eq 0 ]] && echo -e "${yellow}未找到任何已拆分的节点配置文件 (/etc/V2bX/nodes/node_*.json)${plain}"
         elif command -v rc-service &>/dev/null; then
+            [[ "$action" == "start" || "$action" == "restart" ]] && rc-service "$(get_openrc_main_svc)" stop 2>/dev/null
             local found=0
             for init_f in /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_*; do
                 [[ ! -f "$init_f" ]] && continue
@@ -216,15 +261,17 @@ manage_service() {
             disable) systemctl disable V2bX >/dev/null 2>&1 && echo -e "${green}✔ 已取消 V2bX 开机自启动${plain}" ;;
         esac
     elif command -v rc-service &>/dev/null; then
+        local main_svc
+        main_svc=$(get_openrc_main_svc)
         case "$action" in
-            start|stop|restart|status) rc-service V2bX "$action" ;;
-            enable) rc-update add V2bX default >/dev/null 2>&1 && echo -e "${green}✔ 已设置 V2bX 开机自启动${plain}" ;;
-            disable) rc-update del V2bX default >/dev/null 2>&1 && echo -e "${green}✔ 已取消 V2bX 开机自启动${plain}" ;;
+            start|stop|restart|status) rc-service "$main_svc" "$action" ;;
+            enable) rc-update add "$main_svc" default >/dev/null 2>&1 && echo -e "${green}✔ 已设置 ${main_svc} 开机自启动${plain}" ;;
+            disable) rc-update del "$main_svc" default >/dev/null 2>&1 && echo -e "${green}✔ 已取消 ${main_svc} 开机自启动${plain}" ;;
         esac
     fi
 }
 
-# 🌟 独立多维日志排查控制台 (修复 Ctrl+C 信号拦截死锁)
+# 🌟 独立多维日志排查控制台
 inspect_logs() {
     echo -e "\n${cyan}================ 📊 V2bX 日志诊断中心 ================${plain}"
     echo -e "  ${green}1.${plain} 追踪系统级运行输出 (Systemd / OpenRC 控制台)"
@@ -248,7 +295,7 @@ inspect_logs() {
             elif ls /var/log/V2bX/out_*.log >/dev/null 2>&1; then
                 tail -n 50 -f /var/log/V2bX/out_*.log /var/log/V2bX/err_*.log 2>/dev/null
             else
-                tail -n 50 -f /var/log/v2bx*.log 2>/dev/null || echo -e "${yellow}暂无控制台日志${plain}"
+                tail -n 50 -f /var/log/v2bx*.log /var/log/V2bX*.log 2>/dev/null || echo -e "${yellow}暂无控制台日志${plain}"
             fi
             ;;
         2)
@@ -288,13 +335,13 @@ show_status() {
     if [[ -s /usr/local/V2bX/V2bX ]]; then
         if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
             local cnt
-            cnt=$(pgrep -f "/usr/local/V2bX/V2bX server" 2>/dev/null | wc -l | tr -d ' ')
+            cnt=$(pgrep -f "[/]usr/local/V2bX/V2bX server" 2>/dev/null | wc -l | tr -d ' ')
             if [[ "${cnt:-0}" -gt 0 ]]; then
                 core_status="${green}运行中 (${cnt}实例)${plain}"
             else
                 core_status="${yellow}已停止${plain}"
             fi
-            if grep -qE "MemoryMax|GOMEMLIMIT" /etc/systemd/system/v2bx@.service /etc/init.d/v2bx.node_* 2>/dev/null || \
+            if grep -qE "MemoryMax|GOMEMLIMIT" /etc/systemd/system/v2bx@.service /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_* 2>/dev/null || \
                grep -q "MemoryLimitPercent" /etc/V2bX/config.json 2>/dev/null; then
                 guard_status="${green}内核防爆已开启${plain}"
             fi
@@ -309,7 +356,9 @@ show_status() {
                 guard_status="${green}内核防爆已开启${plain}"
             fi
         elif command -v rc-service &>/dev/null; then
-            local rc_out; rc_out=$(rc-service V2bX status 2>/dev/null)
+            local main_svc rc_out
+            main_svc=$(get_openrc_main_svc)
+            rc_out=$(rc-service "$main_svc" status 2>/dev/null)
             if echo "$rc_out" | grep -q "started"; then
                 core_status="${green}运行中${plain}"
             elif echo "$rc_out" | grep -q "crashed"; then
@@ -317,7 +366,7 @@ show_status() {
             else
                 core_status="${yellow}已停止${plain}"
             fi
-            if grep -q "GOMEMLIMIT" /etc/init.d/V2bX 2>/dev/null || \
+            if grep -q "GOMEMLIMIT" /etc/init.d/"$main_svc" 2>/dev/null || \
                grep -q "MemoryLimitPercent" /etc/V2bX/config.json 2>/dev/null; then
                 guard_status="${green}内核防爆已开启${plain}"
             fi
@@ -387,7 +436,7 @@ generate_x25519() {
 
 install_bbr() {
     local tmp_bbr
-    tmp_bbr=$(mktemp "/tmp/tcp_bbr_XXXXXX.sh")
+    tmp_bbr=$(make_temp_file "tcp_bbr")
     local bbr_raw="https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh"
 
     if fetch_github_file "$bbr_raw" "$tmp_bbr" "" "true"; then
@@ -404,7 +453,7 @@ install_bbr() {
 update_shell() {
     echo -e "${cyan}正在拉取主控脚本最新版本...${plain}"
     local tmp_up
-    tmp_up=$(mktemp "/tmp/maimai_update_XXXXXX.sh")
+    tmp_up=$(make_temp_file "maimai_update")
 
     if ! fetch_github_file "${REPO_RAW_BASE}/maimai" "$tmp_up" "sh_ver=" "true"; then
         rm -f "$tmp_up"
@@ -437,6 +486,9 @@ update_shell() {
 process_run() {
     local num
     read -rp "请输入选择 [0-25]: " num < /dev/tty || exit 0
+    local editor="nano"
+    command -v nano &>/dev/null || editor="vi"
+
     case "$num" in
     0)
         shopt -s nullglob
@@ -458,15 +510,15 @@ process_run() {
                 local inst_name
                 inst_name=$(basename "$target_file" .json)
 
-                nano "$target_file"
+                "$editor" "$target_file"
 
                 if command -v jq &>/dev/null && ! jq -e . "$target_file" >/dev/null 2>&1; then
                     echo -e "\n${red}✖ 警告：检测到 ${inst_name}.json 存在 JSON 语法错误（可能少写了逗号或括号），已取消重启以防服务崩溃！请重新编辑修正。${plain}"
                     return
                 fi
 
-                echo -e "\n${green}修改已保存。由于各节点是独立进程，只需重启该特定节点即可生效。${plain}"
-                read -rp "是否立即重启节点 [${inst_name}]？(y/n，默认 y): " ask_restart < /dev/tty
+                echo -e "\n${green}修改已保存。${plain}${dim}(提示：若后续使用选项 12 增删节点，将从主配置 config.json 重新拆分覆盖)${plain}"
+                read -rp "是否立即重启节点 [${inst_name}]？(y/n，默认 y): " ask_restart < /dev/tty || return
                 [[ -z "$ask_restart" ]] && ask_restart="y"
                 if [[ "$ask_restart" =~ ^[Yy]$ ]]; then
                     if is_systemd; then
@@ -485,34 +537,36 @@ process_run() {
             if [[ ! -f /etc/V2bX/config.json ]]; then
                 echo -e "${yellow}配置文件不存在，请先执行向导生成配置！${plain}"
             else
-                nano /etc/V2bX/config.json
+                "$editor" /etc/V2bX/config.json
                 if command -v jq &>/dev/null && ! jq -e . /etc/V2bX/config.json >/dev/null 2>&1; then
                     echo -e "\n${red}✖ 警告：检测到 /etc/V2bX/config.json 存在 JSON 语法错误（可能少写了逗号或括号），请重新编辑修正！${plain}"
                     return
                 fi
                 echo -e "${green}V2bX 支持自动热重载，若修改了关键端口或参数，建议重启服务生效。${plain}"
-                read -rp "是否立即强制重启 V2bX 服务？(y/n，默认 n): " ask_restart < /dev/tty
+                read -rp "是否立即强制重启 V2bX 服务？(y/n，默认 n): " ask_restart < /dev/tty || return
                 [[ "$ask_restart" =~ ^[Yy]$ ]] && manage_service restart
             fi
         fi
         ;;
     1|2) run_remote_module "all/xmm1and2" "V2bX 核心部署与更新引擎" ;;
     3)
-        read -rp "是否保留节点配置文件和域名证书 (/etc/V2bX)？(y/n，默认 y): " keep_conf < /dev/tty
+        read -rp "是否保留节点配置文件和域名证书 (/etc/V2bX)？(y/n，默认 y): " keep_conf < /dev/tty || return
         [[ -z "$keep_conf" ]] && keep_conf="y"
 
         manage_service stop
         manage_service disable
-        pkill -9 -f "/usr/local/V2bX/V2bX" >/dev/null 2>&1
+        pkill -9 -f "[/]usr/local/V2bX/V2bX" >/dev/null 2>&1
         rm -rf /usr/local/V2bX /etc/systemd/system/V2bX.service /etc/systemd/system/v2bx@.service \
                /etc/systemd/system/multi-user.target.wants/v2bx@*.service \
-               /etc/init.d/V2bX /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_* \
+               /etc/init.d/V2bX /etc/init.d/v2bx /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_* \
                /var/log/V2bX /var/log/v2bx*.log /var/log/V2bX*.log /var/log/v2bx*.err /var/log/V2bX*.err \
                /etc/logrotate.d/v2bx_anti_explode /etc/logrotate.d/v2bx_all /etc/logrotate.d/v2bx_sentinel_limit /etc/cron.hourly/v2bx_cleaner
 
         if [[ ! "$keep_conf" =~ ^[Yy]$ ]]; then
             rm -rf /etc/V2bX
             echo -e "${yellow}已清除配置文件与证书目录。${plain}"
+        else
+            rm -f /etc/V2bX/nodes/.multi_enabled /etc/V2bX/nodes/node_*.json 2>/dev/null
         fi
 
         if is_systemd; then systemctl daemon-reload; fi
