@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="5.2.0-Pro"
+sh_ver="5.3.0-Pro"
 
-# 0. 跨系统 POSIX /bin/sh 自愈引导 (兼容 sh maimai、curl|sh 与 Alpine 纯净环境)
+# 0. 跨系统 POSIX /bin/sh 自愈引导
 if [ -z "$BASH_VERSION" ]; then
     if ! command -v bash >/dev/null 2>&1; then
         if command -v apk >/dev/null 2>&1; then
@@ -26,7 +26,6 @@ magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'; dim='\033[2m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
-# 🌟 全局 GitHub 加速镜像池
 REPO_RAW_BASE="https://raw.githubusercontent.com/yunfeibuzai/xmm/main"
 GH_MIRRORS=(
     "https://gh-proxy.com/"
@@ -40,22 +39,6 @@ is_systemd() {
     command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]
 }
 
-# 🌟 自动探测并自愈多进程隔离状态 (防止标记丢失导致编辑错文件)
-is_multi_active() {
-    if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
-        return 0
-    fi
-    if compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
-       compgen -G "/etc/init.d/v2bx.port_*" >/dev/null 2>&1 || \
-       compgen -G "/etc/init.d/v2bx.node_*" >/dev/null 2>&1 || \
-       compgen -G "/etc/init.d/V2bX.node_*" >/dev/null 2>&1; then
-        mkdir -p /etc/V2bX/nodes
-        touch /etc/V2bX/nodes/.multi_enabled
-        return 0
-    fi
-    return 1
-}
-
 get_openrc_main_svc() {
     if [[ -f /etc/init.d/V2bX ]]; then
         echo "V2bX"
@@ -64,6 +47,78 @@ get_openrc_main_svc() {
     else
         echo "V2bX"
     fi
+}
+
+# 🌟 精确统计多进程隔离实例 (返回 "运行数|总配置数")
+get_multi_instance_counts() {
+    shopt -s nullglob
+    local split_files=(/etc/V2bX/nodes/port_*.json /etc/V2bX/nodes/node_*.json)
+    shopt -u nullglob
+
+    local total=${#split_files[@]}
+    local active=0
+
+    for f in "${split_files[@]}"; do
+        local inst
+        inst=$(basename "$f" .json)
+        if is_systemd; then
+            systemctl is-active --quiet "v2bx@${inst}.service" 2>/dev/null && ((active++))
+        elif command -v rc-service &>/dev/null; then
+            if rc-service "v2bx.${inst}" status 2>/dev/null | grep -q "started" || \
+               rc-service "V2bX.${inst}" status 2>/dev/null | grep -q "started" || \
+               pgrep -f "/etc/V2bX/nodes/${inst}.json" >/dev/null 2>&1; then
+                ((active++))
+            fi
+        else
+            pgrep -f "/etc/V2bX/nodes/${inst}.json" >/dev/null 2>&1 && ((active++))
+        fi
+    done
+
+    echo "${active}|${total}"
+}
+
+# 🌟 精准探测当前是否处于多进程隔离模式 (结合真实进程与服务状态，自动清理过期标记)
+is_multi_active() {
+    local counts active_cnt total_cnt
+    counts=$(get_multi_instance_counts)
+    active_cnt="${counts%%|*}"
+    total_cnt="${counts##*|}"
+
+    if [[ "${active_cnt:-0}" -gt 0 ]]; then
+        mkdir -p /etc/V2bX/nodes
+        touch /etc/V2bX/nodes/.multi_enabled 2>/dev/null
+        return 0
+    fi
+
+    # 若单进程 V2bX 正在运行，说明当前实际为单进程模式，清理残留旧标记
+    local single_running=false
+    if is_systemd && systemctl is-active --quiet V2bX.service 2>/dev/null; then
+        single_running=true
+    elif command -v rc-service &>/dev/null && rc-service "$(get_openrc_main_svc)" status 2>/dev/null | grep -q "started"; then
+        single_running=true
+    elif pgrep -f "/etc/V2bX/config.json" >/dev/null 2>&1; then
+        single_running=true
+    fi
+
+    if [ "$single_running" = true ]; then
+        rm -f /etc/V2bX/nodes/.multi_enabled 2>/dev/null
+        return 1
+    fi
+
+    if [[ -f /etc/V2bX/nodes/.multi_enabled ]] && [[ "${total_cnt:-0}" -gt 0 ]]; then
+        return 0
+    fi
+
+    if compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/v2bx.port_*" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/v2bx.node_*" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/V2bX.node_*" >/dev/null 2>&1; then
+        mkdir -p /etc/V2bX/nodes
+        touch /etc/V2bX/nodes/.multi_enabled 2>/dev/null
+        return 0
+    fi
+
+    return 1
 }
 
 make_temp_file() {
@@ -301,7 +356,6 @@ manage_service() {
     fi
 }
 
-# 🌟 全量多维日志诊断中心 (完整输出200行 + 合并 Xray/Hy2/Sing-box/ACME 错误日志)
 inspect_logs() {
     echo -e "\n${cyan}================ 📊 V2bX 日志诊断中心 ================${plain}"
     echo -e "  ${green}1.${plain} 追踪实时运行日志 (最近 200 行完整输出 + 实时滚动)"
@@ -355,7 +409,6 @@ inspect_logs() {
             fi
             ;;
         2)
-            # 1) 先打印 Systemd/OpenRC 中包含启动失败、ACME 429、Hy2/Sing-box 报错的完整记录
             if is_systemd; then
                 local u_name="V2bX"
                 is_multi_active && u_name="$target_unit"
@@ -366,7 +419,6 @@ inspect_logs() {
                 tail -n 120 /var/log/V2bX/err_*.log 2>/dev/null
             fi
 
-            # 2) 再追踪 Xray 独立错误文件
             echo -e "\n${cyan}--- [Xray 核心独立错误日志 (实时追踪)] ---${plain}"
             if [[ -n "$target_inst" && -f "/var/log/V2bX/error_${target_inst}.log" ]]; then
                 tail -n 100 -f "/var/log/V2bX/error_${target_inst}.log"
@@ -399,17 +451,24 @@ show_status() {
     local guard_status="${yellow}未开启 (原生态无锁)${plain}"
     local mode_status="${cyan}单进程${plain}"
 
-    is_multi_active && mode_status="${magenta}多进程隔离${plain}"
-
     if [[ -s /usr/local/V2bX/V2bX ]]; then
         if is_multi_active; then
-            local cnt
-            cnt=$(pgrep -f "[/]usr/local/V2bX/V2bX server" 2>/dev/null | wc -l | tr -d ' ')
-            if [[ "${cnt:-0}" -gt 0 ]]; then
-                core_status="${green}运行中 (${cnt}实例)${plain}"
+            mode_status="${magenta}多进程隔离${plain}"
+            local counts active_cnt total_cnt
+            counts=$(get_multi_instance_counts)
+            active_cnt="${counts%%|*}"
+            total_cnt="${counts##*|}"
+
+            if [[ "${total_cnt:-0}" -eq 0 ]]; then
+                core_status="${yellow}未拆分配置${plain}"
+            elif [[ "${active_cnt:-0}" -eq "${total_cnt}" ]]; then
+                core_status="${green}运行中 (${active_cnt}/${total_cnt}实例)${plain}"
+            elif [[ "${active_cnt:-0}" -gt 0 ]]; then
+                core_status="${yellow}部分异常 (${active_cnt}/${total_cnt}实例)${plain}"
             else
-                core_status="${yellow}已停止${plain}"
+                core_status="${red}已停止 (0/${total_cnt}实例)${plain}"
             fi
+
             if grep -qE "MemoryMax|GOMEMLIMIT" /etc/systemd/system/v2bx@.service /etc/init.d/v2bx.port_* /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_* 2>/dev/null || \
                grep -q "MemoryLimitPercent" /etc/V2bX/config.json 2>/dev/null; then
                 guard_status="${green}内核防爆已开启${plain}"
@@ -465,7 +524,7 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
   ${green}10.${plain} 取消开机自启动
 --------------------------------------------
 ${magenta}[🌟 核心战力配置向导群]${plain}
-  ${green}11.${plain} 🌟 纯净向导式配置创建与多进程托管 (xmm2)
+  ${green}11.${plain} 🌟 纯净向导配置 / 克隆复用本地配置 / 多进程托管 (xmm2)
   ${green}12.${plain} 🚦 节点追加 / 红绿灯体检 / 外置ACME证书中心 (xmm12)
   ${green}13.${plain} 生成 X25519 / VLESS-Enc 密钥
   ${green}14.${plain} 升级本维护脚本
@@ -556,7 +615,6 @@ update_shell() {
     exec /usr/local/bin/maimai_core.sh
 }
 
-# 🌟 选项 0 专属：修改编辑器并检测文件是否真实保存 + 反向同步母版
 edit_and_sync_file() {
     local target_file="$1"
     local editor="nano"
@@ -632,7 +690,6 @@ process_run() {
 
                 edit_and_sync_file "$target_file" || return
 
-                # 反向将修改后的节点参数同步回母版 /etc/V2bX/config.json，防止下次重编译丢失
                 if [[ -f /etc/V2bX/config.json ]] && command -v jq &>/dev/null; then
                     if jq --slurpfile inst "$target_file" '
                         ($inst[0].Nodes // []) as $updated |
@@ -710,7 +767,7 @@ process_run() {
     8) inspect_logs ;;
     9) manage_service enable ;;
     10) manage_service disable ;;
-    11) run_remote_module "xmm2" "全新覆盖配置与多进程向导 (xmm2)" ;;
+    11) run_remote_module "xmm2" "全新配置 / 克隆复用本地配置 / 多进程托管 (xmm2)" ;;
     12) run_remote_module "all/xmm12" "节点追加 / 红绿灯体检 / ACME证书中心 (xmm12)" ;;
     13) generate_x25519 ;;
     14) update_shell ;;
