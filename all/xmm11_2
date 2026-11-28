@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# 麦卖云 V2bX 全新配置生成与本地克隆复用引擎 (all/xmm11_2)
-sh_ver="4.7.1-Pro"
+# 麦卖云 V2bX 全新配置生成引擎 (all/xmm11_2 - 纯净向导版)
+sh_ver="5.0.0-Pro"
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'
@@ -37,7 +37,7 @@ ensure_tools() {
 }
 ensure_tools
 
-# ════════════════════ 本地有效证书嗅探器 ════════════════════
+# ════════════════════ 本地有效证书嗅探器 (防重复申请触发 ACME 429) ════════════════════
 find_local_valid_cert() {
     local target_domain="$1"
     [[ -z "$target_domain" || "$target_domain" == "-" ]] && return 1
@@ -157,8 +157,8 @@ detect_tunnel_status() {
 ui_banner() {
     printf '\033[H\033[2J'
     echo -e "${cyan}${bold}╔══════════════════════════════════════════════════════╗${plain}"
-    echo -e "${cyan}${bold}║         麦卖云 V2bX 全新配置与本地复用引擎           ║${plain}"
-    echo -e "${cyan}${bold}║   本地配置改ID秒复用 • 证书自动复用 • 按端口进程隔离  ║${plain}"
+    echo -e "${cyan}${bold}║         麦卖云 V2bX 全新配置生成引擎 (xmm11_2)       ║${plain}"
+    echo -e "${cyan}${bold}║    全内核协议矩阵 • 证书自动复用 • 按端口进程隔离    ║${plain}"
     echo -e "${cyan}${bold}╚══════════════════════════════════════════════════════╝${plain}"
     echo -e " ${dim}版本: v${sh_ver}  |  模式: $(detect_run_mode)  |  CF隧道: $(detect_tunnel_status)${plain}"
     ui_line
@@ -518,241 +518,6 @@ choose_and_apply_run_mode() {
     fi
 }
 
-# ════════════════════ 识别本地已有配置并改 NodeID 直接复用 ════════════════════
-list_local_node_templates() {
-    python3 - <<'PYEOF'
-import json, os, re
-
-files = []
-if os.path.isfile("/etc/V2bX/config.json"):
-    files.append("/etc/V2bX/config.json")
-if os.path.isdir("/etc/V2bX/nodes"):
-    for fn in sorted(os.listdir("/etc/V2bX/nodes")):
-        if fn.endswith(".json"):
-            files.append(os.path.join("/etc/V2bX/nodes", fn))
-
-nodes_map = {}
-for fp in files:
-    try:
-        raw = open(fp, "r", encoding="utf-8").read()
-        try:
-            data = json.loads(raw)
-        except Exception:
-            data = json.loads(re.sub(r'(?<!:)//.*', '', raw))
-        for n in data.get("Nodes", []):
-            nid = str(n.get("NodeID", ""))
-            if nid:
-                nodes_map[nid] = n
-    except Exception:
-        pass
-
-for idx, (nid, n) in enumerate(nodes_map.items(), 1):
-    core = n.get("Core", "xray")
-    ntype = n.get("NodeType", "unknown")
-    cert = n.get("CertConfig") or {}
-    cmode = cert.get("CertMode", "none")
-    cdom = cert.get("CertDomain", "") or "-"
-    host = n.get("ApiHost", "")
-    print(f"{idx}|{nid}|{ntype}|{core}|{cmode}|{cdom}|{host}")
-PYEOF
-}
-
-clone_from_local_config() {
-    ui_section "识别本机已有配置 ➔ 改 NodeID 直接复用"
-    local tpl_list
-    tpl_list=$(list_local_node_templates)
-    if [[ -z "$tpl_list" ]]; then
-        echo -e " ${red}✖ 未在本机扫描到任何有效的历史节点配置！${plain}"
-        return 1
-    fi
-
-    printf " ${yellow}%-5s %-9s %-12s %-10s %-10s %-26s${plain}\n" "序号" "NodeID" "协议类型" "内核" "证书模式" "绑定域名"
-    ui_line
-    local total_tpl=0
-    while IFS='|' read -r idx nid ntype core cmode cdom host; do
-        [[ -z "$idx" ]] && continue
-        printf " ${green}[%-1s]${plain}   %-9s %-12s %-10s %-10s %-26s\n" "$idx" "$nid" "$ntype" "$core" "$cmode" "$cdom"
-        ((total_tpl++))
-    done <<< "$tpl_list"
-    ui_line
-
-    echo -ne " ${bold}▸ 请选择要克隆复用的模板【序号】${plain} [1-${total_tpl}]: "
-    read -r tpl_idx < /dev/tty
-    if [[ ! "$tpl_idx" =~ ^[0-9]+$ ]] || [[ "$tpl_idx" -lt 1 ]] || [[ "$tpl_idx" -gt "$total_tpl" ]]; then
-        echo -e " ${red}✖ 序号无效！${plain}"
-        return 1
-    fi
-
-    local chosen_line src_nid src_type src_core src_cmode src_cdom
-    chosen_line=$(echo "$tpl_list" | sed -n "${tpl_idx}p")
-    src_nid=$(echo "$chosen_line" | cut -d'|' -f2)
-    src_type=$(echo "$chosen_line" | cut -d'|' -f3)
-    src_core=$(echo "$chosen_line" | cut -d'|' -f4)
-    src_cmode=$(echo "$chosen_line" | cut -d'|' -f5)
-    src_cdom=$(echo "$chosen_line" | cut -d'|' -f6)
-
-    echo -e "\n 已选定模板: ${green}NodeID ${src_nid}${plain} (${src_type} / ${src_core} / 证书: ${src_cmode})"
-    if [[ "$src_type" =~ ^(hysteria2|tuic|hysteria)$ ]]; then
-        echo -e " ${yellow}💡 提示：UDP 协议 (${src_type}) 同机复用时，请在面板后台为新 NodeID 分配不同的端口。${plain}"
-    fi
-
-    echo -e "\n ${cyan}[1] 追加为新节点${plain} ${dim}(保留本机原有节点，将新 NodeID 加入配置，推荐)${plain}"
-    echo -e " ${cyan}[2] 覆盖替换原有配置${plain} ${dim}(清空原有节点，仅保留这个新 NodeID)${plain}"
-    echo -ne " ${bold}▸ 请选择写入方式${plain} [1-2, 默认 1]: "
-    read -r write_mode < /dev/tty
-    [[ -z "$write_mode" ]] && write_mode="1"
-
-    local batch_count=0
-    while true; do
-        local new_nid=""
-        while [[ ! "$new_nid" =~ ^[0-9]+$ ]]; do
-            echo -ne "\n ${bold}▸ 请输入新的 NodeID${plain} (纯数字): "
-            read -r new_nid < /dev/tty
-        done
-
-        local new_domain="" effective_domain="$src_cdom"
-        if [[ "$src_cmode" != "none" ]]; then
-            echo -ne " ${bold}▸ 确认域名${plain} ${dim}[回车直接复用原域名与证书 (${src_cdom})，或输入新域名]${plain}: "
-            read -r new_domain < /dev/tty
-            [[ -n "$new_domain" ]] && effective_domain="$new_domain"
-        fi
-
-        # 无论复用原域名还是填新域名，均检测本机现成有效证书（防止原 http/dns 模式重复申请触发 80 端口冲突或 429）
-        local cert_hint=""
-        if [[ "$src_cmode" != "none" && -n "$effective_domain" && "$effective_domain" != "-" ]]; then
-            cert_hint=$(find_local_valid_cert "$effective_domain")
-        fi
-
-        export SRC_NID="$src_nid" NEW_NID="$new_nid" NEW_DOMAIN="$new_domain" CERT_HINT="$cert_hint" WRITE_MODE="$write_mode" BATCH_IDX="$batch_count"
-        python3 - <<'PYEOF'
-import copy, json, os, re, sys
-
-src_nid = os.environ["SRC_NID"]
-new_nid = int(os.environ["NEW_NID"])
-new_domain = os.environ.get("NEW_DOMAIN", "").strip()
-cert_hint = os.environ.get("CERT_HINT", "").strip()
-write_mode = os.environ.get("WRITE_MODE", "1")
-batch_idx = int(os.environ.get("BATCH_IDX", "0"))
-
-def load_json_relaxed(path):
-    raw = open(path, "r", encoding="utf-8").read()
-    try:
-        return json.loads(raw)
-    except Exception:
-        return json.loads(re.sub(r'(?<!:)//.*', '', raw))
-
-master_path = "/etc/V2bX/config.json"
-cfg = load_json_relaxed(master_path) if os.path.isfile(master_path) else {
-    "Log": {"Level": "error", "Output": ""},
-    "Runtime": {"GCPercent": 50, "MemoryLimitPercent": 70},
-    "Cores": [],
-    "Nodes": []
-}
-
-tpl_node = None
-tpl_core_obj = None
-search_files = [master_path]
-if os.path.isdir("/etc/V2bX/nodes"):
-    for fn in sorted(os.listdir("/etc/V2bX/nodes")):
-        if fn.endswith(".json"):
-            search_files.append(os.path.join("/etc/V2bX/nodes", fn))
-
-for fp in search_files:
-    if not os.path.isfile(fp):
-        continue
-    try:
-        d = load_json_relaxed(fp)
-        for n in d.get("Nodes", []):
-            if str(n.get("NodeID", "")) == src_nid:
-                tpl_node = copy.deepcopy(n)
-                c_type = str(n.get("Core", "xray")).lower()
-                for c in d.get("Cores", []):
-                    if str(c.get("Type", "")).lower() == c_type:
-                        tpl_core_obj = copy.deepcopy(c)
-    except Exception:
-        pass
-
-if not tpl_node:
-    print("  [错误] 找不到源节点模板！", file=sys.stderr)
-    sys.exit(1)
-
-cloned = copy.deepcopy(tpl_node)
-cloned["NodeID"] = new_nid
-
-cert = cloned.get("CertConfig") or {}
-old_dom = str(cert.get("CertDomain", ""))
-target_dom = new_domain if new_domain else old_dom
-if new_domain:
-    cert["CertDomain"] = new_domain
-
-if cert_hint and "|" in cert_hint:
-    cp, kp = cert_hint.split("|", 1)
-    prev_mode = str(cert.get("CertMode", "")).lower()
-    cert["CertMode"] = "file"
-    cert["CertFile"] = cp
-    cert["KeyFile"] = kp
-    if prev_mode in ("http", "dns"):
-        print(f"  [证书免重申] 域名 {target_dom} 命中本机有效证书，已自动从 {prev_mode} 转为 file 模式 -> {cp}")
-    elif new_domain:
-        print(f"  [证书复用] 新域名 {target_dom} 已命中本机有效证书 -> {cp}")
-elif new_domain and cert.get("CertMode") == "file" and old_dom and old_dom in str(cert.get("CertFile", "")):
-    cert["CertFile"] = str(cert["CertFile"]).replace(old_dom, new_domain)
-    cert["KeyFile"] = str(cert["KeyFile"]).replace(old_dom, new_domain)
-
-if cert:
-    cloned["CertConfig"] = cert
-
-needed_core = str(cloned.get("Core", "xray")).lower()
-existing_cores = {str(c.get("Type", "")).lower() for c in cfg.get("Cores", [])}
-if needed_core not in existing_cores:
-    if tpl_core_obj:
-        cfg.setdefault("Cores", []).append(tpl_core_obj)
-    elif needed_core == "xray":
-        cfg.setdefault("Cores", []).append({
-            "Type": "xray",
-            "Log": {"Level": "error", "AccessPath": "", "ErrorPath": "/etc/V2bX/error.log", "MaxSize": 100, "MaxBackups": 0, "MaxDays": 90, "Compress": True},
-            "AssetPath": "/etc/V2bX/",
-            "DnsConfigPath": "/etc/V2bX/dns.json",
-            "OutboundConfigPath": "/etc/V2bX/custom_outbound.json",
-            "RouteConfigPath": "/etc/V2bX/route.json",
-            "XrayConnectionConfig": {"handshake": 4, "connIdle": 120, "uplinkOnly": 2, "downlinkOnly": 4, "bufferSize": 64}
-        })
-    elif needed_core == "sing":
-        cfg.setdefault("Cores", []).append({
-            "Type": "sing",
-            "Log": {"Level": "error", "Timestamp": True},
-            "NTP": {"Enable": False, "Server": "time.apple.com", "ServerPort": 0},
-            "OriginalPath": "/etc/V2bX/sing_origin.json"
-        })
-    elif needed_core == "hysteria2":
-        cfg.setdefault("Cores", []).append({"Type": "hysteria2", "Log": {"Level": "error"}})
-
-if write_mode == "2" and batch_idx == 0:
-    cfg["Nodes"] = [cloned]
-else:
-    nodes = [n for n in cfg.get("Nodes", []) if int(n.get("NodeID", -1)) != new_nid]
-    nodes.append(cloned)
-    cfg["Nodes"] = nodes
-
-tmp_p = master_path + ".tmp"
-with open(tmp_p, "w", encoding="utf-8") as f:
-    json.dump(cfg, f, indent=2, ensure_ascii=False)
-os.replace(tmp_p, master_path)
-print(f"  ✔ 已成功克隆生成 NodeID: {new_nid} ({cloned.get('NodeType')} / {cloned.get('Core')})")
-PYEOF
-        [[ $? -ne 0 ]] && return 1
-        ((batch_count++))
-
-        echo -ne "\n ${bold}▸ 是否继续基于此模板复用下一个 NodeID？${plain} [y/N, 默认 N]: "
-        read -r more_clone < /dev/tty
-        [[ ! "$more_clone" =~ ^[Yy]$ ]] && break
-    done
-
-    echo -e "\n ${green}✔ 共完成 ${batch_count} 个节点配置复用并写入 /etc/V2bX/config.json！${plain}"
-    choose_and_apply_run_mode
-    return 0
-}
-
 init_aux_files() {
     [[ ! -f /etc/V2bX/sing_origin.json ]] && echo '{ "outbounds": [ { "type": "direct", "tag": "direct" } ] }' > /etc/V2bX/sing_origin.json
     if [[ ! -f /etc/V2bX/dns.json ]]; then
@@ -1080,23 +845,6 @@ collect_single_node() {
 main_create_all() {
     ui_banner
     init_aux_files
-
-    local existing_templates
-    existing_templates=$(list_local_node_templates)
-    if [[ -n "$existing_templates" ]]; then
-        echo -e "${green}✨ 检测到本机已存在历史节点配置，您可以直接改个 NodeID 一键复用：${plain}"
-        echo -e "  ${cyan}[1] ♻️ 克隆复用本机已有配置${plain} ${dim}(选模板 ➔ 改 NodeID，自动处理证书与端口隔离)${plain}"
-        echo -e "  ${cyan}[2] ✨ 从头向导式全新配置${plain}   ${dim}(重新填写面板信息并逐项配置协议)${plain}"
-        echo -ne " ${bold}▸ 请选择构建方式${plain} [1-2, 默认 1]: "
-        read -r build_mode < /dev/tty
-        [[ -z "$build_mode" ]] && build_mode="1"
-        if [[ "$build_mode" == "1" ]]; then
-            clone_from_local_config
-            return $?
-        fi
-        echo ""
-    fi
-
     load_or_ask_creds
 
     local nodes_json="[]"
