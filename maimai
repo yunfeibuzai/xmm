@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # 麦卖云 V2bX 后端全能王牌脚本 (Systemd & OpenRC 双模自适应+全透明防爆版)
-sh_ver="5.0.1-Pro"
+sh_ver="5.2.0-Pro"
 
 # 0. 跨系统 POSIX /bin/sh 自愈引导 (兼容 sh maimai、curl|sh 与 Alpine 纯净环境)
 if [ -z "$BASH_VERSION" ]; then
@@ -26,7 +26,7 @@ magenta='\033[35m'; cyan='\033[36m'; plain='\033[0m'; dim='\033[2m'
 
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain}必须使用 root 用户运行此脚本！\n" && exit 1
 
-# 🌟 全局 GitHub 加速镜像池 (按优先级排序，末尾空字符串代表直连兜底)
+# 🌟 全局 GitHub 加速镜像池
 REPO_RAW_BASE="https://raw.githubusercontent.com/yunfeibuzai/xmm/main"
 GH_MIRRORS=(
     "https://gh-proxy.com/"
@@ -40,7 +40,22 @@ is_systemd() {
     command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]
 }
 
-# 🌟 自动探测 OpenRC 单进程服务名 (兼容 V2bX 与 v2bx)
+# 🌟 自动探测并自愈多进程隔离状态 (防止标记丢失导致编辑错文件)
+is_multi_active() {
+    if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
+        return 0
+    fi
+    if compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/v2bx.port_*" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/v2bx.node_*" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/V2bX.node_*" >/dev/null 2>&1; then
+        mkdir -p /etc/V2bX/nodes
+        touch /etc/V2bX/nodes/.multi_enabled
+        return 0
+    fi
+    return 1
+}
+
 get_openrc_main_svc() {
     if [[ -f /etc/init.d/V2bX ]]; then
         echo "V2bX"
@@ -51,7 +66,6 @@ get_openrc_main_svc() {
     fi
 }
 
-# 🌟 跨系统安全临时文件生成器 (严格兼容 Alpine BusyBox mktemp 无后缀规范)
 make_temp_file() {
     local prefix="${1:-maimai_tmp}"
     local tmp
@@ -63,7 +77,6 @@ make_temp_file() {
     echo "$tmp"
 }
 
-# 🌟 基础依赖自动补齐 (核心工具与兼容层隔离安装，防源缺失连带失败)
 install_dependencies() {
     local cmds=("wget" "curl" "tar" "unzip" "jq" "nano" "sed" "openssl" "pgrep")
     local needs_install=false
@@ -102,7 +115,6 @@ install_dependencies() {
 }
 install_dependencies
 
-# 🌟 统一 GitHub 文件多镜像极速拉取器 (GNU/BusyBox 双兼容 + CRLF清洗 + 语法校验)
 fetch_github_file() {
     local raw_url="$1"
     local dest_file="$2"
@@ -152,7 +164,6 @@ fetch_github_file() {
     return 1
 }
 
-# 🌟 快捷命令注册 (兼容本地执行与管道启动并自动同步版本)
 register_shortcut() {
     mkdir -p /usr/local/bin
     local core_script="/usr/local/bin/maimai_core.sh"
@@ -183,7 +194,6 @@ register_shortcut() {
 }
 register_shortcut
 
-# 🌟 统一远程模块分发引擎 (自动热修补子模块内残留的失效镜像)
 run_remote_module() {
     local mod_name="$1"
     local desc="$2"
@@ -204,20 +214,28 @@ run_remote_module() {
     fi
 }
 
-# 🌟 智能内核服务管理器 (兼容单进程与多进程隔离模式 + 真实状态校验)
 manage_service() {
     local action=$1
-    if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
+    if is_multi_active; then
         if is_systemd; then
-            [[ "$action" == "start" || "$action" == "restart" ]] && systemctl stop V2bX 2>/dev/null
-            local found=0
-            for f in /etc/V2bX/nodes/node_*.json; do
-                [[ ! -f "$f" ]] && continue
-                found=1
+            systemctl disable --now V2bX.service >/dev/null 2>&1
+            systemctl mask V2bX.service >/dev/null 2>&1
+
+            shopt -s nullglob
+            local split_files=(/etc/V2bX/nodes/port_*.json /etc/V2bX/nodes/node_*.json)
+            shopt -u nullglob
+
+            if [[ ${#split_files[@]} -eq 0 ]]; then
+                echo -e "${yellow}未找到任何已拆分的实例配置文件 (/etc/V2bX/nodes/)${plain}"
+                return
+            fi
+
+            for f in "${split_files[@]}"; do
                 local inst
                 inst=$(basename "$f" .json)
                 case "$action" in
                     start|stop|restart|enable|disable)
+                        systemctl reset-failed "v2bx@${inst}" 2>/dev/null
                         if systemctl "$action" "v2bx@${inst}" 2>/dev/null; then
                             echo -e "${green}✔ [v2bx@${inst}] 已执行 ${action}${plain}"
                         else
@@ -227,13 +245,23 @@ manage_service() {
                     status) systemctl status "v2bx@${inst}" --no-pager ;;
                 esac
             done
-            [[ $found -eq 0 ]] && echo -e "${yellow}未找到任何已拆分的节点配置文件 (/etc/V2bX/nodes/node_*.json)${plain}"
         elif command -v rc-service &>/dev/null; then
-            [[ "$action" == "start" || "$action" == "restart" ]] && rc-service "$(get_openrc_main_svc)" stop 2>/dev/null
-            local found=0
-            for init_f in /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_*; do
-                [[ ! -f "$init_f" ]] && continue
-                found=1
+            local main_svc
+            main_svc=$(get_openrc_main_svc)
+            rc-service "$main_svc" stop >/dev/null 2>&1
+            rc-update del "$main_svc" default >/dev/null 2>&1
+            chmod -x "/etc/init.d/${main_svc}" 2>/dev/null
+
+            shopt -s nullglob
+            local rc_files=(/etc/init.d/v2bx.port_* /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_*)
+            shopt -u nullglob
+
+            if [[ ${#rc_files[@]} -eq 0 ]]; then
+                echo -e "${yellow}未找到任何 OpenRC 多进程服务脚本${plain}"
+                return
+            fi
+
+            for init_f in "${rc_files[@]}"; do
                 local svc
                 svc=$(basename "$init_f")
                 case "$action" in
@@ -242,14 +270,15 @@ manage_service() {
                     disable) rc-update del "$svc" default >/dev/null 2>&1 && echo -e "${green}✔ [${svc}] 已取消开机自启${plain}" ;;
                 esac
             done
-            [[ $found -eq 0 ]] && echo -e "${yellow}未找到任何 OpenRC 多进程服务脚本${plain}"
         fi
         return
     fi
 
     if is_systemd; then
+        systemctl unmask V2bX.service >/dev/null 2>&1
         case "$action" in
             start|stop|restart)
+                systemctl reset-failed V2bX.service 2>/dev/null
                 if systemctl "$action" V2bX; then
                     echo -e "${green}✔ V2bX 服务 ${action} 成功！${plain}"
                 else
@@ -263,6 +292,7 @@ manage_service() {
     elif command -v rc-service &>/dev/null; then
         local main_svc
         main_svc=$(get_openrc_main_svc)
+        [[ -f "/etc/init.d/${main_svc}" ]] && chmod +x "/etc/init.d/${main_svc}" 2>/dev/null
         case "$action" in
             start|stop|restart|status) rc-service "$main_svc" "$action" ;;
             enable) rc-update add "$main_svc" default >/dev/null 2>&1 && echo -e "${green}✔ 已设置 ${main_svc} 开机自启动${plain}" ;;
@@ -271,51 +301,90 @@ manage_service() {
     fi
 }
 
-# 🌟 独立多维日志排查控制台
+# 🌟 全量多维日志诊断中心 (完整输出200行 + 合并 Xray/Hy2/Sing-box/ACME 错误日志)
 inspect_logs() {
     echo -e "\n${cyan}================ 📊 V2bX 日志诊断中心 ================${plain}"
-    echo -e "  ${green}1.${plain} 追踪系统级运行输出 (Systemd / OpenRC 控制台)"
-    echo -e "  ${green}2.${plain} 查看核心错误日志 (/etc/V2bX/error.log)"
-    echo -e "  ${green}3.${plain} 查看用户连接日志 (/var/log/V2bX/access.log)"
+    echo -e "  ${green}1.${plain} 追踪实时运行日志 (最近 200 行完整输出 + 实时滚动)"
+    echo -e "  ${green}2.${plain} 排查核心错误与启动崩溃 (合并 Systemd/ACME/Hy2/Xray 报错)"
+    echo -e "  ${green}3.${plain} 查看用户连接访问日志 (Access Log)"
     echo -e "  ${green}4.${plain} 返回上级菜单"
     read -rp "请选择日志类型 [1-4] (默认 1): " log_type < /dev/tty || return
     [[ -z "$log_type" ]] && log_type=1
-
     [[ "$log_type" == "4" ]] && return
 
-    echo -e "${yellow}💡 提示：正在实时滚动日志，随时按 [Ctrl+C] 可安全退出查看并返回菜单。${plain}\n"
+    local target_unit="v2bx@*"
+    local target_inst=""
+    if is_multi_active; then
+        shopt -s nullglob
+        local inst_files=(/etc/V2bX/nodes/port_*.json /etc/V2bX/nodes/node_*.json)
+        shopt -u nullglob
+        if [[ ${#inst_files[@]} -gt 1 ]]; then
+            echo -e "\n${cyan}检测到多个隔离实例，请选择查看范围：${plain}"
+            echo -e "  ${green}0.${plain} 全部实例合并查看"
+            local k=1
+            for f in "${inst_files[@]}"; do
+                echo -e "  ${green}${k}.${plain} 仅查看 $(basename "$f" .json)"
+                ((k++))
+            done
+            read -rp "请输入序号 [0-$((k-1))] (默认 0): " inst_sel < /dev/tty || return
+            if [[ "$inst_sel" =~ ^[1-9][0-9]*$ ]] && [ "$inst_sel" -lt "$k" ]; then
+                target_inst=$(basename "${inst_files[$((inst_sel-1))]}" .json)
+                target_unit="v2bx@${target_inst}"
+            fi
+        elif [[ ${#inst_files[@]} -eq 1 ]]; then
+            target_inst=$(basename "${inst_files[0]}" .json)
+            target_unit="v2bx@${target_inst}"
+        fi
+    fi
+
+    echo -e "${yellow}💡 提示：正在输出完整日志（按 [Ctrl+C] 可随时安全退出返回菜单）。${plain}\n"
     
     trap ':' INT
     case "$log_type" in
         1)
-            if [[ -f /etc/V2bX/nodes/.multi_enabled ]] && is_systemd; then
-                journalctl -u "v2bx@*" -n 50 -f --no-pager
+            if is_multi_active && is_systemd; then
+                journalctl -u "$target_unit" -n 200 -f --no-pager --output=short-iso
             elif is_systemd; then
-                journalctl -u V2bX -n 50 -f --no-pager
+                journalctl -u V2bX -n 200 -f --no-pager --output=short-iso
+            elif [[ -n "$target_inst" ]] && ls /var/log/V2bX/*_"${target_inst}".log >/dev/null 2>&1; then
+                tail -n 200 -f /var/log/V2bX/*_"${target_inst}".log 2>/dev/null
             elif ls /var/log/V2bX/out_*.log >/dev/null 2>&1; then
-                tail -n 50 -f /var/log/V2bX/out_*.log /var/log/V2bX/err_*.log 2>/dev/null
+                tail -n 200 -f /var/log/V2bX/out_*.log /var/log/V2bX/err_*.log 2>/dev/null
             else
-                tail -n 50 -f /var/log/v2bx*.log /var/log/V2bX*.log 2>/dev/null || echo -e "${yellow}暂无控制台日志${plain}"
+                tail -n 200 -f /var/log/v2bx*.log /var/log/V2bX*.log 2>/dev/null || echo -e "${yellow}暂无控制台日志${plain}"
             fi
             ;;
         2)
-            if ls /var/log/V2bX/error_*.log >/dev/null 2>&1; then
-                tail -n 50 -f /var/log/V2bX/error_*.log
+            # 1) 先打印 Systemd/OpenRC 中包含启动失败、ACME 429、Hy2/Sing-box 报错的完整记录
+            if is_systemd; then
+                local u_name="V2bX"
+                is_multi_active && u_name="$target_unit"
+                echo -e "${cyan}--- [进程启动 / ACME证书 / 面板对接日志] ---${plain}"
+                journalctl -u "$u_name" -n 120 --no-pager --output=short-iso 2>/dev/null
             elif ls /var/log/V2bX/err_*.log >/dev/null 2>&1; then
-                tail -n 50 -f /var/log/V2bX/err_*.log
+                echo -e "${cyan}--- [OpenRC 进程错误输出] ---${plain}"
+                tail -n 120 /var/log/V2bX/err_*.log 2>/dev/null
+            fi
+
+            # 2) 再追踪 Xray 独立错误文件
+            echo -e "\n${cyan}--- [Xray 核心独立错误日志 (实时追踪)] ---${plain}"
+            if [[ -n "$target_inst" && -f "/var/log/V2bX/error_${target_inst}.log" ]]; then
+                tail -n 100 -f "/var/log/V2bX/error_${target_inst}.log"
+            elif ls /var/log/V2bX/error_*.log >/dev/null 2>&1; then
+                tail -n 100 -f /var/log/V2bX/error_*.log
             elif [[ -f /etc/V2bX/error.log ]]; then
-                tail -n 50 -f /etc/V2bX/error.log
-            elif [[ -f /var/log/v2bx_err.log ]]; then
-                tail -n 50 -f /var/log/v2bx_err.log
+                tail -n 100 -f /etc/V2bX/error.log
             else
-                echo -e "${green}暂无独立错误日志，核心运行良好！${plain}"
+                echo -e "${dim}(当前无 Xray 独立 error.log 文件，如使用 Hysteria2/Sing-box 请直接参考上方进程日志)${plain}"
             fi
             ;;
         3)
-            if ls /var/log/V2bX/access_*.log >/dev/null 2>&1; then
-                tail -n 50 -f /var/log/V2bX/access_*.log
+            if [[ -n "$target_inst" && -f "/var/log/V2bX/access_${target_inst}.log" ]]; then
+                tail -n 150 -f "/var/log/V2bX/access_${target_inst}.log"
+            elif ls /var/log/V2bX/access_*.log >/dev/null 2>&1; then
+                tail -n 150 -f /var/log/V2bX/access_*.log
             elif [[ -f /var/log/V2bX/access.log ]]; then
-                tail -n 50 -f /var/log/V2bX/access.log
+                tail -n 150 -f /var/log/V2bX/access.log
             else
                 echo -e "${yellow}未找到连接日志 (可能连接日志已设为 none 或尚无连接)${plain}"
             fi
@@ -330,10 +399,10 @@ show_status() {
     local guard_status="${yellow}未开启 (原生态无锁)${plain}"
     local mode_status="${cyan}单进程${plain}"
 
-    [[ -f /etc/V2bX/nodes/.multi_enabled ]] && mode_status="${magenta}多进程隔离${plain}"
+    is_multi_active && mode_status="${magenta}多进程隔离${plain}"
 
     if [[ -s /usr/local/V2bX/V2bX ]]; then
-        if [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
+        if is_multi_active; then
             local cnt
             cnt=$(pgrep -f "[/]usr/local/V2bX/V2bX server" 2>/dev/null | wc -l | tr -d ' ')
             if [[ "${cnt:-0}" -gt 0 ]]; then
@@ -341,7 +410,7 @@ show_status() {
             else
                 core_status="${yellow}已停止${plain}"
             fi
-            if grep -qE "MemoryMax|GOMEMLIMIT" /etc/systemd/system/v2bx@.service /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_* 2>/dev/null || \
+            if grep -qE "MemoryMax|GOMEMLIMIT" /etc/systemd/system/v2bx@.service /etc/init.d/v2bx.port_* /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_* 2>/dev/null || \
                grep -q "MemoryLimitPercent" /etc/V2bX/config.json 2>/dev/null; then
                 guard_status="${green}内核防爆已开启${plain}"
             fi
@@ -382,7 +451,7 @@ show_menu() {
     menu_text=$(cat <<EOF
 ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
 --- 快捷命令: ${cyan}maimai${plain} 或 ${cyan}v2bx${plain} ---
-  ${green}0.${plain} 快捷修改节点配置 (自适应单/多进程)
+  ${green}0.${plain} 快捷修改节点配置 (自适应单/多进程 + 双向同步)
 --------------------------------------------
   ${green}1.${plain} 安装 V2bX (Shannon-x 全协议核心 / 智能防爆版)
   ${green}2.${plain} 更新 V2bX 核心
@@ -391,14 +460,14 @@ ${green}麦卖云 V2bX 后端全能王牌脚本${plain} v${sh_ver}
   ${green}5.${plain} 停止 V2bX 服务
   ${green}6.${plain} 重启 V2bX 服务
   ${green}7.${plain} 查看 V2bX 运行状态
-  ${green}8.${plain} 📊 查看 V2bX 实时运行与错误日志
+  ${green}8.${plain} 📊 查看 V2bX 实时运行与错误日志 (完整200行)
   ${green}9.${plain} 设置开机自启动
   ${green}10.${plain} 取消开机自启动
 --------------------------------------------
 ${magenta}[🌟 核心战力配置向导群]${plain}
   ${green}11.${plain} 🌟 纯净向导式配置创建与多进程托管 (xmm2)
   ${green}12.${plain} 🚦 节点追加 / 红绿灯体检 / 外置ACME证书中心 (xmm12)
-  ${green}13.${plain} 生成 X25519 密钥 (Reality 必备)
+  ${green}13.${plain} 生成 X25519 / VLESS-Enc 密钥
   ${green}14.${plain} 升级本维护脚本
 --------------------------------------------
 ${magenta}[🚀 麦卖小鸡高可用工具箱]${plain}
@@ -420,18 +489,23 @@ EOF
     printf '%b\n%b\n' "$menu_text" "$status_text"
 }
 
-# 🌟 生成 X25519
 generate_x25519() {
     if [[ ! -x /usr/local/V2bX/V2bX ]]; then
         echo -e "${red}错误：尚未安装 V2bX，请先执行选项 1 安装核心！${plain}"
         return
     fi
-    echo -e "${cyan}正在生成 Reality X25519 密钥对...${plain}\n"
-    /usr/local/V2bX/V2bX x25519
-    echo "--------------------------------------------------------"
-    echo -e "${yellow}💡 配置指引：${plain}"
-    echo -e "  - ${green}Private key (私钥)${plain} : 填入节点配置"
-    echo -e "  - ${green}Public key (公钥)${plain}  : 填入面板后台供客户端校验"
+    echo -e "${cyan}1) 生成 Reality X25519 密钥对 (默认)   2) 生成 VLESS Encryption 密钥对${plain}"
+    read -rp "请选择密钥类型 [1-2] (默认 1): " key_opt < /dev/tty
+    echo ""
+    if [[ "$key_opt" == "2" ]]; then
+        /usr/local/V2bX/V2bX vlessenc
+    else
+        /usr/local/V2bX/V2bX x25519
+        echo "--------------------------------------------------------"
+        echo -e "${yellow}💡 配置指引：${plain}"
+        echo -e "  - ${green}Private key (私钥)${plain} : 填入节点配置"
+        echo -e "  - ${green}Public key (公钥)${plain}  : 填入面板后台供客户端校验"
+    fi
 }
 
 install_bbr() {
@@ -449,7 +523,6 @@ install_bbr() {
     fi
 }
 
-# 🌟 升级主控脚本 (内置语法校验防损坏)
 update_shell() {
     echo -e "${cyan}正在拉取主控脚本最新版本...${plain}"
     local tmp_up
@@ -483,45 +556,103 @@ update_shell() {
     exec /usr/local/bin/maimai_core.sh
 }
 
-process_run() {
-    local num
-    read -rp "请输入选择 [0-25]: " num < /dev/tty || exit 0
+# 🌟 选项 0 专属：修改编辑器并检测文件是否真实保存 + 反向同步母版
+edit_and_sync_file() {
+    local target_file="$1"
     local editor="nano"
     command -v nano &>/dev/null || editor="vi"
 
+    local mtime_before mtime_after
+    mtime_before=$(stat -c %Y "$target_file" 2>/dev/null || date -r "$target_file" +%s 2>/dev/null || echo 0)
+    "$editor" "$target_file"
+    mtime_after=$(stat -c %Y "$target_file" 2>/dev/null || date -r "$target_file" +%s 2>/dev/null || echo 1)
+
+    if [[ "$mtime_before" == "$mtime_after" ]]; then
+        echo -e "\n${yellow}ℹ 检测到文件未发生任何改动（若使用 nano 修改，请确保按了 Ctrl+O 回车保存再按 Ctrl+X 退出）。${plain}"
+        return 1
+    fi
+
+    if command -v jq &>/dev/null && ! jq -e . "$target_file" >/dev/null 2>&1; then
+        echo -e "\n${red}✖ 警告：检测到 $(basename "$target_file") 存在 JSON 语法错误（可能少写了逗号或括号），已取消重启以防服务崩溃！请重新编辑修正。${plain}"
+        return 1
+    fi
+    return 0
+}
+
+process_run() {
+    local num
+    read -rp "请输入选择 [0-25]: " num < /dev/tty || exit 0
+
     case "$num" in
     0)
-        shopt -s nullglob
-        local node_files=(/etc/V2bX/nodes/node_*.json)
-        shopt -u nullglob
+        if is_multi_active; then
+            shopt -s nullglob
+            local node_files=(/etc/V2bX/nodes/port_*.json /etc/V2bX/nodes/node_*.json)
+            shopt -u nullglob
 
-        if [[ ${#node_files[@]} -gt 0 ]] && [[ -f /etc/V2bX/nodes/.multi_enabled ]]; then
-            echo -e "\n${cyan}=== 🛠️ 多进程节点配置编辑器 ===${plain}"
+            echo -e "\n${cyan}=== 🛠️ 多进程隔离配置编辑器 ===${plain}"
+            echo -e "  ${green}1.${plain} 编辑【母版总配置】(/etc/V2bX/config.json) ${dim}— 自动重新拆分同步到所有运行实例${plain}"
+            echo -e "  ${green}2.${plain} 编辑【单个隔离实例】(/etc/V2bX/nodes/*.json) ${dim}— 改完自动反向同步回母版防止覆盖${plain}"
+            echo -e "  ${dim}0. 取消 / 返回主菜单${plain}"
+            read -rp "请选择编辑方式 [0-2] (默认 2): " edit_mode < /dev/tty || return
+            [[ -z "$edit_mode" ]] && edit_mode=2
+            [[ "$edit_mode" == "0" ]] && return
+
+            if [[ "$edit_mode" == "1" ]]; then
+                if [[ ! -f /etc/V2bX/config.json ]]; then
+                    echo -e "${yellow}母版配置文件不存在！${plain}"
+                    return
+                fi
+                edit_and_sync_file "/etc/V2bX/config.json" || return
+                echo -e "${cyan}正在将母版最新修改重新按端口编译同步至所有隔离实例...${plain}"
+                run_remote_module "xmm2" "多进程配置同步编译"
+                return
+            fi
+
+            if [[ ${#node_files[@]} -eq 0 ]]; then
+                echo -e "${yellow}未找到任何已拆分的隔离配置文件 (/etc/V2bX/nodes/)${plain}"
+                return
+            fi
+
+            echo -e "\n${cyan}请选择要编辑的独立实例：${plain}"
             local i=1
             for f in "${node_files[@]}"; do
-                echo -e "  ${green}${i}.${plain} $(basename "$f")"
+                local nids=""
+                command -v jq &>/dev/null && nids=$(jq -r '[.Nodes[].NodeID] | join(",")' "$f" 2>/dev/null)
+                echo -e "  ${green}${i}.${plain} $(basename "$f") ${dim}(NodeID: ${nids:-?})${plain}"
                 ((i++))
             done
-            echo -e "  ${dim}0. 取消 / 返回主菜单${plain}"
-            read -rp "请输入要编辑的独立节点序号 [0-$((i-1))]: " edit_idx < /dev/tty || return
+            echo -e "  ${dim}0. 取消${plain}"
+            read -rp "请输入实例序号 [0-$((i-1))]: " edit_idx < /dev/tty || return
 
             if [[ "$edit_idx" =~ ^[1-9][0-9]*$ ]] && [ "$edit_idx" -lt "$i" ]; then
                 local target_file="${node_files[$((edit_idx-1))]}"
                 local inst_name
                 inst_name=$(basename "$target_file" .json)
 
-                "$editor" "$target_file"
+                edit_and_sync_file "$target_file" || return
 
-                if command -v jq &>/dev/null && ! jq -e . "$target_file" >/dev/null 2>&1; then
-                    echo -e "\n${red}✖ 警告：检测到 ${inst_name}.json 存在 JSON 语法错误（可能少写了逗号或括号），已取消重启以防服务崩溃！请重新编辑修正。${plain}"
-                    return
+                # 反向将修改后的节点参数同步回母版 /etc/V2bX/config.json，防止下次重编译丢失
+                if [[ -f /etc/V2bX/config.json ]] && command -v jq &>/dev/null; then
+                    if jq --slurpfile inst "$target_file" '
+                        ($inst[0].Nodes // []) as $updated |
+                        .Nodes = [
+                            .Nodes[] as $orig |
+                            (($updated | map(select(.NodeID == $orig.NodeID)) | .[0]) // $orig)
+                        ]
+                    ' /etc/V2bX/config.json > /etc/V2bX/config.json.tmp 2>/dev/null && jq -e . /etc/V2bX/config.json.tmp >/dev/null 2>&1; then
+                        mv -f /etc/V2bX/config.json.tmp /etc/V2bX/config.json
+                        echo -e "${green}✔ 已将本次修改反向同步至母版 /etc/V2bX/config.json（永久保留）。${plain}"
+                    else
+                        rm -f /etc/V2bX/config.json.tmp
+                    fi
                 fi
 
-                echo -e "\n${green}修改已保存。${plain}${dim}(提示：若后续使用选项 12 增删节点，将从主配置 config.json 重新拆分覆盖)${plain}"
-                read -rp "是否立即重启节点 [${inst_name}]？(y/n，默认 y): " ask_restart < /dev/tty || return
+                read -rp "是否立即重启实例 [${inst_name}] 使修改生效？(y/n，默认 y): " ask_restart < /dev/tty || return
                 [[ -z "$ask_restart" ]] && ask_restart="y"
                 if [[ "$ask_restart" =~ ^[Yy]$ ]]; then
                     if is_systemd; then
+                        systemctl reset-failed "v2bx@${inst_name}" 2>/dev/null
                         systemctl restart "v2bx@${inst_name}" 2>/dev/null
                     elif command -v rc-service &>/dev/null; then
                         if [[ -f "/etc/init.d/v2bx.${inst_name}" ]]; then
@@ -530,20 +661,17 @@ process_run() {
                             rc-service "V2bX.${inst_name}" restart 2>/dev/null
                         fi
                     fi
-                    echo -e "${green}✔ 节点 ${inst_name} 已成功重启并应用新配置！${plain}"
+                    echo -e "${green}✔ 实例 ${inst_name} 已成功重启并应用新配置！${plain}"
                 fi
             fi
         else
             if [[ ! -f /etc/V2bX/config.json ]]; then
                 echo -e "${yellow}配置文件不存在，请先执行向导生成配置！${plain}"
             else
-                "$editor" /etc/V2bX/config.json
-                if command -v jq &>/dev/null && ! jq -e . /etc/V2bX/config.json >/dev/null 2>&1; then
-                    echo -e "\n${red}✖ 警告：检测到 /etc/V2bX/config.json 存在 JSON 语法错误（可能少写了逗号或括号），请重新编辑修正！${plain}"
-                    return
-                fi
-                echo -e "${green}V2bX 支持自动热重载，若修改了关键端口或参数，建议重启服务生效。${plain}"
-                read -rp "是否立即强制重启 V2bX 服务？(y/n，默认 n): " ask_restart < /dev/tty || return
+                edit_and_sync_file "/etc/V2bX/config.json" || return
+                echo -e "${green}✔ 配置已保存。${plain}"
+                read -rp "是否立即重启 V2bX 服务使其生效？(y/n，默认 y): " ask_restart < /dev/tty || return
+                [[ -z "$ask_restart" ]] && ask_restart="y"
                 [[ "$ask_restart" =~ ^[Yy]$ ]] && manage_service restart
             fi
         fi
@@ -555,10 +683,13 @@ process_run() {
 
         manage_service stop
         manage_service disable
+        if is_systemd; then
+            systemctl unmask V2bX.service >/dev/null 2>&1
+        fi
         pkill -9 -f "[/]usr/local/V2bX/V2bX" >/dev/null 2>&1
         rm -rf /usr/local/V2bX /etc/systemd/system/V2bX.service /etc/systemd/system/v2bx@.service \
                /etc/systemd/system/multi-user.target.wants/v2bx@*.service \
-               /etc/init.d/V2bX /etc/init.d/v2bx /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_* \
+               /etc/init.d/V2bX /etc/init.d/v2bx /etc/init.d/v2bx.port_* /etc/init.d/v2bx.node_* /etc/init.d/V2bX.node_* \
                /var/log/V2bX /var/log/v2bx*.log /var/log/V2bX*.log /var/log/v2bx*.err /var/log/V2bX*.err \
                /etc/logrotate.d/v2bx_anti_explode /etc/logrotate.d/v2bx_all /etc/logrotate.d/v2bx_sentinel_limit /etc/cron.hourly/v2bx_cleaner
 
@@ -566,7 +697,7 @@ process_run() {
             rm -rf /etc/V2bX
             echo -e "${yellow}已清除配置文件与证书目录。${plain}"
         else
-            rm -f /etc/V2bX/nodes/.multi_enabled /etc/V2bX/nodes/node_*.json 2>/dev/null
+            rm -f /etc/V2bX/nodes/.multi_enabled /etc/V2bX/nodes/port_*.json /etc/V2bX/nodes/node_*.json 2>/dev/null
         fi
 
         if is_systemd; then systemctl daemon-reload; fi
