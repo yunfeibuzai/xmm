@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 
 # 麦卖云 V2bX 独立节点增量追加引擎 (all/xmm12_1 - 由 xmm12 调用或独立运行)
-sh_ver="1.0.0-Pro"
+sh_ver="1.0.1-Pro"
+
+# 0. POSIX /bin/sh 自愈引导
+if [ -z "$BASH_VERSION" ]; then
+    if ! command -v bash >/dev/null 2>&1; then
+        if command -v apk >/dev/null 2>&1; then
+            apk update >/dev/null 2>&1 && apk add --no-cache bash >/dev/null 2>&1
+        else
+            printf '错误：当前系统缺少 bash，请先安装 bash！\n'
+            exit 1
+        fi
+    fi
+    [ -f "$0" ] && exec bash "$0" "$@" || exec bash -s -- "$@"
+fi
 
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'
@@ -20,16 +33,16 @@ is_systemd() {
 # ════════════════════ 依赖组件安全补齐 ════════════════════
 ensure_tools() {
     local need=0
-    for c in jq openssl curl python3; do
+    for c in jq openssl curl python3 pgrep; do
         command -v "$c" &>/dev/null || need=1
     done
     if [[ $need -eq 1 ]]; then
         echo -e " ${yellow}正在自动补齐核心运行组件 (jq / openssl / curl / python3)...${plain}"
         if command -v apt-get &>/dev/null; then
             DEBIAN_FRONTEND=noninteractive apt-get update -y -q >/dev/null 2>&1
-            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq openssl curl python3 >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq openssl curl python3 procps >/dev/null 2>&1
         elif command -v yum &>/dev/null; then
-            yum install -y jq openssl curl python3 >/dev/null 2>&1
+            yum install -y jq openssl curl python3 procps-ng >/dev/null 2>&1
         elif command -v apk &>/dev/null; then
             apk update >/dev/null 2>&1
             apk add --no-cache jq openssl curl python3 bash coreutils procps >/dev/null 2>&1
@@ -245,7 +258,7 @@ def fetch_node_remote_meta(node):
     qs = urllib.parse.urlencode({"node_id": nid, "node_type": ntype, "token": api_key})
     url = f"{api_host}/api/v1/server/UniProxy/config?{qs}"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "V2bX/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "V2bX/1.0", "Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=6, context=ctx) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             port = data.get("server_port")
@@ -327,7 +340,7 @@ sync_multi_process_instances() {
         mem_high=$(grep '^MemoryHigh=' /etc/systemd/system/V2bX.service | head -n1)
         mem_max=$(grep '^MemoryMax=' /etc/systemd/system/V2bX.service | head -n1)
     elif [[ -f /etc/init.d/V2bX ]]; then
-        mem_env=$(grep 'GOMEMLIMIT=' /etc/init.d/V2bX | head -n1 | sed -n 's/.*\(GOMEMLIMIT=[^" ]*\).*/\1/p')
+        mem_env=$(grep -oE 'GOMEMLIMIT=[0-9]+[A-Za-z]*' /etc/init.d/V2bX 2>/dev/null | head -n1)
     fi
 
     if is_systemd; then
@@ -395,7 +408,7 @@ EOF
         rc-update del V2bX default >/dev/null 2>&1
         [[ -f /etc/init.d/V2bX ]] && chmod -x /etc/init.d/V2bX 2>/dev/null
 
-        for old_rc in /etc/init.d/V2bX.node_* /etc/init.d/v2bx.node_* /etc/init.d/v2bx.port_*; do
+        for old_rc in /etc/init.d/V2bX.node_* /etc/init.d/v2bx.node_* /etc/init.d/v2bx.port_* /etc/init.d/v2bx_node_* /etc/init.d/v2bx_port_*; do
             [[ -f "$old_rc" ]] || continue
             local rc_base; rc_base=$(basename "$old_rc")
             rc-service "$rc_base" stop 2>/dev/null
@@ -408,7 +421,10 @@ EOF
         shopt -u nullglob
 
         for nf in "${split_files[@]}"; do
-            local inst rc_file; inst=$(basename "$nf" .json); rc_file="/etc/init.d/v2bx.${inst}"
+            local inst rc_name rc_file
+            inst=$(basename "$nf" .json)
+            rc_name="v2bx_${inst}"
+            rc_file="/etc/init.d/${rc_name}"
             local env_line="XRAY_DNS_PATH=/etc/V2bX/dns.json SING_DNS_PATH=/etc/V2bX/sing_dns.json"
             [[ -n "$mem_env" ]] && env_line="${env_line} ${mem_env} GOGC=50"
             cat << EOF > "$rc_file"
@@ -417,21 +433,19 @@ description="V2bX Isolated Instance (${inst})"
 command="/usr/local/V2bX/V2bX"
 command_args="server -c /etc/V2bX/nodes/${inst}.json -w"
 command_background=true
-pidfile="/run/v2bx.${inst}.pid"
+pidfile="/run/${rc_name}.pid"
 output_log="/var/log/V2bX/out_${inst}.log"
 error_log="/var/log/V2bX/err_${inst}.log"
 command_env="${env_line}"
-respawn_delay=5
-respawn_max=3
 
 depend() {
     need net
 }
 EOF
             chmod +x "$rc_file"
-            rc-update add "v2bx.${inst}" default >/dev/null 2>&1
-            rc-service "v2bx.${inst}" restart 2>/dev/null
-            echo -e " ${green}✔ 已同步重启 OpenRC 隔离实例: v2bx.${inst}${plain}"
+            rc-update add "$rc_name" default >/dev/null 2>&1
+            rc-service "$rc_name" restart 2>/dev/null
+            echo -e " ${green}✔ 已同步重启 OpenRC 隔离实例: ${rc_name}${plain}"
         done
     fi
 
@@ -475,7 +489,7 @@ choose_and_apply_run_mode() {
             echo -e " ${yellow}⚠ Systemd: 配置已落盘为单进程模式，请使用主菜单选项 1 或 4 启动服务。${plain}"
         fi
     elif command -v rc-service &>/dev/null; then
-        for old_rc in /etc/init.d/V2bX.node_* /etc/init.d/v2bx.node_* /etc/init.d/v2bx.port_*; do
+        for old_rc in /etc/init.d/V2bX.node_* /etc/init.d/v2bx.node_* /etc/init.d/v2bx.port_* /etc/init.d/v2bx_node_* /etc/init.d/v2bx_port_*; do
             [[ -f "$old_rc" ]] || continue
             local rc_base; rc_base=$(basename "$old_rc")
             rc-service "$rc_base" stop 2>/dev/null
