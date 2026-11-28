@@ -1,9 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # 麦卖云 V2bX 全新配置生成引擎 (all/xmm11_2 - Shannon-x 深度适配全协议版)
-sh_ver="4.0.0-Ultimate"
+sh_ver="4.6.0-Pro"
 
-# 终端色彩与样式
 red='\033[31m'; green='\033[32m'; yellow='\033[33m'
 magenta='\033[35m'; cyan='\033[36m'; bold='\033[1m'; plain='\033[0m'
 dim='\033[2m'
@@ -13,29 +12,105 @@ dim='\033[2m'
 mkdir -p /etc/V2bX /etc/V2bX/nodes /var/log/V2bX
 saved_file="/etc/V2bX/.saved_creds"
 
+is_systemd() {
+    command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]
+}
+
 # ════════════════════ 依赖组件安全补齐 ════════════════════
 ensure_tools() {
-    if ! command -v jq &>/dev/null || ! command -v openssl &>/dev/null; then
-        echo -e " ${yellow}正在自动补齐核心运行组件 (jq / openssl)...${plain}"
+    local need=0
+    for c in jq openssl curl python3; do
+        command -v "$c" &>/dev/null || need=1
+    done
+    if [[ $need -eq 1 ]]; then
+        echo -e " ${yellow}正在自动补齐核心运行组件 (jq / openssl / curl / python3)...${plain}"
         if command -v apt-get &>/dev/null; then
-            apt-get update -y -q >/dev/null 2>&1
-            apt-get install -y --no-install-recommends jq openssl curl >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get update -y -q >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq openssl curl python3 >/dev/null 2>&1
         elif command -v yum &>/dev/null; then
-            yum install -y jq openssl curl >/dev/null 2>&1
+            yum install -y jq openssl curl python3 >/dev/null 2>&1
         elif command -v apk &>/dev/null; then
             apk update >/dev/null 2>&1
-            apk add --no-cache jq openssl curl bash coreutils procps >/dev/null 2>&1
+            apk add --no-cache jq openssl curl python3 bash coreutils procps >/dev/null 2>&1
         fi
     fi
 }
 ensure_tools
+
+# ════════════════════ 本地有效证书嗅探器 (防重复申请触发 ACME 429) ════════════════════
+find_local_valid_cert() {
+    local target_domain="$1"
+    [[ -z "$target_domain" ]] && return 1
+    python3 - "$target_domain" <<'PYEOF'
+import os, re, subprocess, sys
+
+td = sys.argv[1].strip().lower()
+wildcard = "*." + td.split(".", 1)[1] if "." in td else ""
+search_dirs = ["/etc/V2bX", "/etc/V2bX/cert", "/etc/V2bX/certs", "/root/.acme.sh"]
+scanned = set()
+exact_match = None
+wild_match = None
+
+for base_dir in search_dirs:
+    if not os.path.isdir(base_dir):
+        continue
+    for root, _, files in os.walk(base_dir):
+        for fn in files:
+            if not fn.lower().endswith((".crt", ".pem", ".cer")):
+                continue
+            if "ca.cer" in fn.lower() or ("chain" in fn.lower() and "fullchain" not in fn.lower()):
+                continue
+            c_path = os.path.join(root, fn)
+            if c_path in scanned:
+                continue
+            scanned.add(c_path)
+
+            chk = subprocess.run(
+                ["openssl", "x509", "-in", c_path, "-noout", "-checkend", "86400", "-ext", "subjectAltName", "-subject"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+            )
+            if chk.returncode != 0:
+                continue
+
+            stem = os.path.splitext(fn)[0].replace("_ecc", "").replace("fullchain", "")
+            k_candidates = [
+                os.path.splitext(c_path)[0] + ".key",
+                os.path.join(root, stem + ".key") if stem else "",
+                os.path.join(root, os.path.basename(root).replace("_ecc", "") + ".key"),
+                os.path.join(root, "privkey.pem"),
+                os.path.join(root, "private.key"),
+            ]
+            k_path = next((kp for kp in k_candidates if kp and os.path.isfile(kp) and os.path.getsize(kp) > 0), "")
+            if not k_path:
+                for f2 in files:
+                    if f2.lower().endswith(".key"):
+                        k_path = os.path.join(root, f2)
+                        break
+            if not k_path:
+                continue
+
+            domains = [d.lower() for d in re.findall(r'DNS:([^\s,]+)', chk.stdout)]
+            cn_m = re.search(r'CN\s*=\s*([^\s,/]+)', chk.stdout)
+            if cn_m:
+                domains.append(cn_m.group(1).lower())
+
+            if td in domains and not exact_match:
+                exact_match = (c_path, k_path)
+            elif wildcard and wildcard in domains and not wild_match:
+                wild_match = (c_path, k_path)
+
+res = exact_match or wild_match
+if res:
+    print(f"{res[0]}|{res[1]}")
+PYEOF
+}
 
 # ════════════════════ 本地 CF 隧道嗅探 ════════════════════
 check_cf_tunnel() {
     cf_tunnel_running=false
     cf_tunnel_domain=""
 
-    if pgrep -f cloudflared >/dev/null 2>&1 || ps aux | grep -v grep | grep -q "[c]loudflared"; then
+    if pgrep -f "[c]loudflared" >/dev/null 2>&1; then
         cf_tunnel_running=true
     fi
 
@@ -51,9 +126,10 @@ ui_line() { echo -e "${dim}─────────────────�
 detect_run_mode() {
     if [[ -f /etc/V2bX/nodes/.multi_enabled ]] || \
        compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/v2bx.port_*" >/dev/null 2>&1 || \
        compgen -G "/etc/init.d/v2bx.node_*" >/dev/null 2>&1 || \
        compgen -G "/etc/init.d/V2bX.node_*" >/dev/null 2>&1; then
-        echo -e "${magenta}多进程隔离${plain}"
+        echo -e "${magenta}多进程隔离 (按端口隔离)${plain}"
     elif [[ -f /etc/V2bX/config.json ]]; then
         echo -e "${green}单进程标准${plain}"
     else
@@ -73,7 +149,7 @@ ui_banner() {
     printf '\033[H\033[2J'
     echo -e "${cyan}${bold}╔══════════════════════════════════════════════════════╗${plain}"
     echo -e "${cyan}${bold}║         麦卖云 V2bX 全新配置生成引擎 (xmm11_2)       ║${plain}"
-    echo -e "${cyan}${bold}║    全内核协议矩阵 • XHTTP/AnyTLS/Hy2 • 防爆热重载    ║${plain}"
+    echo -e "${cyan}${bold}║    全内核协议矩阵 • 证书自动复用 • 按端口进程隔离    ║${plain}"
     echo -e "${cyan}${bold}╚══════════════════════════════════════════════════════╝${plain}"
     echo -e " ${dim}版本: v${sh_ver}  |  模式: $(detect_run_mode)  |  CF隧道: $(detect_tunnel_status)${plain}"
     ui_line
@@ -82,44 +158,174 @@ ui_banner() {
 ui_section() { echo -e "\n${cyan}${bold}▌ $1${plain}"; ui_line; }
 ui_step() { echo -e "\n${magenta}${bold}┌── [步骤 $1] $2${plain}"; }
 
-# ════════════════════ 多进程拆分与服务重载逻辑 ════════════════════
+# ════════════════════ 多进程按端口拆分与服务重载逻辑 ════════════════════
 multi_split_configs() {
-    if [[ ! -f /etc/V2bX/config.json ]] || ! command -v jq &>/dev/null; then return 1; fi
-    local total_nodes
-    total_nodes=$(jq '(.Nodes // []) | length' /etc/V2bX/config.json 2>/dev/null || echo 0)
-    if [[ "$total_nodes" -eq 0 ]]; then return 1; fi
-
+    if [[ ! -f /etc/V2bX/config.json ]]; then return 1; fi
     mkdir -p /etc/V2bX/nodes /var/log/V2bX
-    rm -f /etc/V2bX/nodes/node_*.json
+    rm -f /etc/V2bX/nodes/node_*.json /etc/V2bX/nodes/port_*.json
 
-    echo -e " ${cyan}正在从主配置拆分 ${total_nodes} 个独立节点实例配置...${plain}"
-    for ((i=0; i<total_nodes; i++)); do
-        local nid ntype ncore inst_name out_file
-        nid=$(jq -r ".Nodes[$i].NodeID" /etc/V2bX/config.json)
-        ntype=$(jq -r ".Nodes[$i].NodeType" /etc/V2bX/config.json)
-        ncore=$(jq -r ".Nodes[$i].Core" /etc/V2bX/config.json)
-        inst_name="node_${nid}_${ntype}"
-        out_file="/etc/V2bX/nodes/${inst_name}.json"
+    echo -e " ${cyan}正在查询面板真实端口、匹配本机证书并按端口合并拆分配置...${plain}"
+    python3 - <<'PYEOF'
+import json, os, re, subprocess, urllib.request, urllib.parse, ssl, sys
 
-        jq --argjson idx "$i" --arg core "$ncore" --arg name "$inst_name" '
-        {
-          "Log": { "Level": (.Log.Level // "error"), "Output": "" },
-          "Runtime": (.Runtime // { "GCPercent": 50, "MemoryLimitPercent": 70 }),
-          "Cores": [
-            (
-              ((.Cores // [])[] | select(.Type == $core)) as $c |
-              if $core == "xray" then
-                $c
-                | .Log.ErrorPath = ("/var/log/V2bX/error_" + $name + ".log")
-                | .Log.AccessPath = (if ($c.Log.AccessPath // "") == "none" then "none" else ("/var/log/V2bX/access_" + $name + ".log") end)
-              else $c end
+master_path = "/etc/V2bX/config.json"
+nodes_dir = "/etc/V2bX/nodes"
+
+raw = open(master_path, "r", encoding="utf-8").read()
+try:
+    cfg = json.loads(raw)
+except Exception:
+    cfg = json.loads(re.sub(r'(?<!:)//.*', '', raw))
+
+nodes = cfg.get("Nodes", [])
+if not nodes:
+    sys.exit(1)
+
+cert_inventory = []
+search_dirs = ["/etc/V2bX", "/etc/V2bX/cert", "/etc/V2bX/certs", "/root/.acme.sh"]
+scanned_certs = set()
+
+for base_dir in search_dirs:
+    if not os.path.isdir(base_dir):
+        continue
+    for root, _, files in os.walk(base_dir):
+        for fn in files:
+            if not fn.lower().endswith((".crt", ".pem", ".cer")):
+                continue
+            if "ca.cer" in fn.lower() or ("chain" in fn.lower() and "fullchain" not in fn.lower()):
+                continue
+            c_path = os.path.join(root, fn)
+            if c_path in scanned_certs:
+                continue
+            scanned_certs.add(c_path)
+
+            chk = subprocess.run(
+                ["openssl", "x509", "-in", c_path, "-noout", "-checkend", "86400", "-ext", "subjectAltName", "-subject"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
             )
-          ],
-          "Nodes": [ .Nodes[$idx] ]
-        }' /etc/V2bX/config.json > "$out_file"
-        echo -e "   ├─ 已生成独立配置: ${green}${out_file}${plain} ${dim}(Core: ${ncore}, NodeID: ${nid})${plain}"
-    done
-    
+            if chk.returncode != 0:
+                continue
+
+            stem = os.path.splitext(fn)[0].replace("_ecc", "").replace("fullchain", "")
+            k_candidates = [
+                os.path.splitext(c_path)[0] + ".key",
+                os.path.join(root, stem + ".key") if stem else "",
+                os.path.join(root, os.path.basename(root).replace("_ecc", "") + ".key"),
+                os.path.join(root, "privkey.pem"),
+                os.path.join(root, "private.key"),
+            ]
+            k_path = next((kp for kp in k_candidates if kp and os.path.isfile(kp) and os.path.getsize(kp) > 0), "")
+            if not k_path:
+                for f2 in files:
+                    if f2.lower().endswith(".key"):
+                        k_path = os.path.join(root, f2)
+                        break
+            if not k_path:
+                continue
+
+            domains = set(re.findall(r'DNS:([^\s,]+)', chk.stdout))
+            cn_m = re.search(r'CN\s*=\s*([^\s,/]+)', chk.stdout)
+            if cn_m:
+                domains.add(cn_m.group(1))
+            if domains:
+                cert_inventory.append((domains, c_path, k_path))
+
+def find_matching_cert(target_domain):
+    if not target_domain:
+        return None
+    td = target_domain.strip().lower()
+    for domains, cp, kp in cert_inventory:
+        if td in [d.lower() for d in domains]:
+            return (cp, kp)
+    if "." in td:
+        wildcard = "*." + td.split(".", 1)[1]
+        for domains, cp, kp in cert_inventory:
+            if wildcard in [d.lower() for d in domains]:
+                return (cp, kp)
+    return None
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+def fetch_node_remote_meta(node):
+    api_host = str(node.get("ApiHost", "")).rstrip("/")
+    api_key = str(node.get("ApiKey", ""))
+    nid = str(node.get("NodeID", ""))
+    ntype = str(node.get("NodeType", "")).lower()
+    if not (api_host and api_key and nid and ntype):
+        return None, ""
+    qs = urllib.parse.urlencode({"node_id": nid, "node_type": ntype, "token": api_key})
+    url = f"{api_host}/api/v1/server/UniProxy/config?{qs}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "V2bX/1.0"})
+        with urllib.request.urlopen(req, timeout=6, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            port = data.get("server_port")
+            host = data.get("host") or data.get("server_name") or ""
+            return (int(port) if port else None), str(host)
+    except Exception:
+        return None, ""
+
+port_groups = {}
+fallback_groups = {}
+
+for node in nodes:
+    nid = node.get("NodeID")
+    ntype = node.get("NodeType", "unknown")
+    port, remote_host = fetch_node_remote_meta(node)
+
+    cert_cfg = node.get("CertConfig") or {}
+    cmode = str(cert_cfg.get("CertMode", "")).lower()
+    cdomain = str(cert_cfg.get("CertDomain", "")).strip() or remote_host
+
+    if cmode in ("dns", "http", "") and cdomain:
+        matched = find_matching_cert(cdomain)
+        if matched:
+            cert_cfg["CertMode"] = "file"
+            cert_cfg["CertFile"] = matched[0]
+            cert_cfg["KeyFile"] = matched[1]
+            node["CertConfig"] = cert_cfg
+            print(f"   ├─ [证书复用] NodeID {nid} ({cdomain}) 自动切换为 file 模式 -> {matched[0]}")
+
+    if port:
+        port_groups.setdefault(port, []).append(node)
+    else:
+        fallback_groups[f"node_{nid}_{ntype}"] = [node]
+
+def write_instance_file(inst_name, group_nodes):
+    needed_cores = {str(n.get("Core", "xray")).lower() for n in group_nodes}
+    matched_cores = []
+    for c in cfg.get("Cores", []):
+        ctype = str(c.get("Type", "")).lower()
+        if ctype in needed_cores:
+            c_copy = json.loads(json.dumps(c))
+            if ctype == "xray":
+                c_copy.setdefault("Log", {})
+                c_copy["Log"]["ErrorPath"] = f"/var/log/V2bX/error_{inst_name}.log"
+                if c_copy["Log"].get("AccessPath", "") != "none":
+                    c_copy["Log"]["AccessPath"] = f"/var/log/V2bX/access_{inst_name}.log"
+            matched_cores.append(c_copy)
+
+    sub_cfg = {
+        "Log": {"Level": cfg.get("Log", {}).get("Level", "error"), "Output": ""},
+        "Runtime": cfg.get("Runtime", {"GCPercent": 50, "MemoryLimitPercent": 70}),
+        "Cores": matched_cores,
+        "Nodes": group_nodes
+    }
+    out_file = os.path.join(nodes_dir, f"{inst_name}.json")
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(sub_cfg, f, indent=2, ensure_ascii=False)
+    nids = [str(n.get("NodeID")) for n in group_nodes]
+    print(f"   ├─ 已生成独立配置: {out_file} (包含 NodeID: {', '.join(nids)})")
+
+for p, g_nodes in sorted(port_groups.items()):
+    write_instance_file(f"port_{p}", g_nodes)
+
+for fb_name, g_nodes in fallback_groups.items():
+    write_instance_file(fb_name, g_nodes)
+PYEOF
+    [[ $? -ne 0 ]] && return 1
     touch /etc/V2bX/nodes/.multi_enabled
     return 0
 }
@@ -137,9 +343,11 @@ multi_migrate_instances() {
         mem_env=$(grep 'GOMEMLIMIT=' /etc/init.d/V2bX | head -n1 | sed -n 's/.*\(GOMEMLIMIT=[^" ]*\).*/\1/p')
     fi
 
-    if command -v systemctl &>/dev/null; then
-        systemctl stop V2bX 2>/dev/null
-        systemctl disable V2bX >/dev/null 2>&1
+    if is_systemd; then
+        systemctl stop V2bX.service 2>/dev/null
+        systemctl disable V2bX.service >/dev/null 2>&1
+        systemctl mask V2bX.service >/dev/null 2>&1
+
         for old_srv in /etc/systemd/system/multi-user.target.wants/v2bx@*.service; do
             [[ -e "$old_srv" ]] || continue
             local srv_base; srv_base=$(basename "$old_srv")
@@ -149,8 +357,11 @@ multi_migrate_instances() {
 
         cat << EOF > /etc/systemd/system/v2bx@.service
 [Unit]
-Description=V2bX Isolated Node Instance (%i)
-After=network.target
+Description=V2bX Isolated Instance (%i)
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 ExecStart=/usr/local/V2bX/V2bX server -c /etc/V2bX/nodes/%i.json -w
@@ -176,32 +387,46 @@ EOF
         echo -e "[Install]\nWantedBy=multi-user.target" >> /etc/systemd/system/v2bx@.service
         systemctl daemon-reload
 
-        for nf in /etc/V2bX/nodes/node_*.json; do
-            [[ -f "$nf" ]] || continue
+        shopt -s nullglob
+        local split_files=(/etc/V2bX/nodes/port_*.json /etc/V2bX/nodes/node_*.json)
+        shopt -u nullglob
+
+        for nf in "${split_files[@]}"; do
             local inst; inst=$(basename "$nf" .json)
+            systemctl reset-failed "v2bx@${inst}.service" 2>/dev/null
             systemctl enable "v2bx@${inst}.service" >/dev/null 2>&1
             systemctl restart "v2bx@${inst}.service"
-            echo -e " ${green}✔ 已同步重启隔离实例: v2bx@${inst}.service${plain}"
+            if systemctl is-active --quiet "v2bx@${inst}.service"; then
+                echo -e " ${green}✔ 已同步重启隔离实例: v2bx@${inst}.service${plain}"
+            else
+                echo -e " ${red}✖ 实例 v2bx@${inst}.service 启动异常，请检查证书或面板参数！${plain}"
+            fi
         done
 
     elif command -v rc-service &>/dev/null; then
         rc-service V2bX stop 2>/dev/null
         rc-update del V2bX default >/dev/null 2>&1
-        for old_rc in /etc/init.d/V2bX.node_* /etc/init.d/v2bx.node_*; do
+        [[ -f /etc/init.d/V2bX ]] && chmod -x /etc/init.d/V2bX 2>/dev/null
+
+        for old_rc in /etc/init.d/V2bX.node_* /etc/init.d/v2bx.node_* /etc/init.d/v2bx.port_*; do
             [[ -f "$old_rc" ]] || continue
             local rc_base; rc_base=$(basename "$old_rc")
             rc-service "$rc_base" stop 2>/dev/null
             rc-update del "$rc_base" default >/dev/null 2>&1
             rm -f "$old_rc"
         done
-        for nf in /etc/V2bX/nodes/node_*.json; do
-            [[ -f "$nf" ]] || continue
+
+        shopt -s nullglob
+        local split_files=(/etc/V2bX/nodes/port_*.json /etc/V2bX/nodes/node_*.json)
+        shopt -u nullglob
+
+        for nf in "${split_files[@]}"; do
             local inst rc_file; inst=$(basename "$nf" .json); rc_file="/etc/init.d/v2bx.${inst}"
             local env_line="XRAY_DNS_PATH=/etc/V2bX/dns.json SING_DNS_PATH=/etc/V2bX/sing_dns.json"
             [[ -n "$mem_env" ]] && env_line="${env_line} ${mem_env} GOGC=50"
             cat << EOF > "$rc_file"
 #!/sbin/openrc-run
-description="V2bX Isolated Node (${inst})"
+description="V2bX Isolated Instance (${inst})"
 command="/usr/local/V2bX/V2bX"
 command_args="server -c /etc/V2bX/nodes/${inst}.json -w"
 command_background=true
@@ -209,6 +434,8 @@ pidfile="/run/v2bx.${inst}.pid"
 output_log="/var/log/V2bX/out_${inst}.log"
 error_log="/var/log/V2bX/err_${inst}.log"
 command_env="${env_line}"
+respawn_delay=5
+respawn_max=3
 
 depend() {
     need net
@@ -222,29 +449,62 @@ EOF
     fi
 }
 
-restart_v2bx_service() {
+# ════════════════════ 手动选择运行架构（单进程 / 多进程隔离） ════════════════════
+choose_and_apply_run_mode() {
     echo ""
-    ui_section "正在应用配置并重载服务"
+    ui_section "选择 V2bX 进程运行架构"
+    echo -e "  ${cyan}[1] 单进程标准模式${plain}   ${dim}• 所有节点共用 1 个 V2bX 进程，内存占用最低 (适合 128M~256M 小鸡)${plain}"
+    echo -e "  ${cyan}[2] 多进程隔离模式${plain}   ${dim}• 按监听端口独立隔离，单节点证书/配置异常绝不连坐其他端口${plain}"
+    local default_mode="1"
     if [[ -f /etc/V2bX/nodes/.multi_enabled ]] || \
        compgen -G "/etc/systemd/system/multi-user.target.wants/v2bx@*.service" >/dev/null 2>&1 || \
-       compgen -G "/etc/init.d/v2bx.node_*" >/dev/null 2>&1 || \
-       compgen -G "/etc/init.d/V2bX.node_*" >/dev/null 2>&1; then
-        echo -e " ${cyan}ℹ 检测到当前处于【多进程隔离模式】，正在自动重新拆分并重启所有节点实例...${plain}"
+       compgen -G "/etc/init.d/v2bx.port_*" >/dev/null 2>&1 || \
+       compgen -G "/etc/init.d/v2bx.node_*" >/dev/null 2>&1; then
+        default_mode="2"
+    fi
+    echo -ne " ${bold}▸ 请选择运行架构${plain} [1-2, 默认 ${default_mode}]: "
+    read -r run_mode_sel < /dev/tty
+    [[ -z "$run_mode_sel" ]] && run_mode_sel="$default_mode"
+
+    if [[ "$run_mode_sel" == "2" ]]; then
+        echo -e " ${cyan}正在按端口拆分隔离实例并启动守护服务...${plain}"
         multi_migrate_instances
         return
     fi
-    
-    if command -v systemctl &>/dev/null; then
+
+    # 选择单进程模式：清理可能残留的多进程实例并恢复 V2bX 主服务
+    rm -f /etc/V2bX/nodes/.multi_enabled /etc/V2bX/nodes/port_*.json /etc/V2bX/nodes/node_*.json 2>/dev/null
+    if is_systemd; then
+        for old_srv in /etc/systemd/system/multi-user.target.wants/v2bx@*.service; do
+            [[ -e "$old_srv" ]] || continue
+            local srv_base; srv_base=$(basename "$old_srv")
+            systemctl stop "$srv_base" 2>/dev/null
+            systemctl disable "$srv_base" >/dev/null 2>&1
+        done
+        rm -f /etc/systemd/system/v2bx@.service
+        systemctl daemon-reload
+        systemctl unmask V2bX.service >/dev/null 2>&1
+        systemctl enable V2bX.service >/dev/null 2>&1
+        systemctl reset-failed V2bX.service 2>/dev/null
         if systemctl restart V2bX 2>/dev/null; then
-            echo -e " ${green}✔ Systemd: V2bX 服务已成功重启生效！${plain}"
+            echo -e " ${green}✔ Systemd: 已切换为【单进程标准模式】并成功启动！${plain}"
         else
-            echo -e " ${yellow}⚠ Systemd: V2bX 服务尚未启动或注册，配置已保存。${plain}"
+            echo -e " ${yellow}⚠ Systemd: 配置已落盘为单进程模式，请使用主菜单选项 1 或 4 启动服务。${plain}"
         fi
     elif command -v rc-service &>/dev/null; then
+        for old_rc in /etc/init.d/V2bX.node_* /etc/init.d/v2bx.node_* /etc/init.d/v2bx.port_*; do
+            [[ -f "$old_rc" ]] || continue
+            local rc_base; rc_base=$(basename "$old_rc")
+            rc-service "$rc_base" stop 2>/dev/null
+            rc-update del "$rc_base" default >/dev/null 2>&1
+            rm -f "$old_rc"
+        done
+        [[ -f /etc/init.d/V2bX ]] && chmod +x /etc/init.d/V2bX 2>/dev/null
+        rc-update add V2bX default >/dev/null 2>&1
         if rc-service V2bX restart 2>/dev/null; then
-            echo -e " ${green}✔ OpenRC: V2bX 服务已成功重启生效！${plain}"
+            echo -e " ${green}✔ OpenRC: 已切换为【单进程标准模式】并成功启动！${plain}"
         else
-            echo -e " ${yellow}⚠ OpenRC: V2bX 服务尚未启动，配置已保存。${plain}"
+            echo -e " ${yellow}⚠ OpenRC: 配置已落盘为单进程模式，待启动后生效。${plain}"
         fi
     fi
 }
@@ -474,10 +734,45 @@ collect_single_node() {
             local cert_mode_num=""
             while [[ ! "$cert_mode_num" =~ ^[1-4]$ ]]; do echo -ne " ${bold}▸ 选择申请方式${plain} [1-4]: "; read -r cert_mode_num < /dev/tty; [[ -z "$cert_mode_num" ]] && cert_mode_num=1; done
             case "$cert_mode_num" in
-                1) cert_mode="http"; while [[ -z "$cert_domain" ]]; do echo -ne " ${bold}▸ 绑定域名${plain}: "; read -r cert_domain < /dev/tty; done; cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem" ;;
-                2) cert_mode="dns"; while [[ -z "$cert_domain" ]]; do echo -ne " ${bold}▸ 绑定域名${plain}: "; read -r cert_domain < /dev/tty; done; while [[ -z "$cf_token" ]]; do echo -ne " ${bold}▸ Cloudflare Token${plain}: "; read -r cf_token < /dev/tty; done; cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem" ;;
-                3) cert_mode="file"; echo -ne " ${bold}▸ 节点域名${plain}: "; read -r cert_domain < /dev/tty; echo -ne " ${bold}▸ 公钥路径${plain} [/etc/V2bX/fullchain.cer]: "; read -r input_cert < /dev/tty; cert_file=${input_cert:-"/etc/V2bX/fullchain.cer"}; echo -ne " ${bold}▸ 私钥路径${plain} [/etc/V2bX/cert.key]: "; read -r input_key < /dev/tty; key_file=${input_key:-"/etc/V2bX/cert.key"} ;;
-                4) cert_mode="file"; echo -ne " ${bold}▸ 自签域名${plain} [cf.babymonster.cc.cd]: "; read -r input_sni < /dev/tty; cert_domain=${input_sni:-"cf.babymonster.cc.cd"}; cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem"; echo -e "  ${cyan}生成 10 年自签证书...${plain}"; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -keyout "$key_file" -out "$cert_file" -subj "/CN=${cert_domain}" >/dev/null 2>&1 ;;
+                1)
+                    while [[ -z "$cert_domain" ]]; do echo -ne " ${bold}▸ 绑定域名${plain}: "; read -r cert_domain < /dev/tty; done
+                    local existing_pair; existing_pair=$(find_local_valid_cert "$cert_domain")
+                    if [[ -n "$existing_pair" ]]; then
+                        cert_mode="file"
+                        cert_file="${existing_pair%%|*}"
+                        key_file="${existing_pair##*|}"
+                        echo -e "  ${green}✔ 检测到本机已存在有效证书 (${cert_file})，自动切换为【file 模式】复用以防触发 ACME 429 限流！${plain}"
+                    else
+                        cert_mode="http"; cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem"
+                    fi
+                    ;;
+                2)
+                    while [[ -z "$cert_domain" ]]; do echo -ne " ${bold}▸ 绑定域名${plain}: "; read -r cert_domain < /dev/tty; done
+                    local existing_pair; existing_pair=$(find_local_valid_cert "$cert_domain")
+                    if [[ -n "$existing_pair" ]]; then
+                        cert_mode="file"
+                        cert_file="${existing_pair%%|*}"
+                        key_file="${existing_pair##*|}"
+                        echo -e "  ${green}✔ 检测到本机已存在有效证书 (${cert_file})，自动切换为【file 模式】复用（无需重复申请、免填 Token）！${plain}"
+                    else
+                        cert_mode="dns"
+                        while [[ -z "$cf_token" ]]; do echo -ne " ${bold}▸ Cloudflare Token${plain}: "; read -r cf_token < /dev/tty; done
+                        cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem"
+                    fi
+                    ;;
+                3)
+                    cert_mode="file"; echo -ne " ${bold}▸ 节点域名${plain}: "; read -r cert_domain < /dev/tty
+                    local existing_pair; existing_pair=$(find_local_valid_cert "$cert_domain")
+                    local def_c="/etc/V2bX/fullchain.cer" def_k="/etc/V2bX/cert.key"
+                    if [[ -n "$existing_pair" ]]; then
+                        def_c="${existing_pair%%|*}"; def_k="${existing_pair##*|}"
+                    fi
+                    echo -ne " ${bold}▸ 公钥路径${plain} [${def_c}]: "; read -r input_cert < /dev/tty; cert_file=${input_cert:-"$def_c"}
+                    echo -ne " ${bold}▸ 私钥路径${plain} [${def_k}]: "; read -r input_key < /dev/tty; key_file=${input_key:-"$def_k"}
+                    ;;
+                4)
+                    cert_mode="file"; echo -ne " ${bold}▸ 自签域名${plain} [cf.babymonster.cc.cd]: "; read -r input_sni < /dev/tty; cert_domain=${input_sni:-"cf.babymonster.cc.cd"}; cert_file="/etc/V2bX/${cert_domain}.cert.pem"; key_file="/etc/V2bX/${cert_domain}.key.pem"; echo -e "  ${cyan}生成 10 年自签证书...${plain}"; openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -keyout "$key_file" -out "$cert_file" -subj "/CN=${cert_domain}" >/dev/null 2>&1
+                    ;;
             esac
         fi
     fi
@@ -593,7 +888,7 @@ main_create_all() {
           Nodes: $nodes
         }' > "$tmp_json" 2>/dev/null && jq -e . "$tmp_json" >/dev/null 2>&1; then
         mv -f "$tmp_json" /etc/V2bX/config.json
-        echo -e "\n ${green}✔ 成功生成包含 ${node_count} 个节点的标准化配置 (/etc/V2bX/config.json)${plain}"
+        echo -e "\n ${green}✔ 成功生成包含 ${node_count} 个节点的标准化母版配置 (/etc/V2bX/config.json)${plain}"
     else
         rm -f "$tmp_json"
         echo -e "\n ${red}✖ 生成配置校验失败，请检查系统 jq 组件是否正常！${plain}"
@@ -607,7 +902,7 @@ main_create_all() {
         echo -e "   ${bold}  noTLSVerify: true${plain}"
     fi
 
-    restart_v2bx_service
+    choose_and_apply_run_mode
 }
 
 main_create_all
